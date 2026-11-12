@@ -1,6 +1,6 @@
 # TV Wallpaper
 
-Wallpapers (including animated GIFs), custom candle colors and ad hiding for TradingView charts, in the browser and in the TradingView desktop app. It only changes what your screen shows: nothing is sent anywhere and your TradingView settings are never changed.
+Wallpapers (including animated GIFs), custom candle colors, custom order-fill sounds and ad hiding for TradingView charts, in the browser and in the TradingView desktop app. It only changes what your screen shows: nothing is sent anywhere and your TradingView settings are never changed.
 
 ## Browser (Chrome, Edge, Brave)
 
@@ -29,3 +29,13 @@ The desktop app keeps its own wallpapers and settings, separate from the browser
 - `tvwp.user.js`: the script, used by both the browser and the desktop app
 - `TV-Wallpaper.ps1`: the desktop launcher
 - `Install-Desktop-Shortcut.bat`: another way to create the desktop shortcut from a downloaded copy
+
+## Order sounds
+
+The **Sounds** tab plays a sound when your orders fill. It works with any broker you connect inside TradingView (Paper Trading, Tradovate, NinjaTrader and others), because it listens to TradingView's own order updates. It only listens; it never places or changes orders.
+
+- A separate sound for each fill type: market, limit, stop, stop limit, take profit, stop loss and trailing stop.
+- Optional sounds for partial fills, placed, cancelled and rejected orders.
+- **One sound for all fills** switch.
+- Built-in tones, or upload your own MP3/WAV files (up to 10 MB each).
+- **Mute TradingView's own fill sound** turns off TradingView's built-in sound while this is on, and turns it back on when you switch this off.

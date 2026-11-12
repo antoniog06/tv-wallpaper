@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.1.0
+// @version      2.2.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.1.0';
+  const VERSION = '2.2.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -28,6 +28,17 @@
       volume: true
     },
     extras: { hideAds: true },
+    sounds: {
+      enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
+      slots: {
+        market: { on: true, s: 'tone:cash' }, limit: { on: true, s: 'tone:chime' },
+        stop: { on: true, s: 'tone:alarm' }, stopLimit: { on: true, s: 'tone:alarm' },
+        takeProfit: { on: true, s: 'tone:success' }, stopLoss: { on: true, s: 'tone:error' },
+        trailing: { on: true, s: 'tone:ding' },
+        partial: { on: false, s: 'tone:pop' }, placed: { on: false, s: 'tone:bloop' },
+        cancelled: { on: false, s: 'tone:click' }, rejected: { on: true, s: 'tone:buzz' }
+      }
+    },
     ui: { x: null, y: null, tab: 'wall' }
   };
   function readSettings() {
@@ -37,6 +48,11 @@
         wall: { ...DEFAULTS.wall, ...s.wall },
         candles: { ...DEFAULTS.candles, ...s.candles },
         extras: { ...DEFAULTS.extras, ...s.extras },
+        sounds: (() => {
+          const d = DEFAULTS.sounds, u = s.sounds || {}, slots = {};
+          for (const k of Object.keys(d.slots)) slots[k] = { ...d.slots[k], ...((u.slots || {})[k] || {}) };
+          return { ...d, ...u, slots };
+        })(),
         ui: { ...DEFAULTS.ui, ...s.ui }
       };
     } catch (e) {
@@ -253,17 +269,21 @@
     _db: null,
     open() {
       return this._db || (this._db = new Promise((res, rej) => {
-        const r = indexedDB.open('tvwp', 1);
-        r.onupgradeneeded = () => r.result.createObjectStore('wallpapers', { keyPath: 'id' });
+        const r = indexedDB.open('tvwp', 2);
+        r.onupgradeneeded = () => {
+          const db = r.result;
+          if (!db.objectStoreNames.contains('wallpapers')) db.createObjectStore('wallpapers', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('sounds')) db.createObjectStore('sounds', { keyPath: 'id' });
+        };
         r.onsuccess = () => res(r.result);
         r.onerror = () => rej(r.error);
       }));
     },
-    async run(mode, fn) {
+    async run(mode, fn, store = 'wallpapers') {
       const db = await this.open();
       return new Promise((res, rej) => {
-        const t = db.transaction('wallpapers', mode);
-        const req = fn(t.objectStore('wallpapers'));
+        const t = db.transaction(store, mode);
+        const req = fn(t.objectStore(store));
         t.oncomplete = () => res(req && req.result);
         t.onerror = () => rej(t.error);
         t.onabort = () => rej(t.error);
@@ -272,8 +292,230 @@
     all() { return this.run('readonly', s => s.getAll()); },
     get(id) { return this.run('readonly', s => s.get(id)); },
     put(w) { return this.run('readwrite', s => s.put(w)); },
-    del(id) { return this.run('readwrite', s => s.delete(id)); }
+    del(id) { return this.run('readwrite', s => s.delete(id)); },
+    soundsAll() { return this.run('readonly', s => s.getAll(), 'sounds'); },
+    soundGet(id) { return this.run('readonly', s => s.get(id), 'sounds'); },
+    soundPut(x) { return this.run('readwrite', s => s.put(x), 'sounds'); },
+    soundDel(id) { return this.run('readwrite', s => s.delete(id), 'sounds'); }
   };
+
+  /* =========================================================
+   * Order sounds
+   * Listens to the order updates TradingView gets from whatever broker
+   * is connected (Paper Trading, Tradovate, NinjaTrader, ...). Read-only.
+   * ======================================================= */
+  const TONES = {
+    chime: 'Chime', ding: 'Ding', cash: 'Cash register', coin: 'Coin', success: 'Success',
+    error: 'Low thud', alarm: 'Alarm', pop: 'Pop', bloop: 'Bloop', click: 'Click', buzz: 'Buzz', laser: 'Laser'
+  };
+  const SLOT_LABELS = {
+    market: 'Market fill', limit: 'Limit fill', stop: 'Stop fill', stopLimit: 'Stop limit fill',
+    takeProfit: 'Take profit fill', stopLoss: 'Stop loss fill', trailing: 'Trailing stop fill',
+    partial: 'Partial fill', placed: 'Order placed', cancelled: 'Order cancelled', rejected: 'Order rejected'
+  };
+  const FILL_SLOTS = ['market', 'limit', 'stop', 'stopLimit', 'takeProfit', 'stopLoss', 'trailing'];
+  let audioCtx = null;
+  const bufferCache = new Map();
+  let lastEvent = '';
+
+  function ctx() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    return audioCtx;
+  }
+  // Browsers only allow sound after a click or key press on the page.
+  for (const ev of ['pointerdown', 'keydown']) {
+    window.addEventListener(ev, () => { try { ctx(); } catch (e) {} }, { capture: true, passive: true });
+  }
+
+  function playTone(name, vol) {
+    const c = ctx(), t = c.currentTime;
+    const out = c.createGain();
+    out.gain.value = vol;
+    out.connect(c.destination);
+    const note = (freq, start, dur, type = 'sine', g = 0.6) => {
+      const o = c.createOscillator(), gn = c.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(freq, t + start);
+      gn.gain.setValueAtTime(0.0001, t + start);
+      gn.gain.exponentialRampToValueAtTime(g, t + start + 0.01);
+      gn.gain.exponentialRampToValueAtTime(0.0001, t + start + dur);
+      o.connect(gn).connect(out);
+      o.start(t + start);
+      o.stop(t + start + dur + 0.05);
+      return o;
+    };
+    switch (name) {
+      case 'chime': note(880, 0, 0.6); note(1320, 0.12, 0.7); break;
+      case 'ding': note(1568, 0, 0.9, 'sine', 0.7); note(3136, 0, 0.4, 'sine', 0.15); break;
+      case 'cash': note(2093, 0, 0.2, 'square', 0.2); note(2637, 0.07, 0.3, 'square', 0.2); note(3136, 0.15, 0.6, 'triangle', 0.5); break;
+      case 'coin': note(988, 0, 0.08, 'square', 0.3); note(1319, 0.08, 0.45, 'square', 0.3); break;
+      case 'success': [523, 659, 784, 1047].forEach((f, i) => note(f, i * 0.09, 0.4, 'triangle', 0.5)); break;
+      case 'error': note(220, 0, 0.35, 'triangle', 0.7); note(165, 0.15, 0.45, 'triangle', 0.7); break;
+      case 'alarm': for (let i = 0; i < 3; i++) { note(880, i * 0.22, 0.1, 'square', 0.3); note(660, i * 0.22 + 0.11, 0.1, 'square', 0.3); } break;
+      case 'pop': { const o = note(600, 0, 0.12, 'sine', 0.7); o.frequency.exponentialRampToValueAtTime(200, t + 0.12); break; }
+      case 'bloop': { const o = note(300, 0, 0.25, 'sine', 0.6); o.frequency.exponentialRampToValueAtTime(700, t + 0.2); break; }
+      case 'click': note(1800, 0, 0.03, 'square', 0.4); break;
+      case 'buzz': note(140, 0, 0.35, 'sawtooth', 0.35); note(147, 0, 0.35, 'sawtooth', 0.3); break;
+      case 'laser': { const o = note(1800, 0, 0.3, 'sawtooth', 0.3); o.frequency.exponentialRampToValueAtTime(120, t + 0.3); break; }
+      default: note(880, 0, 0.4);
+    }
+  }
+
+  async function playSound(ref, vol = S.sounds.volume) {
+    window.__tvwpLastSound = ref;   // used by the automated tests
+    try {
+      if (!ref || ref === 'none') return;
+      if (ref.startsWith('tone:')) { playTone(ref.slice(5), vol); return; }
+      if (ref.startsWith('file:')) {
+        const id = ref.slice(5);
+        let buf = bufferCache.get(id);
+        if (!buf) {
+          const rec = await DB.soundGet(id);
+          if (!rec) return;
+          buf = await ctx().decodeAudioData(await rec.blob.arrayBuffer());
+          bufferCache.set(id, buf);
+        }
+        const c = ctx(), src = c.createBufferSource(), g = c.createGain();
+        g.gain.value = vol;
+        src.buffer = buf;
+        src.connect(g).connect(c.destination);
+        src.start();
+      }
+    } catch (e) {
+      console.warn('[TV Wallpaper] sound failed', e);
+    }
+  }
+
+  function fireSlot(slot, text) {
+    lastEvent = text + ' · ' + new Date().toLocaleTimeString();
+    window.__tvwpLastEvent = { slot, text };
+    if (buildUI.onEvent) buildUI.onEvent();
+    const so = S.sounds;
+    if (!so.enabled) return;
+    if (FILL_SLOTS.includes(slot) && so.oneForAll) { playSound(so.all); return; }
+    const conf = so.slots[slot];
+    if (conf && conf.on) playSound(conf.s);
+  }
+
+  // Order fields follow TradingView's broker format:
+  // type 1 limit, 2 market, 3 stop, 4 stop-limit; side 1 buy, -1 sell;
+  // status 1 cancelled, 2 filled, 3 inactive, 4 placing, 5 rejected, 6 working;
+  // stopType 1 trailing; parentId set for take-profit / stop-loss brackets.
+  const ORDER_TYPES = { 1: 'limit', 2: 'market', 3: 'stop', 4: 'stopLimit' };
+  function categorize(o) {
+    if (o.stopType === 1) return 'trailing';
+    if (o.parentId !== undefined && o.parentId !== null && o.parentId !== '') return o.type === 1 ? 'takeProfit' : 'stopLoss';
+    return ORDER_TYPES[o.type] || 'market';
+  }
+  const trackedOrders = new Map();
+  let hookedBroker = null, hookedConnected = null, warmUntil = 0, lastOrderFillAt = 0, lastFallbackAt = 0;
+  const HOOK = {};
+
+  function handleOrder(o) {
+    if (!o || o.id === undefined || o.id === null) return;
+    const prev = trackedOrders.get(o.id);
+    const cur = { ...(prev || {}), ...o };
+    trackedOrders.set(o.id, cur);
+    if (Date.now() < warmUntil) return;  // ignore the history sent right after connecting
+    const st = cur.status, pst = prev && prev.status;
+    const cat = categorize(cur);
+    const side = cur.side === -1 ? 'Sell' : 'Buy';
+    const name = `${side} ${SLOT_LABELS[cat].replace(' fill', '')}`;
+    if (st === 2 && pst !== 2) {
+      lastOrderFillAt = Date.now();
+      if (Date.now() - lastFallbackAt < 1500) { lastFallbackAt = 0; return; } // already beeped for this fill
+      fireSlot(cat, name + ' filled');
+      return;
+    }
+    if (st !== 2 && prev && (cur.filledQty || 0) > (prev.filledQty || 0)) {
+      lastOrderFillAt = Date.now();
+      fireSlot('partial', name + ' partially filled');
+      return;
+    }
+    if (st === 1 && pst !== 1) { fireSlot('cancelled', name + ' cancelled'); return; }
+    if (st === 5 && pst !== 5) { fireSlot('rejected', name + ' rejected'); return; }
+    if (st === 6 && pst !== 6) fireSlot('placed', name + ' placed');
+  }
+  function onOrderUpdate(o) {
+    if (Array.isArray(o)) o.forEach(handleOrder); else handleOrder(o);
+  }
+  function onOrderPartial(id, data) {
+    if (id && typeof id === 'object' && data === undefined) { handleOrder(id); return; }
+    handleOrder({ ...(data || {}), id });
+  }
+  function onExecution() {
+    // Backup for brokers that report the fill only as an execution.
+    if (Date.now() < warmUntil) return;
+    setTimeout(() => {
+      if (Date.now() - lastOrderFillAt > 1200) { lastFallbackAt = Date.now(); fireSlot('market', 'Order filled'); }
+    }, 700);
+  }
+  function onFullUpdate() { warmUntil = Date.now() + 3000; }
+
+  function currentBroker() {
+    try {
+      const ab = window.TradingViewApi.trading().activeBroker();
+      return ab && typeof ab.value === 'function' ? ab.value() : ab;
+    } catch (e) { return null; }
+  }
+  function sub(b, key, fn) {
+    const d = b && b[key];
+    if (d && typeof d.subscribe === 'function') { d.subscribe(HOOK, fn); return true; }
+    return false;
+  }
+  function unsub(b, key, fn) {
+    const d = b && b[key];
+    try { if (d && typeof d.unsubscribe === 'function') d.unsubscribe(HOOK, fn); } catch (e) {}
+  }
+  function hookBroker() {
+    const b = currentBroker();
+    if (b !== hookedBroker) {
+      if (hookedBroker) {
+        unsub(hookedBroker, 'orderUpdate', onOrderUpdate);
+        unsub(hookedBroker, 'orderPartialUpdate', onOrderPartial);
+        unsub(hookedBroker, 'executionUpdate', onExecution);
+        unsub(hookedBroker, 'ordersFullUpdate', onFullUpdate);
+      }
+      hookedBroker = null;
+      trackedOrders.clear();
+      if (b && sub(b, 'orderUpdate', onOrderUpdate)) {
+        sub(b, 'orderPartialUpdate', onOrderPartial);
+        sub(b, 'executionUpdate', onExecution);
+        sub(b, 'ordersFullUpdate', onFullUpdate);
+        hookedBroker = b;
+        warmUntil = Date.now() + 3000;
+      }
+    }
+    if (hookedBroker) {
+      let conn = null;
+      try { conn = typeof hookedBroker.isConnected === 'function' ? !!hookedBroker.isConnected() : null; } catch (e) {}
+      if (conn && hookedConnected === false) { warmUntil = Date.now() + 3000; trackedOrders.clear(); }
+      hookedConnected = conn;
+    }
+  }
+
+  // TradingView's own "play sound on order execution" switch.
+  function tvSoundPref() {
+    try { return window.TradingViewApi.trading().orderExecutedSoundParams.enabled; } catch (e) { return null; }
+  }
+  function applyMute() {
+    const p = tvSoundPref();
+    if (!p || typeof p.value !== 'function') return false;
+    const want = S.sounds.enabled && S.sounds.muteTV;
+    if (want) {
+      if (p.value()) { try { localStorage.setItem('tvwp_tvsound_was_on', '1'); } catch (e) {} p.setValue(false); }
+    } else if (localStorage.getItem('tvwp_tvsound_was_on') === '1') {
+      p.setValue(true);
+      try { localStorage.removeItem('tvwp_tvsound_was_on'); } catch (e) {}
+    }
+    return true;
+  }
+  let muteApplied = false;
+  setInterval(() => {
+    hookBroker();
+    if (!muteApplied) muteApplied = applyMute();
+  }, 1500);
 
   /* =========================================================
    * Wallpaper rendering
@@ -548,6 +790,17 @@
   .presets { display: flex; flex-wrap: wrap; gap: 6px; }
   .preset { display: flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid #2a2e39; border-radius: 20px; background: #1e222d; color: #d1d4dc; font: inherit; font-size: 12px; cursor: pointer; }
   .preset i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .srow { display: grid; grid-template-columns: 18px 1fr 120px 28px; gap: 6px; align-items: center; }
+  .srow .lbl { font-size: 12px; }
+  .srow select { padding: 4px; font-size: 12px; }
+  .play { width: 28px; height: 26px; border-radius: 6px; border: 1px solid #2a2e39; background: #1e222d; color: #d1d4dc; cursor: pointer; padding: 0; }
+  .sgroup { display: grid; gap: 6px; padding: 10px; border: 1px solid #2a2e39; border-radius: 8px; background: #1e222d; }
+  .sgroup h3 { margin: 0 0 2px; font-size: 12px; color: #787b86; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 8px; border: 1px solid #2a2e39; border-radius: 14px; font-size: 12px; max-width: 100%; }
+  .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
+  .chip button { background: none; border: none; color: #787b86; cursor: pointer; font-size: 14px; line-height: 1; }
+  .last { font-size: 12px; color: #d1d4dc; }
   .detected { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
   .detected i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; border: 1px solid #2a2e39; }
   `;
@@ -574,7 +827,7 @@
   </button>
   <div class="panel">
     <header><h1>TV Wallpaper <span class="hint">v${VERSION}</span></h1><button class="x" title="Close">×</button></header>
-    <div class="tabs"><button data-tab="wall">Wallpaper</button><button data-tab="candles">Candles</button><button data-tab="extras">Extras</button></div>
+    <div class="tabs"><button data-tab="wall">Wallpaper</button><button data-tab="candles">Candles</button><button data-tab="sounds">Sounds</button><button data-tab="extras">Extras</button></div>
     <section data-tab="wall">
       <div class="row between"><span class="hint">Images, GIFs, animated WebP</span><label class="sw"><input type="checkbox" id="wEnabled"> On</label></div>
       <div class="grid" id="grid"></div>
@@ -597,6 +850,21 @@
           <option value="contain">Fit (letterbox)</option>
           <option value="stretch">Stretch</option>
         </select></div>
+    </section>
+    <section data-tab="sounds">
+      <div class="row between"><span class="hint">Plays when your orders fill</span><label class="sw"><input type="checkbox" id="sEnabled"> On</label></div>
+      <div class="field"><span>Volume <b id="sVolVal"></b></span><input type="range" id="sVol" min="0.05" max="1" step="0.05"></div>
+      <label class="sw"><input type="checkbox" id="sOne"> One sound for all fills</label>
+      <div class="sgroup" id="sFills"><h3>Fills</h3></div>
+      <div class="sgroup" id="sOther"><h3>Other order events</h3></div>
+      <div class="sgroup"><h3>Your sounds</h3>
+        <div class="chips" id="sChips"></div>
+        <label class="btn">Upload sounds (MP3, WAV…)<input type="file" id="sFile" accept="audio/*" multiple hidden></label>
+        <div class="msg" id="sMsg"></div>
+      </div>
+      <label class="sw"><input type="checkbox" id="sMuteTV"> Mute TradingView's own fill sound</label>
+      <div class="last" id="sLast"></div>
+      <div class="hint">Works with any broker you connect in TradingView (Paper Trading, Tradovate, NinjaTrader…). Click anywhere on the page once after opening it so the browser allows sound.</div>
     </section>
     <section data-tab="extras">
       <label class="sw"><input type="checkbox" id="xAds"> Hide ads on the chart</label>
@@ -647,7 +915,7 @@
     let drag = null;
     fab.addEventListener('pointerdown', e => {
       drag = { sx: e.clientX, sy: e.clientY, ox: fab.offsetLeft, oy: fab.offsetTop, moved: false };
-      fab.setPointerCapture(e.pointerId);
+      try { fab.setPointerCapture(e.pointerId); } catch (err) {}
     });
     fab.addEventListener('pointermove', e => {
       if (!drag) return;
@@ -849,8 +1117,134 @@
       $('#presets').appendChild(b);
     }
 
+    /* ---- sounds tab ---- */
+    let soundFiles = [];
+    function soundOptions(selected) {
+      const opts = ['<option value="none">None</option>', '<optgroup label="Built-in">'];
+      for (const [k, v] of Object.entries(TONES)) opts.push(`<option value="tone:${k}">${v}</option>`);
+      opts.push('</optgroup>');
+      if (soundFiles.length) {
+        opts.push('<optgroup label="Your sounds">');
+        for (const f of soundFiles) {
+          const name = f.name.replace(/[<>&"]/g, '');
+          opts.push(`<option value="file:${f.id}">${name}</option>`);
+        }
+        opts.push('</optgroup>');
+      }
+      const sel = document.createElement('select');
+      sel.innerHTML = opts.join('');
+      sel.value = selected;
+      if (sel.value !== selected) sel.value = 'none';
+      return sel;
+    }
+    function soundRow(label, getRef, setRef, getOn, setOn) {
+      const row = document.createElement('div');
+      row.className = 'srow';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      if (getOn) { cb.checked = getOn(); cb.onchange = () => { setOn(cb.checked); saveSounds(); }; }
+      else cb.style.visibility = 'hidden';
+      const lbl = document.createElement('span');
+      lbl.className = 'lbl';
+      lbl.textContent = label;
+      const sel = soundOptions(getRef());
+      sel.onchange = () => { setRef(sel.value); saveSounds(); playSound(sel.value); };
+      const play = document.createElement('button');
+      play.className = 'play';
+      play.title = 'Test';
+      play.textContent = '▶';
+      play.onclick = () => playSound(sel.value);
+      row.append(cb, lbl, sel, play);
+      return row;
+    }
+    function saveSounds() { save('sounds'); }
+    async function renderSoundUI() {
+      const so = S.sounds;
+      try { soundFiles = (await DB.soundsAll()).sort((a, b) => a.added - b.added); } catch (e) { soundFiles = []; }
+      $('#sEnabled').checked = so.enabled;
+      $('#sVol').value = so.volume;
+      $('#sVolVal').textContent = Math.round(so.volume * 100) + '%';
+      $('#sOne').checked = so.oneForAll;
+      $('#sMuteTV').checked = so.muteTV;
+      const fills = $('#sFills'), other = $('#sOther');
+      fills.querySelectorAll('.srow').forEach(r => r.remove());
+      other.querySelectorAll('.srow').forEach(r => r.remove());
+      if (so.oneForAll) {
+        fills.appendChild(soundRow('All fills', () => so.all, v => { so.all = v; }));
+      } else {
+        for (const k of FILL_SLOTS) {
+          fills.appendChild(soundRow(SLOT_LABELS[k].replace(' fill', ''), () => so.slots[k].s, v => { so.slots[k].s = v; },
+            () => so.slots[k].on, v => { so.slots[k].on = v; }));
+        }
+      }
+      for (const k of ['partial', 'placed', 'cancelled', 'rejected']) {
+        other.appendChild(soundRow(SLOT_LABELS[k].replace('Order ', '').replace(/^./, c => c.toUpperCase()), () => so.slots[k].s, v => { so.slots[k].s = v; },
+          () => so.slots[k].on, v => { so.slots[k].on = v; }));
+      }
+      const chips = $('#sChips');
+      chips.innerHTML = soundFiles.length ? '' : '<span class="hint">None yet</span>';
+      for (const f of soundFiles) {
+        const c = document.createElement('div');
+        c.className = 'chip';
+        const n = document.createElement('span');
+        n.textContent = f.name;
+        n.title = f.name;
+        const pb = document.createElement('button');
+        pb.textContent = '▶'; pb.title = 'Play';
+        pb.onclick = () => playSound('file:' + f.id);
+        const db = document.createElement('button');
+        db.textContent = '×'; db.title = 'Remove';
+        db.onclick = async () => {
+          await DB.soundDel(f.id);
+          bufferCache.delete(f.id);
+          const ref = 'file:' + f.id;
+          if (so.all === ref) so.all = 'tone:chime';
+          for (const k of Object.keys(so.slots)) if (so.slots[k].s === ref) so.slots[k].s = DEFAULTS.sounds.slots[k].s;
+          saveSounds();
+          bc && bc.postMessage({ type: 'soundlist' });
+          renderSoundUI();
+        };
+        c.append(n, pb, db);
+        chips.appendChild(c);
+      }
+      $('#sLast').textContent = lastEvent ? 'Last: ' + lastEvent : '';
+      if (panel.classList.contains('open')) placePanel();
+    }
+    buildUI.onEvent = () => { const el = $('#sLast'); if (el) el.textContent = 'Last: ' + lastEvent; };
+    $('#sEnabled').onchange = e => { S.sounds.enabled = e.target.checked; saveSounds(); applyMute(); };
+    $('#sVol').oninput = e => {
+      S.sounds.volume = parseFloat(e.target.value);
+      $('#sVolVal').textContent = Math.round(S.sounds.volume * 100) + '%';
+      saveSounds();
+    };
+    $('#sVol').onchange = () => playSound(S.sounds.oneForAll ? S.sounds.all : S.sounds.slots.market.s);
+    $('#sOne').onchange = e => { S.sounds.oneForAll = e.target.checked; saveSounds(); renderSoundUI(); };
+    $('#sMuteTV').onchange = e => {
+      S.sounds.muteTV = e.target.checked;
+      saveSounds();
+      if (!applyMute()) $('#sMsg').textContent = 'Open a chart with trading connected, then this takes effect.';
+    };
+    $('#sFile').onchange = async e => {
+      const files = [...e.target.files];
+      e.target.value = '';
+      const problems = [];
+      for (const f of files) {
+        if (f.size > 10e6) { problems.push(`${f.name} is over 10 MB`); continue; }
+        try {
+          await ctx().decodeAudioData(await f.arrayBuffer());   // make sure it plays
+          const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+          await DB.soundPut({ id, name: f.name.replace(/\.[^.]+$/, ''), blob: f, added: Date.now() });
+        } catch (err) {
+          problems.push(`Couldn't play ${f.name}`);
+        }
+      }
+      $('#sMsg').textContent = problems.join(' · ');
+      bc && bc.postMessage({ type: 'soundlist' });
+      renderSoundUI();
+    };
+
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
-    function renderAllUI() { renderWallUI(); renderCandleUI(); $('#xAds').checked = !!S.extras.hideAds; showTab(S.ui.tab || 'wall'); }
+    function renderAllUI() { renderWallUI(); renderCandleUI(); renderSoundUI(); $('#xAds').checked = !!S.extras.hideAds; showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
   }
 
@@ -864,6 +1258,8 @@
       if (t === 'wall') { loadWallpaper(); refreshWall(); }
       if (t === 'candles') { rebuildLookup(); redraw(); }
       if (t === 'extras') applyAds();
+      if (t === 'sounds') applyMute();
+      if (t === 'soundlist') bufferCache.clear();
       buildUI.refresh && buildUI.refresh();
     };
   }
