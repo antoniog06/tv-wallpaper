@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.2.0
+// @version      2.3.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.2.0';
+  const VERSION = '2.3.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -28,6 +28,7 @@
       volume: true
     },
     extras: { hideAds: true },
+    ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
       slots: {
@@ -48,6 +49,7 @@
         wall: { ...DEFAULTS.wall, ...s.wall },
         candles: { ...DEFAULTS.candles, ...s.candles },
         extras: { ...DEFAULTS.extras, ...s.extras },
+        ind: { list: Array.isArray(s.ind && s.ind.list) ? s.ind.list : [] },
         sounds: (() => {
           const d = DEFAULTS.sounds, u = s.sounds || {}, slots = {};
           for (const k of Object.keys(d.slots)) slots[k] = { ...d.slots[k], ...((u.slots || {})[k] || {}) };
@@ -518,6 +520,177 @@
   }, 1500);
 
   /* =========================================================
+   * Indicators drawn by this script.
+   * Your TradingView indicators + these never go above your plan's
+   * indicators-per-chart limit.
+   * ======================================================= */
+  const IND_TYPES = { ema: 'EMA', sma: 'SMA', wma: 'WMA', vwap: 'VWAP (daily)', bb: 'Bollinger Bands' };
+  const IND_DEFAULT_LEN = { ema: 20, sma: 50, wma: 20, vwap: 0, bb: 20 };
+  const PLAN_LIMITS = [['ultimate', 'Ultimate', 50], ['premium', 'Premium', 25], ['plus', 'Plus', 10]];
+  function planLimit() {
+    let p = '';
+    try { p = String((window.user && window.user.pro_plan) || '').toLowerCase(); } catch (e) {}
+    if (!p) return { name: 'Basic', limit: 2 };
+    for (const [k, name, limit] of PLAN_LIMITS) if (p.includes(k)) return { name, limit };
+    return { name: 'Essential', limit: 5 };
+  }
+  let nativeCount = 0;
+  function countNative() {
+    try { nativeCount = window.TradingViewApi.activeChart().getAllStudies().length; } catch (e) {}
+    return nativeCount;
+  }
+  function overlaySlots() { return Math.max(0, planLimit().limit - nativeCount); }
+  function activeOverlays() { return S.ind.list.filter(x => x.on).slice(0, overlaySlots()); }
+
+  function readBars(ms) {
+    const b = ms.bars(), f = b.firstIndex(), l = b.lastIndex();
+    const d = { idx: [], t: [], h: [], l: [], c: [], v: [] };
+    if (f === null || l === null || f === undefined) return d;
+    for (let i = f; i <= l; i++) {
+      const v = b.valueAt(i);
+      if (!v) continue;
+      d.idx.push(i); d.t.push(v[0]); d.h.push(v[2]); d.l.push(v[3]); d.c.push(v[4]); d.v.push(v[5] || 0);
+    }
+    return d;
+  }
+
+  function computeInd(ind, d) {
+    const c = d.c, n = c.length, len = Math.max(1, Math.round(ind.len || 1));
+    const line = () => new Array(n).fill(null);
+    if (ind.type === 'sma' || ind.type === 'bb') {
+      const mid = line(), up = line(), lo = line();
+      let sum = 0, sq = 0;
+      for (let i = 0; i < n; i++) {
+        sum += c[i]; sq += c[i] * c[i];
+        if (i >= len) { sum -= c[i - len]; sq -= c[i - len] * c[i - len]; }
+        if (i >= len - 1) {
+          const m = sum / len;
+          mid[i] = m;
+          const sd = Math.sqrt(Math.max(0, sq / len - m * m));
+          up[i] = m + 2 * sd; lo[i] = m - 2 * sd;
+        }
+      }
+      return ind.type === 'bb' ? [mid, up, lo] : [mid];
+    }
+    if (ind.type === 'ema') {
+      const out = line(), k = 2 / (len + 1);
+      let e = null, seed = 0;
+      for (let i = 0; i < n; i++) {
+        if (i < len) { seed += c[i]; if (i === len - 1) { e = seed / len; out[i] = e; } continue; }
+        e = c[i] * k + e * (1 - k);
+        out[i] = e;
+      }
+      return [out];
+    }
+    if (ind.type === 'wma') {
+      const out = line(), wsum = len * (len + 1) / 2;
+      for (let i = len - 1; i < n; i++) {
+        let acc = 0;
+        for (let j = 0; j < len; j++) acc += c[i - j] * (len - j);
+        out[i] = acc / wsum;
+      }
+      return [out];
+    }
+    if (ind.type === 'vwap') {
+      const out = line();
+      let pv = 0, vol = 0, day = null;
+      for (let i = 0; i < n; i++) {
+        const dt = new Date(d.t[i] * 1000), key = dt.getFullYear() * 1000 + dt.getMonth() * 40 + dt.getDate();
+        if (key !== day) { day = key; pv = 0; vol = 0; }
+        const tp = (d.h[i] + d.l[i] + c[i]) / 3, v = d.v[i] || 0;
+        pv += tp * v; vol += v;
+        out[i] = vol > 0 ? pv / vol : tp;
+      }
+      return [out];
+    }
+    return [];
+  }
+
+  let indCanvas = null, indSig = '', indData = null, indDataSig = '', indLoop = false;
+  function indPaneEl() {
+    return document.querySelector('.chart-container.active .chart-markup-table.pane .chart-gui-wrapper') ||
+           document.querySelector('.chart-markup-table.pane .chart-gui-wrapper');
+  }
+  function removeIndCanvas() { if (indCanvas) { indCanvas.remove(); indCanvas = null; } indSig = ''; }
+
+  function indFrame() {
+    const list = activeOverlays();
+    if (!list.length) { removeIndCanvas(); indLoop = false; return; }
+    requestAnimationFrame(indFrame);
+    let cw, m, ms, ts, ps;
+    try {
+      cw = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      m = cw.model(); ms = m.mainSeries(); ts = m.timeScale(); ps = ms.priceScale();
+    } catch (e) { return; }
+    const host = indPaneEl();
+    if (!host) return;
+    if (!indCanvas || !indCanvas.isConnected || indCanvas.parentElement !== host) {
+      removeIndCanvas();
+      indCanvas = document.createElement('canvas');
+      indCanvas.className = 'tvwp-ind';
+      Object.assign(indCanvas.style, { position: 'absolute', left: '0', top: '0', width: '100%', height: '100%', pointerEvents: 'none' });
+      const firstCanvas = host.querySelector(':scope > canvas');
+      if (firstCanvas) firstCanvas.after(indCanvas); else host.appendChild(indCanvas);
+    }
+    const b = ms.bars();
+    const lastV = b.size() ? b.valueAt(b.lastIndex()) : null;
+    const fv = ms.firstValue();
+    const dataSig = [b.size(), b.firstIndex(), b.lastIndex(), lastV && lastV.join(',')].join('|');
+    const W = host.clientWidth, H = host.clientHeight, dpr = window.devicePixelRatio || 1;
+    const sig = [dataSig, W, H, dpr, ts.barSpacing(), ts.indexToCoordinate(b.lastIndex() || 0),
+      ps.priceToCoordinate(fv, fv), ps.priceToCoordinate(fv * 1.01, fv), JSON.stringify(list)].join('|');
+    if (sig === indSig) return;
+    indSig = sig;
+    if (dataSig !== indDataSig) { indData = readBars(ms); indDataSig = dataSig; }
+    const cv = indCanvas;
+    if (cv.width !== Math.round(W * dpr)) cv.width = Math.round(W * dpr);
+    if (cv.height !== Math.round(H * dpr)) cv.height = Math.round(H * dpr);
+    const g = cv.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, cv.width, cv.height);
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.lineJoin = 'round';
+    const d = indData;
+    let legendY = H - 10;
+    for (const ind of list) {
+      const lines = computeInd(ind, d);
+      lines.forEach((vals, li) => {
+        g.beginPath();
+        g.strokeStyle = ind.color;
+        g.lineWidth = li === 0 ? (ind.width || 2) : Math.max(1, (ind.width || 2) - 1);
+        g.globalAlpha = li === 0 ? 1 : 0.7;
+        let pen = false;
+        for (let i = 0; i < vals.length; i++) {
+          const v = vals[i];
+          if (v === null || !isFinite(v)) { pen = false; continue; }
+          const x = ts.indexToCoordinate(d.idx[i]);
+          if (x < -50 || x > W + 50) { pen = false; continue; }
+          const y = ps.priceToCoordinate(v, fv);
+          if (pen) g.lineTo(x, y); else { g.moveTo(x, y); pen = true; }
+        }
+        g.stroke();
+      });
+      g.globalAlpha = 1;
+      g.font = '11px -apple-system, system-ui, sans-serif';
+      g.fillStyle = ind.color;
+      g.fillText(IND_TYPES[ind.type] + (ind.type === 'vwap' ? '' : ' ' + ind.len), 8, legendY);
+      legendY -= 15;
+    }
+  }
+  function startInd() {
+    if (indLoop) { indSig = ''; return; }
+    if (!activeOverlays().length) { removeIndCanvas(); return; }
+    indLoop = true;
+    requestAnimationFrame(indFrame);
+  }
+  setInterval(() => {
+    const before = nativeCount;
+    countNative();
+    if (before !== nativeCount) { startInd(); if (buildUI.onInd) buildUI.onInd(); }
+    else if (!indLoop && activeOverlays().length) startInd();
+  }, 2000);
+
+  /* =========================================================
    * Wallpaper rendering
    * ======================================================= */
   const LAYER = 'tvwp-layer';
@@ -827,7 +1000,7 @@
   </button>
   <div class="panel">
     <header><h1>TV Wallpaper <span class="hint">v${VERSION}</span></h1><button class="x" title="Close">×</button></header>
-    <div class="tabs"><button data-tab="wall">Wallpaper</button><button data-tab="candles">Candles</button><button data-tab="sounds">Sounds</button><button data-tab="extras">Extras</button></div>
+    <div class="tabs"><button data-tab="wall">Wallpaper</button><button data-tab="candles">Candles</button><button data-tab="sounds">Sounds</button><button data-tab="ind">Indicators</button><button data-tab="extras">Extras</button></div>
     <section data-tab="wall">
       <div class="row between"><span class="hint">Images, GIFs, animated WebP</span><label class="sw"><input type="checkbox" id="wEnabled"> On</label></div>
       <div class="grid" id="grid"></div>
@@ -865,6 +1038,16 @@
       <label class="sw"><input type="checkbox" id="sMuteTV"> Mute TradingView's own fill sound</label>
       <div class="last" id="sLast"></div>
       <div class="hint">Works with any broker you connect in TradingView (Paper Trading, Tradovate, NinjaTrader…). Click anywhere on the page once after opening it so the browser allows sound.</div>
+    </section>
+    <section data-tab="ind">
+      <div class="hint" id="iStatus"></div>
+      <div class="sgroup" id="iList"><h3>Your indicators</h3></div>
+      <div class="row">
+        <select id="iType"></select>
+        <button class="btn primary" id="iAdd">Add</button>
+      </div>
+      <div class="msg" id="iMsg"></div>
+      <div class="hint">Drawn on the main chart pane. Together with your TradingView indicators, these stay within your plan's indicators-per-chart limit.</div>
     </section>
     <section data-tab="extras">
       <label class="sw"><input type="checkbox" id="xAds"> Hide ads on the chart</label>
@@ -1243,8 +1426,84 @@
       renderSoundUI();
     };
 
+    /* ---- indicators tab ---- */
+    const iType = $('#iType');
+    iType.innerHTML = Object.entries(IND_TYPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+    const IND_COLORS = ['#2962ff', '#ff9800', '#e040fb', '#00bcd4', '#ffeb3b'];
+    function saveInd() { save('ind'); startInd(); renderIndUI(); }
+    function renderIndUI() {
+      countNative();
+      const plan = planLimit(), slots = overlaySlots();
+      const onCount = S.ind.list.filter(x => x.on).length;
+      $('#iStatus').textContent = `Your plan (${plan.name}) allows ${plan.limit} per chart. TradingView indicators on this chart: ${nativeCount}. Room for these: ${slots}.`;
+      const box = $('#iList');
+      box.querySelectorAll('.srow').forEach(r => r.remove());
+      if (!S.ind.list.length) {
+        const e = document.createElement('div');
+        e.className = 'srow hint';
+        e.textContent = 'None yet';
+        box.appendChild(e);
+      }
+      let shown = 0;
+      S.ind.list.forEach((ind, i) => {
+        const row = document.createElement('div');
+        row.className = 'srow';
+        row.style.gridTemplateColumns = '18px 1fr 54px 34px 22px';
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = ind.on;
+        cb.onchange = () => {
+          if (cb.checked && S.ind.list.filter(x => x.on).length >= slots) {
+            cb.checked = false;
+            $('#iMsg').textContent = slots === 0
+              ? `No room: your chart already has ${nativeCount} TradingView indicator${nativeCount === 1 ? '' : 's'} and your plan allows ${plan.limit}. Remove one in TradingView first.`
+              : `Your plan allows ${plan.limit} indicators per chart in total.`;
+            return;
+          }
+          $('#iMsg').textContent = '';
+          ind.on = cb.checked; saveInd();
+        };
+        const lbl = document.createElement('span');
+        lbl.className = 'lbl';
+        lbl.textContent = IND_TYPES[ind.type];
+        if (ind.on) { shown++; if (shown > slots) { lbl.textContent += ' (hidden: over limit)'; lbl.style.color = '#f7a600'; } }
+        const len = document.createElement('input');
+        len.type = 'number'; len.min = '1'; len.max = '500';
+        len.value = ind.len;
+        len.disabled = ind.type === 'vwap';
+        len.style.padding = '4px';
+        len.onchange = () => { const v = parseInt(len.value, 10); if (v >= 1 && v <= 500) { ind.len = v; saveInd(); } };
+        const col = document.createElement('input');
+        col.type = 'color'; col.value = ind.color;
+        col.style.width = '34px'; col.style.height = '24px';
+        col.oninput = () => { ind.color = col.value; save('ind'); startInd(); };
+        const del = document.createElement('button');
+        del.className = 'play'; del.textContent = '×'; del.title = 'Remove';
+        del.style.width = '22px';
+        del.onclick = () => { S.ind.list.splice(i, 1); $('#iMsg').textContent = ''; saveInd(); };
+        row.append(cb, lbl, len, col, del);
+        box.appendChild(row);
+      });
+      $('#iAdd').disabled = false;
+      if (panel.classList.contains('open')) placePanel();
+    }
+    buildUI.onInd = () => { if (panel.classList.contains('open')) renderIndUI(); };
+    $('#iAdd').onclick = () => {
+      const type = iType.value;
+      const room = overlaySlots() - S.ind.list.filter(x => x.on).length;
+      const ind = {
+        id: Date.now().toString(36), type, len: IND_DEFAULT_LEN[type], width: 2,
+        color: IND_COLORS[S.ind.list.length % IND_COLORS.length], on: room > 0
+      };
+      S.ind.list.push(ind);
+      $('#iMsg').textContent = room > 0 ? '' : (overlaySlots() === 0
+        ? `Added but off: your chart already uses all ${planLimit().limit} indicator slots on your plan. Remove a TradingView indicator to turn it on.`
+        : `Added but off: your plan allows ${planLimit().limit} indicators per chart in total.`);
+      saveInd();
+    };
+
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
-    function renderAllUI() { renderWallUI(); renderCandleUI(); renderSoundUI(); $('#xAds').checked = !!S.extras.hideAds; showTab(S.ui.tab || 'wall'); }
+    function renderAllUI() { renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
   }
 
@@ -1260,6 +1519,7 @@
       if (t === 'extras') applyAds();
       if (t === 'sounds') applyMute();
       if (t === 'soundlist') bufferCache.clear();
+      if (t === 'ind') startInd();
       buildUI.refresh && buildUI.refresh();
     };
   }

@@ -1,6 +1,6 @@
 # TV Wallpaper
 
-Wallpapers (including animated GIFs), custom candle colors, custom order-fill sounds and ad hiding for TradingView charts, in the browser and in the TradingView desktop app. It only changes what your screen shows: nothing is sent anywhere and your TradingView settings are never changed.
+Wallpapers (including animated GIFs), custom candle colors, custom order-fill sounds, extra indicators and ad hiding for TradingView charts, in the browser and in the TradingView desktop app. It only changes what your screen shows: nothing is sent anywhere and your TradingView settings are never changed.
 
 ## Browser (Chrome, Edge, Brave)
 
@@ -39,3 +39,7 @@ The **Sounds** tab plays a sound when your orders fill. It works with any broker
 - **One sound for all fills** switch.
 - Built-in tones, or upload your own MP3/WAV files (up to 10 MB each).
 - **Mute TradingView's own fill sound** turns off TradingView's built-in sound while this is on, and turns it back on when you switch this off.
+
+## Indicators
+
+The **Indicators** tab draws EMA, SMA, WMA, daily VWAP and Bollinger Bands on the main chart pane, with your own length and color. Together with the indicators you add in TradingView, they stay within your plan's indicators-per-chart limit (Basic 2, Essential 5, Plus 10, Premium 25, Ultimate 50).
