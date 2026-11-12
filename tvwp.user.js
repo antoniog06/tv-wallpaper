@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.4.0
+// @version      2.5.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.4.0';
+  const VERSION = '2.5.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -524,8 +524,8 @@
    * Your TradingView indicators + these never go above your plan's
    * indicators-per-chart limit.
    * ======================================================= */
-  const IND_TYPES = { ema: 'EMA', sma: 'SMA', wma: 'WMA', vwap: 'VWAP (daily)', bb: 'Bollinger Bands' };
-  const IND_DEFAULT_LEN = { ema: 20, sma: 50, wma: 20, vwap: 0, bb: 20 };
+  const IND_TYPES = { ema: 'EMA', sma: 'SMA', wma: 'WMA', vwap: 'VWAP (daily)', bb: 'Bollinger Bands', qt: 'Quarterly Theory', po3: 'Power of Three (HTF candles)' };
+  const IND_DEFAULT_LEN = { ema: 20, sma: 50, wma: 20, vwap: 0, bb: 20, qt: 0, po3: 0 };
   const PLAN_LIMITS = [['ultimate', 'Ultimate', 50], ['premium', 'Premium', 25], ['plus', 'Plus', 10]];
   function planLimit() {
     let p = '';
@@ -558,7 +558,39 @@
       if (!v) continue;
       d.idx.push(i); d.t.push(v[0]); d.o.push(v[1]); d.h.push(v[2]); d.l.push(v[3]); d.c.push(v[4]); d.v.push(v[5] || 0);
     }
+    addNyTime(d);
     return d;
+  }
+
+  // New York wall-clock time for each bar. Futures trading days start at 18:00 New York time.
+  const nyFmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hourCycle: 'h23',
+    year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric'
+  });
+  const nyOffsetCache = new Map();
+  function nyOffset(ms) {
+    const key = Math.floor(ms / 3600000);
+    let off = nyOffsetCache.get(key);
+    if (off === undefined) {
+      const p = {};
+      for (const x of nyFmt.formatToParts(new Date(key * 3600000))) p[x.type] = +x.value;
+      off = Date.UTC(p.year, p.month - 1, p.day, p.hour % 24, p.minute) - key * 3600000;
+      if (nyOffsetCache.size > 5000) nyOffsetCache.clear();
+      nyOffsetCache.set(key, off);
+    }
+    return off;
+  }
+  const DAY = 86400000, SHIFT = 6 * 3600000;
+  function addNyTime(d) {
+    const n = d.t.length;
+    d.wall = new Array(n); d.tday = new Array(n); d.tmin = new Array(n); d.tdow = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const ms = d.t[i] * 1000, wall = ms + nyOffset(ms), sh = wall + SHIFT;
+      d.wall[i] = wall;
+      d.tday[i] = Math.floor(sh / DAY);                       // trading day number
+      d.tmin[i] = Math.floor((sh - d.tday[i] * DAY) / 60000); // minutes since 18:00
+      d.tdow[i] = (d.tday[i] + 4) % 7;                        // weekday of the trading day, 0 = Sunday
+    }
   }
 
   const SOURCES = { close: 'Close', open: 'Open', high: 'High', low: 'Low', hl2: 'HL2', hlc3: 'HLC3', ohlc4: 'OHLC4' };
@@ -568,18 +600,34 @@
     vwap: [['src', 'Source', 'src'], ['anchor', 'Anchor', 'select', { session: 'Session (daily)', week: 'Week', month: 'Month' }],
       ['bandMult', 'Bands (std dev, 0 = off)', 'float', 0, 5], ['color2', 'Band color', 'color']],
     bb: [['len', 'Length', 'int', 1, 500], ['src', 'Source', 'src'], ['mult', 'Std dev', 'float', 0.1, 10],
-      ['offset', 'Offset', 'int', -200, 200], ['color2', 'Band color', 'color'], ['fill', 'Fill opacity', 'float', 0, 1]]
+      ['offset', 'Offset', 'int', -200, 200], ['color2', 'Band color', 'color'], ['fill', 'Fill opacity', 'float', 0, 1]],
+    qt: [['daysBack', 'Trading days to show', 'int', 1, 10], ['showSessions', '6-hour sessions', 'bool'],
+      ['show90', '90-minute quarters', 'bool'], ['showMicro', '22.5-minute quarters', 'bool'],
+      ['shade', 'Shade sessions', 'bool'], ['labels', 'Labels', 'bool'], ['fill', 'Shade opacity', 'float', 0, 0.5],
+      ['showTO', 'Daily & session True Opens', 'bool'], ['showWeekTO', 'Weekly True Open', 'bool'],
+      ['color2', 'True Open color', 'color']],
+    po3: [['htf', 'Timeframe', 'select', { 60: '1 hour', 240: '4 hours', D: 'Daily', W: 'Weekly' }],
+      ['count', 'Candles', 'int', 1, 6], ['cw', 'Candle width', 'int', 4, 40], ['gap', 'Distance from price', 'int', 10, 300],
+      ['upColor', 'Up candle', 'color'], ['downColor', 'Down candle', 'color'], ['showLevels', 'Open / High / Low lines', 'bool']]
+  };
+  const TYPE_DEFAULTS = {
+    qt: { color: '#787b86', color2: '#ffeb3b', daysBack: 3, showSessions: true, show90: true, showMicro: false,
+      shade: true, labels: true, fill: 0.06, showTO: true, showWeekTO: true, width: 1, style: 'dashed' },
+    po3: { color: '#b2b5be', htf: '240', count: 3, cw: 12, gap: 40, upColor: '#26a69a', downColor: '#ef5350',
+      showLevels: true, width: 1, style: 'dotted' }
   };
   const STYLE_FIELDS = [['color', 'Color', 'color'], ['width', 'Line width', 'select', { 1: '1', 2: '2', 3: '3', 4: '4' }],
     ['style', 'Line style', 'select', { solid: 'Solid', dashed: 'Dashed', dotted: 'Dotted' }]];
   function normInd(ind) {
     const base = { len: IND_DEFAULT_LEN[ind.type] || 20, src: ind.type === 'vwap' ? 'hlc3' : 'close', offset: 0,
       width: 2, style: 'solid', color: '#2962ff', color2: ind.color || '#2962ff', mult: 2, fill: 0.08,
-      anchor: 'session', bandMult: 0 };
+      anchor: 'session', bandMult: 0, ...(TYPE_DEFAULTS[ind.type] || {}) };
     for (const k of Object.keys(base)) if (ind[k] === undefined || ind[k] === null || ind[k] === '') ind[k] = base[k];
     return ind;
   }
   function indSummary(ind) {
+    if (ind.type === 'qt') return 'Quarterly Theory';
+    if (ind.type === 'po3') return 'PO3 ' + ({ 60: '1H', 240: '4H', D: 'D', W: 'W' }[ind.htf] || ind.htf);
     if (ind.type === 'vwap') return `VWAP ${ind.anchor === 'session' ? 'daily' : ind.anchor}${ind.bandMult > 0 ? ' ±' + ind.bandMult : ''}`;
     const src = ind.src !== 'close' ? ' ' + ind.src : '';
     return `${IND_TYPES[ind.type].replace(' (daily)', '')} ${ind.len}${ind.type === 'bb' ? ' ' + ind.mult : ''}${src}`;
@@ -658,6 +706,179 @@
     return { lines: [], fill: null };
   }
 
+  /* ---- Quarterly Theory (Daye) ---- */
+  const SESSION_NAMES = ['Asia', 'London', 'NY AM', 'NY PM'];
+  const SESSION_TINT = ['#7e57c2', '#26c6da', '#66bb6a', '#ffa726'];
+  function hexRgba(hex, a) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return hex;
+    const v = parseInt(m[1], 16);
+    return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${a})`;
+  }
+  function drawQT(g, ind, d, env) {
+    const { ts, ps, fv, W, H } = env, n = d.t.length;
+    if (!n) return;
+    const bs = ts.barSpacing();
+    const lastDay = d.tday[n - 1], firstDay = lastDay - (Math.max(1, ind.daysBack) - 1);
+    const X = i => ts.indexToCoordinate(d.idx[i]);
+    const DASH = { solid: [], dashed: [6, 4], dotted: [1.5, 3] };
+    // segments for each level: session (6h), quarter (90m), micro (22.5m)
+    const key = (i, lvl) => d.tday[i] * 1000 + (lvl === 0 ? Math.floor(d.tmin[i] / 360)
+      : lvl === 1 ? Math.floor(d.tmin[i] / 90) : Math.floor(d.tmin[i] / 22.5));
+    const segs = [[], [], []];
+    for (let lvl = 0; lvl < 3; lvl++) {
+      let cur = null;
+      for (let i = 0; i < n; i++) {
+        if (d.tday[i] < firstDay) continue;
+        const k = key(i, lvl);
+        if (!cur || cur.k !== k) { cur = { k, s: i, e: i }; segs[lvl].push(cur); } else cur.e = i;
+      }
+    }
+    const visible = sg => { const x0 = X(sg.s) - bs / 2, x1 = X(sg.e) + bs / 2; return x1 >= 0 && x0 <= W ? [x0, x1] : null; };
+    // shading per 6h session
+    if (ind.shade && ind.showSessions) {
+      for (const sg of segs[0]) {
+        const v = visible(sg); if (!v) continue;
+        g.fillStyle = hexRgba(SESSION_TINT[Math.floor(d.tmin[sg.s] / 360)], Math.max(0, +ind.fill));
+        g.fillRect(v[0], 0, v[1] - v[0], H);
+      }
+    }
+    // separators (micro faint, 90m dotted, session solid)
+    const sep = (lvl, alpha, dash, width) => {
+      g.strokeStyle = hexRgba(ind.color, alpha);
+      g.setLineDash(dash); g.lineWidth = width;
+      g.beginPath();
+      for (const sg of segs[lvl]) {
+        const x = Math.round(X(sg.s) - bs / 2) + 0.5;
+        if (x < 0 || x > W) continue;
+        g.moveTo(x, 0); g.lineTo(x, H);
+      }
+      g.stroke();
+    };
+    if (ind.showMicro) sep(2, 0.25, [1, 4], 1);
+    if (ind.show90) sep(1, 0.55, [2, 3], 1);
+    if (ind.showSessions) sep(0, 0.9, [], Math.max(1, +ind.width));
+    g.setLineDash([]);
+    // labels
+    if (ind.labels) {
+      g.font = '10px -apple-system, system-ui, sans-serif';
+      g.textBaseline = 'top';
+      if (ind.showSessions) for (const sg of segs[0]) {
+        const v = visible(sg); if (!v || v[1] - v[0] < 30) continue;
+        const si = Math.floor(d.tmin[sg.s] / 360);
+        g.fillStyle = hexRgba(SESSION_TINT[si], 0.95);
+        g.fillText(`${SESSION_NAMES[si]} · Q${si + 1}`, Math.max(v[0] + 3, 3), 4);
+      }
+      if (ind.show90) for (const sg of segs[1]) {
+        const v = visible(sg); if (!v || v[1] - v[0] < 18) continue;
+        g.fillStyle = hexRgba(ind.color, 0.9);
+        g.fillText('q' + (Math.floor(d.tmin[sg.s] / 90) % 4 + 1), Math.max(v[0] + 3, 3), 18);
+      }
+      g.textBaseline = 'alphabetic';
+    }
+    // True Opens: line from the open of the 2nd quarter to the end of its cycle
+    const toLine = (i0, i1, label, dash, width) => {
+      const y = Math.round(ps.priceToCoordinate(d.o[i0], fv)) + 0.5;
+      const x0 = X(i0) - bs / 2, x1 = i1 === n - 1 ? W : X(i1) + bs / 2;
+      if (x1 < 0 || x0 > W) return;
+      g.strokeStyle = ind.color2; g.lineWidth = width; g.setLineDash(dash);
+      g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+      g.setLineDash([]);
+      if (ind.labels) {
+        g.font = '10px -apple-system, system-ui, sans-serif';
+        g.fillStyle = ind.color2;
+        g.fillText(label, Math.max(x0 + 2, 2), y - 3);
+      }
+    };
+    if (ind.showTO) {
+      // daily True Open = 00:00 New York (start of London, the day's 2nd quarter)
+      const days = new Map();
+      for (let i = 0; i < n; i++) {
+        if (d.tday[i] < firstDay) continue;
+        let r = days.get(d.tday[i]);
+        if (!r) days.set(d.tday[i], r = { to: -1, end: i });
+        r.end = i;
+        if (r.to < 0 && d.tmin[i] >= 360) r.to = i;
+      }
+      for (const r of days.values()) if (r.to >= 0) toLine(r.to, r.end, 'Daily TO', DASH[ind.style] || [], Math.max(1, +ind.width) + 0.5);
+      // session True Open = start of each session's 2nd 90-minute quarter
+      for (const sg of segs[0]) {
+        let to = -1;
+        for (let i = sg.s; i <= sg.e; i++) if (d.tmin[i] % 360 >= 90) { to = i; break; }
+        if (to >= 0) toLine(to, sg.e, 'Session TO', [2, 3], 1);
+      }
+    }
+    if (ind.showWeekTO) {
+      // weekly True Open = Monday 18:00 New York (start of the week's 2nd day, Tuesday's session)
+      let wk = -1;
+      for (let i = n - 1; i >= 0; i--) {
+        if (d.tdow[i] === 2 && (i === 0 || d.tday[i - 1] !== d.tday[i])) { wk = i; break; }
+        if (d.tdow[i] === 1 || d.tdow[i] === 0) break;   // still Monday: this week's TO isn't here yet
+      }
+      if (wk >= 0) toLine(wk, n - 1, 'Weekly TO', [8, 4], Math.max(1, +ind.width) + 1);
+    }
+  }
+
+  /* ---- Power of Three: higher-timeframe candles to the right of price ---- */
+  function htfKey(d, i, htf) {
+    const sh = d.wall[i] + SHIFT;
+    if (htf === 'W') return Math.floor((Math.floor(sh / DAY) + 3) / 7);  // weeks start Sunday 18:00
+    if (htf === 'D') return d.tday[i];
+    const mins = +htf || 240;
+    return Math.floor(sh / (mins * 60000));                         // 4H: 18:00, 22:00, 02:00 ...
+  }
+  function drawPO3(g, ind, d, env) {
+    const { ts, ps, fv, W } = env, n = d.t.length;
+    if (!n) return;
+    const candles = [];
+    let cur = null;
+    for (let i = 0; i < n; i++) {
+      const k = htfKey(d, i, ind.htf);
+      if (!cur || cur.k !== k) { cur = { k, s: i, o: d.o[i], h: d.h[i], l: d.l[i], c: d.c[i] }; candles.push(cur); }
+      else { cur.h = Math.max(cur.h, d.h[i]); cur.l = Math.min(cur.l, d.l[i]); cur.c = d.c[i]; }
+    }
+    const show = candles.slice(-Math.max(1, ind.count));
+    const Y = p => ps.priceToCoordinate(p, fv);
+    const lastX = ts.indexToCoordinate(d.idx[n - 1]);
+    const cw = Math.max(4, +ind.cw), step = cw + Math.max(4, Math.round(cw * 0.6));
+    const live = show[show.length - 1];
+    if (ind.showLevels && live) {
+      const x0 = ts.indexToCoordinate(d.idx[live.s]);
+      const DASH = { solid: [], dashed: [6, 4], dotted: [1.5, 3] };
+      g.setLineDash(DASH[ind.style] || []);
+      g.lineWidth = Math.max(1, +ind.width);
+      g.font = '10px -apple-system, system-ui, sans-serif';
+      for (const [p, name] of [[live.o, 'Open'], [live.h, 'High'], [live.l, 'Low']]) {
+        const y = Math.round(Y(p)) + 0.5;
+        g.strokeStyle = hexRgba(ind.color, 0.8);
+        g.beginPath(); g.moveTo(Math.max(0, x0), y); g.lineTo(Math.min(W, lastX + ind.gap - 6), y); g.stroke();
+        g.fillStyle = hexRgba(ind.color, 0.9);
+        g.fillText(`HTF ${name}`, Math.max(2, x0 + 2), y - 3);
+      }
+      g.setLineDash([]);
+    }
+    let x = lastX + Math.max(10, +ind.gap);
+    for (const c of show) {
+      const up = c.c >= c.o, col = up ? ind.upColor : ind.downColor;
+      const cx = Math.round(x + cw / 2) + 0.5;
+      g.strokeStyle = col; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(cx, Y(c.h)); g.lineTo(cx, Y(c.l)); g.stroke();
+      const yo = Y(c.o), yc = Y(c.c);
+      g.fillStyle = col;
+      g.fillRect(Math.round(x), Math.min(yo, yc), cw, Math.max(1, Math.abs(yc - yo)));
+      x += step;
+    }
+    if (show.length) {
+      g.font = '10px -apple-system, system-ui, sans-serif';
+      g.fillStyle = hexRgba(ind.color, 0.9);
+      const label = ({ 60: '1H', 240: '4H', D: 'Daily', W: 'Weekly' }[ind.htf] || ind.htf);
+      const top = Math.min(...show.map(c => Y(c.h)));
+      g.fillText(label, lastX + Math.max(10, +ind.gap), top - 6);
+    }
+  }
+  const IND_DRAW = { qt: drawQT, po3: drawPO3 };
+  window.__tvwpTest = { addNyTime, htfKey };   // used by the automated tests
+
   let indCanvas = null, indSig = '', indData = null, indDataSig = '', indLoop = false;
   function indPaneEl() {
     return document.querySelector('.chart-container.active .chart-markup-table.pane .chart-gui-wrapper') ||
@@ -712,6 +933,17 @@
       return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${a})`;
     };
     for (const ind of list) {
+      if (IND_DRAW[ind.type]) {
+        normInd(ind);
+        g.save();
+        try { IND_DRAW[ind.type](g, ind, d, { ts, ps, fv, W, H }); } catch (e) { console.warn('[TV Wallpaper] indicator failed', e); }
+        g.restore();
+        g.font = '11px -apple-system, system-ui, sans-serif';
+        g.fillStyle = ind.type === 'qt' ? ind.color2 : ind.color;
+        g.fillText(indSummary(ind), 8, legendY);
+        legendY -= 15;
+        continue;
+      }
       const res = computeInd(ind, d);
       const off = Math.round(ind.offset || 0);
       const pts = res.lines.map(vals => vals.map((v, i) => {
@@ -1521,7 +1753,13 @@
         const l = document.createElement('label');
         l.textContent = label;
         let inp;
-        if (kind === 'int' || kind === 'float') {
+        if (kind === 'bool') {
+          inp = document.createElement('input');
+          inp.type = 'checkbox';
+          inp.checked = !!ind[key];
+          inp.style.justifySelf = 'start';
+          inp.onchange = () => { ind[key] = inp.checked; save('ind'); startInd(); };
+        } else if (kind === 'int' || kind === 'float') {
           inp = document.createElement('input');
           inp.type = 'number'; inp.min = a; inp.max = b;
           inp.step = kind === 'int' ? '1' : '0.05';
@@ -1618,11 +1856,11 @@
       const type = iType.value;
       const room = overlaySlots() - S.ind.list.filter(x => x.on).length;
       const ind = {
-        id: Date.now().toString(36), type, len: IND_DEFAULT_LEN[type], width: 2,
-        color: IND_COLORS[S.ind.list.length % IND_COLORS.length], on: room > 0
+        id: Date.now().toString(36), type, len: IND_DEFAULT_LEN[type], width: (TYPE_DEFAULTS[type] && TYPE_DEFAULTS[type].width) || 2,
+        on: room > 0
       };
+      if (!TYPE_DEFAULTS[type]) { ind.color = IND_COLORS[S.ind.list.length % IND_COLORS.length]; ind.color2 = ind.color; }
       normInd(ind);
-      ind.color2 = ind.color;
       openIndId = ind.id;
       S.ind.list.push(ind);
       $('#iMsg').textContent = room > 0 ? '' : (overlaySlots() === 0

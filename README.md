@@ -43,3 +43,8 @@ The **Sounds** tab plays a sound when your orders fill. It works with any broker
 ## Indicators
 
 The **Indicators** tab draws EMA, SMA, WMA, daily VWAP and Bollinger Bands on the main chart pane, with their own settings (length, source, offset, color, line width and style, Bollinger multiplier and fill, VWAP anchor and bands). Together with the indicators you add in TradingView, the ones showing stay within your plan's indicators-per-chart limit, the same way TradingView counts hidden indicators as not taking a slot (Basic 2, Essential 5, Plus 10, Premium 25, Ultimate 50).
+
+Also in the Indicators tab, written for this project (not copied from any TradingView script):
+
+- **Quarterly Theory**: Daye's time quarters in New York time. 6-hour sessions (Asia, London, NY AM, NY PM), 90-minute and optional 22.5-minute quarters, session shading and labels, plus daily (00:00), session (2nd 90-minute quarter) and weekly (Monday 18:00) True Opens.
+- **Power of Three**: the last few 1H / 4H / daily / weekly candles drawn to the right of price, with the current higher-timeframe candle's open, high and low lines.
