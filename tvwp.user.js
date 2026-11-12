@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.3.1
+// @version      2.4.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.3.1';
+  const VERSION = '2.4.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -551,21 +551,58 @@
 
   function readBars(ms) {
     const b = ms.bars(), f = b.firstIndex(), l = b.lastIndex();
-    const d = { idx: [], t: [], h: [], l: [], c: [], v: [] };
+    const d = { idx: [], t: [], o: [], h: [], l: [], c: [], v: [] };
     if (f === null || l === null || f === undefined) return d;
     for (let i = f; i <= l; i++) {
       const v = b.valueAt(i);
       if (!v) continue;
-      d.idx.push(i); d.t.push(v[0]); d.h.push(v[2]); d.l.push(v[3]); d.c.push(v[4]); d.v.push(v[5] || 0);
+      d.idx.push(i); d.t.push(v[0]); d.o.push(v[1]); d.h.push(v[2]); d.l.push(v[3]); d.c.push(v[4]); d.v.push(v[5] || 0);
     }
     return d;
   }
 
+  const SOURCES = { close: 'Close', open: 'Open', high: 'High', low: 'Low', hl2: 'HL2', hlc3: 'HLC3', ohlc4: 'OHLC4' };
+  const MA_FIELDS = [['len', 'Length', 'int', 1, 500], ['src', 'Source', 'src'], ['offset', 'Offset', 'int', -200, 200]];
+  const IND_FIELDS = {
+    ema: MA_FIELDS, sma: MA_FIELDS, wma: MA_FIELDS,
+    vwap: [['src', 'Source', 'src'], ['anchor', 'Anchor', 'select', { session: 'Session (daily)', week: 'Week', month: 'Month' }],
+      ['bandMult', 'Bands (std dev, 0 = off)', 'float', 0, 5], ['color2', 'Band color', 'color']],
+    bb: [['len', 'Length', 'int', 1, 500], ['src', 'Source', 'src'], ['mult', 'Std dev', 'float', 0.1, 10],
+      ['offset', 'Offset', 'int', -200, 200], ['color2', 'Band color', 'color'], ['fill', 'Fill opacity', 'float', 0, 1]]
+  };
+  const STYLE_FIELDS = [['color', 'Color', 'color'], ['width', 'Line width', 'select', { 1: '1', 2: '2', 3: '3', 4: '4' }],
+    ['style', 'Line style', 'select', { solid: 'Solid', dashed: 'Dashed', dotted: 'Dotted' }]];
+  function normInd(ind) {
+    const base = { len: IND_DEFAULT_LEN[ind.type] || 20, src: ind.type === 'vwap' ? 'hlc3' : 'close', offset: 0,
+      width: 2, style: 'solid', color: '#2962ff', color2: ind.color || '#2962ff', mult: 2, fill: 0.08,
+      anchor: 'session', bandMult: 0 };
+    for (const k of Object.keys(base)) if (ind[k] === undefined || ind[k] === null || ind[k] === '') ind[k] = base[k];
+    return ind;
+  }
+  function indSummary(ind) {
+    if (ind.type === 'vwap') return `VWAP ${ind.anchor === 'session' ? 'daily' : ind.anchor}${ind.bandMult > 0 ? ' ±' + ind.bandMult : ''}`;
+    const src = ind.src !== 'close' ? ' ' + ind.src : '';
+    return `${IND_TYPES[ind.type].replace(' (daily)', '')} ${ind.len}${ind.type === 'bb' ? ' ' + ind.mult : ''}${src}`;
+  }
+  function srcArr(d, src) {
+    switch (src) {
+      case 'open': return d.o;
+      case 'high': return d.h;
+      case 'low': return d.l;
+      case 'hl2': return d.h.map((h, i) => (h + d.l[i]) / 2);
+      case 'hlc3': return d.h.map((h, i) => (h + d.l[i] + d.c[i]) / 3);
+      case 'ohlc4': return d.o.map((o, i) => (o + d.h[i] + d.l[i] + d.c[i]) / 4);
+      default: return d.c;
+    }
+  }
+
+  // Returns { lines: [main, ...bands], fill: [upper, lower] | null }
   function computeInd(ind, d) {
-    const c = d.c, n = c.length, len = Math.max(1, Math.round(ind.len || 1));
+    normInd(ind);
+    const c = srcArr(d, ind.src), n = c.length, len = Math.max(1, Math.round(ind.len || 1));
     const line = () => new Array(n).fill(null);
     if (ind.type === 'sma' || ind.type === 'bb') {
-      const mid = line(), up = line(), lo = line();
+      const mid = line(), up = line(), lo = line(), k = ind.type === 'bb' ? +ind.mult : 0;
       let sum = 0, sq = 0;
       for (let i = 0; i < n; i++) {
         sum += c[i]; sq += c[i] * c[i];
@@ -574,10 +611,10 @@
           const m = sum / len;
           mid[i] = m;
           const sd = Math.sqrt(Math.max(0, sq / len - m * m));
-          up[i] = m + 2 * sd; lo[i] = m - 2 * sd;
+          up[i] = m + k * sd; lo[i] = m - k * sd;
         }
       }
-      return ind.type === 'bb' ? [mid, up, lo] : [mid];
+      return ind.type === 'bb' ? { lines: [mid, up, lo], fill: [1, 2] } : { lines: [mid], fill: null };
     }
     if (ind.type === 'ema') {
       const out = line(), k = 2 / (len + 1);
@@ -587,7 +624,7 @@
         e = c[i] * k + e * (1 - k);
         out[i] = e;
       }
-      return [out];
+      return { lines: [out], fill: null };
     }
     if (ind.type === 'wma') {
       const out = line(), wsum = len * (len + 1) / 2;
@@ -596,21 +633,29 @@
         for (let j = 0; j < len; j++) acc += c[i - j] * (len - j);
         out[i] = acc / wsum;
       }
-      return [out];
+      return { lines: [out], fill: null };
     }
     if (ind.type === 'vwap') {
-      const out = line();
-      let pv = 0, vol = 0, day = null;
+      const out = line(), up = line(), lo = line(), k = +ind.bandMult || 0;
+      let pv = 0, pv2 = 0, vol = 0, key0 = null;
       for (let i = 0; i < n; i++) {
-        const dt = new Date(d.t[i] * 1000), key = dt.getFullYear() * 1000 + dt.getMonth() * 40 + dt.getDate();
-        if (key !== day) { day = key; pv = 0; vol = 0; }
-        const tp = (d.h[i] + d.l[i] + c[i]) / 3, v = d.v[i] || 0;
-        pv += tp * v; vol += v;
-        out[i] = vol > 0 ? pv / vol : tp;
+        const dt = new Date(d.t[i] * 1000);
+        const key = ind.anchor === 'month' ? dt.getFullYear() * 12 + dt.getMonth()
+          : ind.anchor === 'week' ? Math.floor((d.t[i] / 86400 + 3) / 7)
+          : dt.getFullYear() * 1000 + dt.getMonth() * 40 + dt.getDate();
+        if (key !== key0) { key0 = key; pv = 0; pv2 = 0; vol = 0; }
+        const tp = c[i], v = d.v[i] || 0;
+        pv += tp * v; pv2 += tp * tp * v; vol += v;
+        const vw = vol > 0 ? pv / vol : tp;
+        out[i] = vw;
+        if (k > 0) {
+          const sd = vol > 0 ? Math.sqrt(Math.max(0, pv2 / vol - vw * vw)) : 0;
+          up[i] = vw + k * sd; lo[i] = vw - k * sd;
+        }
       }
-      return [out];
+      return k > 0 ? { lines: [out, up, lo], fill: null } : { lines: [out], fill: null };
     }
-    return [];
+    return { lines: [], fill: null };
   }
 
   let indCanvas = null, indSig = '', indData = null, indDataSig = '', indLoop = false;
@@ -659,28 +704,52 @@
     g.lineJoin = 'round';
     const d = indData;
     let legendY = H - 10;
+    const DASH = { solid: [], dashed: [6, 4], dotted: [1.5, 3] };
+    const hexA = (hex, a) => {
+      const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+      if (!m) return hex;
+      const v = parseInt(m[1], 16);
+      return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${a})`;
+    };
     for (const ind of list) {
-      const lines = computeInd(ind, d);
-      lines.forEach((vals, li) => {
+      const res = computeInd(ind, d);
+      const off = Math.round(ind.offset || 0);
+      const pts = res.lines.map(vals => vals.map((v, i) => {
+        if (v === null || !isFinite(v)) return null;
+        const x = ts.indexToCoordinate(d.idx[i] + off);
+        if (x < -50 || x > W + 50) return null;
+        return [x, ps.priceToCoordinate(v, fv)];
+      }));
+      if (res.fill && ind.fill > 0) {
+        const [a, b] = res.fill, top = [], bot = [];
+        for (let i = 0; i < pts[a].length; i++) {
+          if (pts[a][i] && pts[b][i]) { top.push(pts[a][i]); bot.push(pts[b][i]); }
+        }
+        if (top.length > 1) {
+          g.beginPath();
+          top.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y));
+          for (let i = bot.length - 1; i >= 0; i--) g.lineTo(bot[i][0], bot[i][1]);
+          g.closePath();
+          g.fillStyle = hexA(ind.color2, Math.min(1, Math.max(0, +ind.fill)));
+          g.fill();
+        }
+      }
+      pts.forEach((line, li) => {
         g.beginPath();
-        g.strokeStyle = ind.color;
-        g.lineWidth = li === 0 ? (ind.width || 2) : Math.max(1, (ind.width || 2) - 1);
-        g.globalAlpha = li === 0 ? 1 : 0.7;
+        g.setLineDash(DASH[ind.style] || []);
+        g.strokeStyle = li === 0 ? ind.color : ind.color2;
+        g.lineWidth = li === 0 ? (+ind.width || 2) : Math.max(1, (+ind.width || 2) - 1);
         let pen = false;
-        for (let i = 0; i < vals.length; i++) {
-          const v = vals[i];
-          if (v === null || !isFinite(v)) { pen = false; continue; }
-          const x = ts.indexToCoordinate(d.idx[i]);
-          if (x < -50 || x > W + 50) { pen = false; continue; }
-          const y = ps.priceToCoordinate(v, fv);
-          if (pen) g.lineTo(x, y); else { g.moveTo(x, y); pen = true; }
+        for (const p of line) {
+          if (!p) { pen = false; continue; }
+          if (pen) g.lineTo(p[0], p[1]); else { g.moveTo(p[0], p[1]); pen = true; }
         }
         g.stroke();
       });
-      g.globalAlpha = 1;
+      g.setLineDash([]);
       g.font = '11px -apple-system, system-ui, sans-serif';
       g.fillStyle = ind.color;
-      g.fillText(IND_TYPES[ind.type] + (ind.type === 'vwap' ? '' : ' ' + ind.len), 8, legendY);
+      g.fillText(indSummary(ind), 8, legendY);
       legendY -= 15;
     }
   }
@@ -981,6 +1050,12 @@
   .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
   .chip button { background: none; border: none; color: #787b86; cursor: pointer; font-size: 14px; line-height: 1; }
   .last { font-size: 12px; color: #d1d4dc; }
+  .iset { display: grid; grid-template-columns: 1fr 120px; gap: 6px 8px; align-items: center; padding: 8px; margin: 0 0 4px 24px; border-left: 2px solid #2962ff; background: #131722; border-radius: 0 6px 6px 0; }
+  .iset label { font-size: 12px; color: #787b86; }
+  .iset input[type=number], .iset select { width: 100%; padding: 4px; font-size: 12px; }
+  .iset input[type=color] { width: 44px; height: 24px; }
+  .gear { width: 26px; height: 24px; border-radius: 6px; border: 1px solid #2a2e39; background: #1e222d; color: #d1d4dc; cursor: pointer; padding: 0; font-size: 13px; }
+  .gear.on { border-color: #2962ff; color: #fff; }
   .detected { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
   .detected i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; border: 1px solid #2a2e39; }
   `;
@@ -1438,6 +1513,50 @@
     iType.innerHTML = Object.entries(IND_TYPES).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
     const IND_COLORS = ['#2962ff', '#ff9800', '#e040fb', '#00bcd4', '#ffeb3b'];
     function saveInd() { save('ind'); startInd(); renderIndUI(); }
+    let openIndId = null;
+    function indSettingsBox(ind, lbl, rowColor) {
+      const box = document.createElement('div');
+      box.className = 'iset srow';
+      for (const [key, label, kind, a, b] of [...(IND_FIELDS[ind.type] || []), ...STYLE_FIELDS]) {
+        const l = document.createElement('label');
+        l.textContent = label;
+        let inp;
+        if (kind === 'int' || kind === 'float') {
+          inp = document.createElement('input');
+          inp.type = 'number'; inp.min = a; inp.max = b;
+          inp.step = kind === 'int' ? '1' : '0.05';
+          inp.value = ind[key];
+          inp.onchange = () => {
+            let v = kind === 'int' ? parseInt(inp.value, 10) : parseFloat(inp.value);
+            if (!isFinite(v)) { inp.value = ind[key]; return; }
+            v = Math.min(b, Math.max(a, v));
+            inp.value = v; ind[key] = v;
+            lbl.textContent = indSummary(ind);
+            save('ind'); startInd();
+          };
+        } else if (kind === 'color') {
+          inp = document.createElement('input');
+          inp.type = 'color'; inp.value = ind[key];
+          inp.oninput = () => {
+            ind[key] = inp.value;
+            if (key === 'color') rowColor.value = inp.value;
+            save('ind'); startInd();
+          };
+        } else {
+          const opts = kind === 'src' ? SOURCES : a;
+          inp = document.createElement('select');
+          inp.innerHTML = Object.entries(opts).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+          inp.value = String(ind[key]);
+          inp.onchange = () => {
+            ind[key] = key === 'width' ? parseInt(inp.value, 10) : inp.value;
+            lbl.textContent = indSummary(ind);
+            save('ind'); startInd();
+          };
+        }
+        box.append(l, inp);
+      }
+      return box;
+    }
     function renderIndUI() {
       countNative();
       const plan = planLimit(), slots = overlaySlots();
@@ -1453,9 +1572,10 @@
       }
       let shown = 0;
       S.ind.list.forEach((ind, i) => {
+        normInd(ind);
         const row = document.createElement('div');
         row.className = 'srow';
-        row.style.gridTemplateColumns = '18px 1fr 54px 34px 22px';
+        row.style.gridTemplateColumns = '18px 1fr 34px 26px 22px';
         const cb = document.createElement('input');
         cb.type = 'checkbox';
         cb.checked = ind.on;
@@ -1472,24 +1592,23 @@
         };
         const lbl = document.createElement('span');
         lbl.className = 'lbl';
-        lbl.textContent = IND_TYPES[ind.type];
+        lbl.textContent = indSummary(ind);
         if (ind.on) { shown++; if (shown > slots) { lbl.textContent += ' (hidden: over limit)'; lbl.style.color = '#f7a600'; } }
-        const len = document.createElement('input');
-        len.type = 'number'; len.min = '1'; len.max = '500';
-        len.value = ind.len;
-        len.disabled = ind.type === 'vwap';
-        len.style.padding = '4px';
-        len.onchange = () => { const v = parseInt(len.value, 10); if (v >= 1 && v <= 500) { ind.len = v; saveInd(); } };
         const col = document.createElement('input');
         col.type = 'color'; col.value = ind.color;
         col.style.width = '34px'; col.style.height = '24px';
         col.oninput = () => { ind.color = col.value; save('ind'); startInd(); };
+        const gear = document.createElement('button');
+        gear.className = 'gear' + (openIndId === ind.id ? ' on' : '');
+        gear.textContent = '⚙'; gear.title = 'Settings';
+        gear.onclick = () => { openIndId = openIndId === ind.id ? null : ind.id; renderIndUI(); };
         const del = document.createElement('button');
         del.className = 'play'; del.textContent = '×'; del.title = 'Remove';
         del.style.width = '22px';
         del.onclick = () => { S.ind.list.splice(i, 1); $('#iMsg').textContent = ''; saveInd(); };
-        row.append(cb, lbl, len, col, del);
+        row.append(cb, lbl, col, gear, del);
         box.appendChild(row);
+        if (openIndId === ind.id) box.appendChild(indSettingsBox(ind, lbl, col));
       });
       $('#iAdd').disabled = false;
       if (panel.classList.contains('open')) placePanel();
@@ -1502,6 +1621,9 @@
         id: Date.now().toString(36), type, len: IND_DEFAULT_LEN[type], width: 2,
         color: IND_COLORS[S.ind.list.length % IND_COLORS.length], on: room > 0
       };
+      normInd(ind);
+      ind.color2 = ind.color;
+      openIndId = ind.id;
       S.ind.list.push(ind);
       $('#iMsg').textContent = room > 0 ? '' : (overlaySlots() === 0
         ? `Added but off: your chart already shows ${planLimit().limit} indicators, your plan's limit. Hide a TradingView indicator to turn it on.`
@@ -1536,6 +1658,8 @@
     new MutationObserver(schedule).observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener('resize', schedule);
     loadWallpaper();
+    countNative();
+    startInd();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();

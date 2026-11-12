@@ -42,4 +42,4 @@ The **Sounds** tab plays a sound when your orders fill. It works with any broker
 
 ## Indicators
 
-The **Indicators** tab draws EMA, SMA, WMA, daily VWAP and Bollinger Bands on the main chart pane, with your own length and color. Together with the indicators you add in TradingView, the ones showing stay within your plan's indicators-per-chart limit, the same way TradingView counts hidden indicators as not taking a slot (Basic 2, Essential 5, Plus 10, Premium 25, Ultimate 50).
+The **Indicators** tab draws EMA, SMA, WMA, daily VWAP and Bollinger Bands on the main chart pane, with their own settings (length, source, offset, color, line width and style, Bollinger multiplier and fill, VWAP anchor and bands). Together with the indicators you add in TradingView, the ones showing stay within your plan's indicators-per-chart limit, the same way TradingView counts hidden indicators as not taking a slot (Basic 2, Essential 5, Plus 10, Premium 25, Ultimate 50).
