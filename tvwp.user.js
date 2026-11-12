@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.3.0
+// @version      2.3.1
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.3.0';
+  const VERSION = '2.3.1';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -536,7 +536,14 @@
   }
   let nativeCount = 0;
   function countNative() {
-    try { nativeCount = window.TradingViewApi.activeChart().getAllStudies().length; } catch (e) {}
+    // Same rule TradingView uses: only indicators that are showing take up a slot.
+    try {
+      const ac = window.TradingViewApi.activeChart();
+      nativeCount = ac.getAllStudies().filter(st => {
+        try { const o = ac.getStudyById(st.id); return typeof o.isVisible === 'function' ? o.isVisible() : true; }
+        catch (e) { return true; }
+      }).length;
+    } catch (e) {}
     return nativeCount;
   }
   function overlaySlots() { return Math.max(0, planLimit().limit - nativeCount); }
@@ -1435,7 +1442,7 @@
       countNative();
       const plan = planLimit(), slots = overlaySlots();
       const onCount = S.ind.list.filter(x => x.on).length;
-      $('#iStatus').textContent = `Your plan (${plan.name}) allows ${plan.limit} per chart. TradingView indicators on this chart: ${nativeCount}. Room for these: ${slots}.`;
+      $('#iStatus').textContent = `Your plan (${plan.name}) allows ${plan.limit} per chart. TradingView indicators showing on this chart: ${nativeCount}. Room for these: ${slots}.`;
       const box = $('#iList');
       box.querySelectorAll('.srow').forEach(r => r.remove());
       if (!S.ind.list.length) {
@@ -1456,7 +1463,7 @@
           if (cb.checked && S.ind.list.filter(x => x.on).length >= slots) {
             cb.checked = false;
             $('#iMsg').textContent = slots === 0
-              ? `No room: your chart already has ${nativeCount} TradingView indicator${nativeCount === 1 ? '' : 's'} and your plan allows ${plan.limit}. Remove one in TradingView first.`
+              ? `No room: ${nativeCount} TradingView indicator${nativeCount === 1 ? ' is' : 's are'} showing and your plan allows ${plan.limit}. Hide one in TradingView first.`
               : `Your plan allows ${plan.limit} indicators per chart in total.`;
             return;
           }
@@ -1497,7 +1504,7 @@
       };
       S.ind.list.push(ind);
       $('#iMsg').textContent = room > 0 ? '' : (overlaySlots() === 0
-        ? `Added but off: your chart already uses all ${planLimit().limit} indicator slots on your plan. Remove a TradingView indicator to turn it on.`
+        ? `Added but off: your chart already shows ${planLimit().limit} indicators, your plan's limit. Hide a TradingView indicator to turn it on.`
         : `Added but off: your plan allows ${planLimit().limit} indicators per chart in total.`);
       saveInd();
     };
