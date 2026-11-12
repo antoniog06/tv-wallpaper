@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.0.0
+// @version      2.1.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.0.0';
+  const VERSION = '2.1.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -27,6 +27,7 @@
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
       volume: true
     },
+    extras: { hideAds: true },
     ui: { x: null, y: null, tab: 'wall' }
   };
   function readSettings() {
@@ -35,6 +36,7 @@
       return {
         wall: { ...DEFAULTS.wall, ...s.wall },
         candles: { ...DEFAULTS.candles, ...s.candles },
+        extras: { ...DEFAULTS.extras, ...s.extras },
         ui: { ...DEFAULTS.ui, ...s.ui }
       };
     } catch (e) {
@@ -209,6 +211,40 @@
     rebuildLookup();
     if (tries < 90) setTimeout(() => waitForChart(tries + 1), 1000);
   })(0);
+
+  /* =========================================================
+   * Ad hiding (just hides the ad boxes on your screen)
+   * ======================================================= */
+  const AD_CSS = [
+    '#charting-ad',
+    '[id^="div-gpt-ad"]',
+    '[id^="google_ads_iframe"]',
+    'iframe[src*="googlesyndication"]',
+    'iframe[src*="doubleclick"]',
+    '[class*="toast-"]:has(> [class*="toastInner-"] > [id^="div-gpt-ad"])'
+  ].join(',') + '{display:none!important}';
+  function applyAds() {
+    if (!document.documentElement) {
+      // Very early in page load: try again as soon as the page exists.
+      const mo = new MutationObserver(() => {
+        if (document.documentElement) { mo.disconnect(); applyAds(); }
+      });
+      mo.observe(document, { childList: true });
+      return;
+    }
+    let st = document.getElementById('tvwp-ads');
+    if (S.extras.hideAds) {
+      if (!st) {
+        st = document.createElement('style');
+        st.id = 'tvwp-ads';
+        st.textContent = AD_CSS;
+        document.documentElement.appendChild(st);
+      }
+    } else if (st) {
+      st.remove();
+    }
+  }
+  applyAds();
 
   /* =========================================================
    * Wallpaper storage (IndexedDB)
@@ -538,7 +574,7 @@
   </button>
   <div class="panel">
     <header><h1>TV Wallpaper <span class="hint">v${VERSION}</span></h1><button class="x" title="Close">×</button></header>
-    <div class="tabs"><button data-tab="wall">Wallpaper</button><button data-tab="candles">Candles</button></div>
+    <div class="tabs"><button data-tab="wall">Wallpaper</button><button data-tab="candles">Candles</button><button data-tab="extras">Extras</button></div>
     <section data-tab="wall">
       <div class="row between"><span class="hint">Images, GIFs, animated WebP</span><label class="sw"><input type="checkbox" id="wEnabled"> On</label></div>
       <div class="grid" id="grid"></div>
@@ -561,6 +597,10 @@
           <option value="contain">Fit (letterbox)</option>
           <option value="stretch">Stretch</option>
         </select></div>
+    </section>
+    <section data-tab="extras">
+      <label class="sw"><input type="checkbox" id="xAds"> Hide ads on the chart</label>
+      <div class="hint">Hides TradingView's ad pop-ups and ad boxes on your screen.</div>
     </section>
     <section data-tab="candles">
       <div class="row between"><span class="hint">Only changes what you see</span><label class="sw"><input type="checkbox" id="cEnabled"> On</label></div>
@@ -809,7 +849,8 @@
       $('#presets').appendChild(b);
     }
 
-    function renderAllUI() { renderWallUI(); renderCandleUI(); showTab(S.ui.tab || 'wall'); }
+    $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
+    function renderAllUI() { renderWallUI(); renderCandleUI(); $('#xAds').checked = !!S.extras.hideAds; showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
   }
 
@@ -822,6 +863,7 @@
       const t = e.data && e.data.type;
       if (t === 'wall') { loadWallpaper(); refreshWall(); }
       if (t === 'candles') { rebuildLookup(); redraw(); }
+      if (t === 'extras') applyAds();
       buildUI.refresh && buildUI.refresh();
     };
   }

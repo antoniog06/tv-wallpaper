@@ -1,6 +1,6 @@
 # TV Wallpaper
 
-Wallpapers (including animated GIFs) and custom candle colors for TradingView charts, in the browser and in the TradingView desktop app. It only changes what your screen shows: nothing is sent anywhere and your TradingView settings are never changed.
+Wallpapers (including animated GIFs), custom candle colors and ad hiding for TradingView charts, in the browser and in the TradingView desktop app. It only changes what your screen shows: nothing is sent anywhere and your TradingView settings are never changed.
 
 ## Browser (Chrome, Edge, Brave)
 
