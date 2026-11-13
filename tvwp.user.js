@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.7.0
+// @version      2.7.1
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.7.0';
+  const VERSION = '2.7.1';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -334,7 +334,7 @@
       if (streamObs) { streamObs.disconnect(); streamObs = null; }
       document.querySelectorAll('.tvwp-sblur').forEach(e => e.classList.remove('tvwp-sblur'));
     }
-    if (typeof brkKick === 'function') brkKick();
+    try { brkKick(); } catch (e) {}
     // redraw the chart so position-line P&L is masked / shown right away
     try { window.dispatchEvent(new Event('resize')); } catch (e) {}
     if (buildUI.onStreamer) buildUI.onStreamer();
@@ -347,7 +347,20 @@
   window.addEventListener('keydown', e => {
     if (e.altKey && e.shiftKey && (e.key === 'S' || e.key === 's')) { e.preventDefault(); e.stopPropagation(); toggleStreamer(); }
   }, true);
-  applyStreamer();
+  // Hide money right away with CSS (before the page draws); the rest starts in start().
+  function earlyStreamCss() {
+    if (!S.extras.streamer || document.getElementById('tvwp-stream')) return;
+    if (!document.documentElement) {
+      const mo = new MutationObserver(() => { if (document.documentElement) { mo.disconnect(); earlyStreamCss(); } });
+      mo.observe(document, { childList: true });
+      return;
+    }
+    const early = document.createElement('style');
+    early.id = 'tvwp-stream';
+    early.textContent = STREAM_CSS;
+    document.documentElement.appendChild(early);
+  }
+  earlyStreamCss();
 
   /* =========================================================
    * Wallpaper storage (IndexedDB)
@@ -1073,7 +1086,16 @@
   }
   function removeIndCanvas() { if (indCanvas) { indCanvas.remove(); indCanvas = null; } indSig = ''; }
 
+  let indErrors = 0;
   function indFrame() {
+    try { indFrameInner(); indErrors = 0; }
+    catch (e) {
+      // never let a bad frame spam errors or freeze the chart; back off and retry
+      if (++indErrors === 1) console.warn('[TV Wallpaper] indicators paused:', e && e.message);
+      if (indErrors > 3) { indLoop = false; removeIndCanvas(); setTimeout(() => { indErrors = 0; startInd(); }, 5000); }
+    }
+  }
+  function indFrameInner() {
     const list = activeOverlays();
     if (!list.length) { removeIndCanvas(); indLoop = false; return; }
     requestAnimationFrame(indFrame);
@@ -2238,6 +2260,8 @@
     loadWallpaper();
     countNative();
     startInd();
+    applyStreamer();
+    brkPoll();
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
   else start();
