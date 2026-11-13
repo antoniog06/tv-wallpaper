@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.7.1
+// @version      3.0.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.7.1';
+  const VERSION = '3.0.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -40,7 +40,7 @@
         cancelled: { on: false, s: 'tone:click' }, rejected: { on: true, s: 'tone:buzz' }
       }
     },
-    ui: { x: null, y: null, tab: 'wall' }
+    ui: { x: null, y: null, tab: 'wall', theme: 'auto', px: null, py: null }
   };
   function readSettings() {
     try {
@@ -1547,81 +1547,182 @@
 
   const CSS = `
   :host { all: initial; }
-  * { box-sizing: border-box; font-family: -apple-system, system-ui, "Segoe UI", sans-serif; }
-  .fab { position: fixed; z-index: 2147483000; width: 36px; height: 36px; border-radius: 50%;
-    background: #2962ff; color: #fff; border: none; cursor: grab; display: grid; place-items: center;
-    box-shadow: 0 2px 10px rgba(0,0,0,.45); touch-action: none; user-select: none; }
+  * { box-sizing: border-box; font-family: Inter, -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+  .panel {
+    --bg: #15171e; --nav: #101218; --card: #1c1f28; --card2: #232733; --line: #2a2e3a; --line2: #343949;
+    --text: #e7e9ef; --muted: #8a90a2; --accent: #5b6cff; --accent2: #7f8cff; --accentBg: rgba(91,108,255,.14);
+    --good: #22c39a; --bad: #f2495c; --warn: #f5a524; --shadow: 0 24px 60px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.35);
+  }
+  .panel.light {
+    --bg: #f6f7fb; --nav: #eceef5; --card: #ffffff; --card2: #f3f4f8; --line: #e1e4ec; --line2: #d3d7e2;
+    --text: #1a1e29; --muted: #697083; --accentBg: rgba(91,108,255,.10);
+    --shadow: 0 24px 60px rgba(20,24,40,.18), 0 2px 8px rgba(20,24,40,.08);
+  }
+
+  /* floating button */
+  .fab { position: fixed; z-index: 2147483000; width: 38px; height: 38px; border-radius: 12px; border: none; cursor: grab;
+    display: grid; place-items: center; color: #fff; touch-action: none; user-select: none;
+    background: linear-gradient(135deg, #5b6cff 0%, #22c3e6 100%); box-shadow: 0 6px 18px rgba(0,0,0,.4); transition: transform .12s; }
+  .fab:hover { transform: translateY(-1px); }
   .fab:active { cursor: grabbing; }
-  .fab.live { box-shadow: 0 0 0 3px #f23645, 0 2px 10px rgba(0,0,0,.45); }
-  .fab svg { width: 18px; height: 18px; pointer-events: none; }
-  .panel { position: fixed; z-index: 2147483001; width: 330px; max-height: 80vh; overflow: auto;
-    background: #131722; color: #d1d4dc; border: 1px solid #2a2e39; border-radius: 10px;
-    box-shadow: 0 10px 30px rgba(0,0,0,.55); font-size: 13px; line-height: 1.4; display: none; }
-  .panel.open { display: block; }
-  header { display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; border-bottom: 1px solid #2a2e39; }
-  h1 { font-size: 14px; margin: 0; font-weight: 600; }
-  .x { background: none; border: none; color: #787b86; font-size: 18px; cursor: pointer; line-height: 1; }
-  .tabs { display: flex; border-bottom: 1px solid #2a2e39; }
-  .tabs button { flex: 1; padding: 9px; background: none; border: none; border-bottom: 2px solid transparent; color: #787b86; font: inherit; cursor: pointer; }
-  .tabs button.on { color: #d1d4dc; border-bottom-color: #2962ff; }
-  section { padding: 12px 14px; display: none; gap: 12px; }
+  .fab.live { box-shadow: 0 0 0 3px #f2495c, 0 6px 18px rgba(0,0,0,.4); }
+  .fab svg { width: 20px; height: 20px; pointer-events: none; }
+
+  /* window */
+  .panel { position: fixed; z-index: 2147483001; display: none; grid-template-columns: 196px 1fr;
+    width: min(800px, calc(100vw - 24px)); height: min(640px, calc(100vh - 24px));
+    background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
+    box-shadow: var(--shadow); font-size: 13px; line-height: 1.4; }
+  .panel.open { display: grid; }
+
+  /* sidebar */
+  aside { background: var(--nav); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  .brand { display: flex; align-items: center; gap: 9px; padding: 14px 14px 10px; font-weight: 700; font-size: 14px; }
+  .logo { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: #fff;
+    background: linear-gradient(135deg, #5b6cff 0%, #22c3e6 100%); }
+  .logo svg { width: 15px; height: 15px; }
+  .conn { margin: 0 10px 8px; padding: 9px 10px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); display: flex; gap: 9px; align-items: center; }
+  .conn b { display: block; font-size: 12.5px; }
+  .conn small { color: var(--muted); font-size: 11.5px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--good); box-shadow: 0 0 0 3px rgba(34,195,154,.18); }
+  .tabs { flex: 1; overflow: auto; padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 1px; }
+  .grp { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px 8px 3px; }
+  .tabs button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; border: none; border-radius: 8px;
+    background: none; color: var(--text); font: inherit; font-size: 13px; cursor: pointer; text-align: left; opacity: .82; }
+  .tabs button svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
+  .tabs button:hover { background: var(--card); opacity: 1; }
+  .tabs button.on { background: var(--accent); color: #fff; opacity: 1; font-weight: 600; }
+  .tabs button.on svg { color: #fff; }
+  .tabs button .badge { margin-left: auto; font-size: 10.5px; padding: 1px 6px; border-radius: 10px; background: var(--card2); color: var(--muted); }
+  .tabs button.on .badge { background: rgba(255,255,255,.22); color: #fff; }
+  .quick { border-top: 1px solid var(--line); padding: 6px 10px; display: grid; gap: 0; }
+  .quick label { display: flex; align-items: center; justify-content: space-between; padding: 4px 4px; font-size: 12.5px; cursor: pointer; }
+  .foot { padding: 8px 14px 12px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
+
+  /* main */
+  main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); cursor: move; user-select: none; }
+  header .t { flex: 1; min-width: 0; }
+  h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
+  .pill { font-size: 11.5px; font-weight: 600; padding: 4px 10px; border-radius: 20px; background: var(--card2); color: var(--muted); white-space: nowrap; display: flex; align-items: center; gap: 6px; }
+  .pill.live { background: rgba(242,73,92,.14); color: var(--bad); }
+  .pill.ok { background: rgba(34,195,154,.13); color: var(--good); }
+  .x { width: 28px; height: 28px; border-radius: 8px; border: none; background: none; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; }
+  .x:hover { background: var(--card2); color: var(--text); }
+  .content { flex: 1; overflow: auto; padding: 14px 18px 20px; }
+  section { display: none; gap: 12px; }
   section.on { display: grid; }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-  .thumb { position: relative; aspect-ratio: 16/10; border-radius: 6px; overflow: hidden; border: 2px solid transparent; cursor: pointer; background: #1e222d; }
-  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
-  .thumb.active { border-color: #2962ff; }
-  .tag { position: absolute; left: 3px; bottom: 3px; background: rgba(0,0,0,.7); color: #fff; font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px; }
-  .del { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px; border: none; border-radius: 50%; background: rgba(0,0,0,.7); color: #fff; font-size: 12px; line-height: 18px; cursor: pointer; display: none; padding: 0; }
-  .thumb:hover .del { display: block; }
-  .empty { color: #787b86; grid-column: 1/-1; text-align: center; padding: 14px 0; border: 1px dashed #2a2e39; border-radius: 6px; }
+
+  /* cards & rows */
+  .card, .sgroup, .side { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  .card > .item + .item, .card > .item + .sub { border-top: 1px solid var(--line); }
+  .item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 14px; min-height: 48px; }
+  .item .txt { min-width: 0; }
+  .item .txt b { display: block; font-weight: 600; font-size: 13px; }
+  .item .txt small { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+  .item select, .item input[type=range] { width: 190px; flex: none; }
+  .item input[type=number] { width: 90px; }
+  .sub { padding: 12px 14px; display: grid; gap: 10px; }
+  .card-h { padding: 11px 14px 0; font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+  .card-h small { color: var(--muted); font-weight: 400; }
+  .sgroup { display: grid; gap: 6px; padding: 10px 14px 12px; }
+  .sgroup h3 { margin: 2px 0 2px; font-size: 13px; font-weight: 600; color: var(--text); }
   .row { display: flex; gap: 8px; align-items: center; }
   .between { justify-content: space-between; }
-  .btn { flex: 1; text-align: center; padding: 8px; border-radius: 6px; border: 1px solid #2a2e39; background: #1e222d; color: #d1d4dc; cursor: pointer; font: inherit; }
-  .btn.primary { background: #2962ff; border-color: #2962ff; color: #fff; }
-  .field { display: grid; gap: 4px; }
-  .field > span { color: #787b86; font-size: 12px; }
-  select, input[type=range] { width: 100%; }
-  select, input[type=number], input[type=text] { background: #1e222d; color: #d1d4dc; border: 1px solid #2a2e39; border-radius: 6px; padding: 6px; font: inherit; }
-  label.sw { display: flex; align-items: center; gap: 6px; cursor: pointer; }
-  .hint { color: #787b86; font-size: 11px; }
-  .msg { font-size: 12px; color: #f7a600; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .msg { font-size: 12px; color: var(--warn); }
   .msg:empty { display: none; }
-  .side { display: grid; gap: 8px; padding: 10px; border: 1px solid #2a2e39; border-radius: 8px; background: #1e222d; }
+  kbd { font: 600 11px ui-monospace, Menlo, monospace; padding: 2px 6px; border-radius: 5px; background: var(--card2); border: 1px solid var(--line2); }
+  a { color: var(--accent2); text-decoration: none; }
+
+  /* controls */
+  .btn { flex: 1; display: inline-flex; justify-content: center; align-items: center; gap: 6px; padding: 8px 12px; border-radius: 9px;
+    border: 1px solid var(--line2); background: var(--card2); color: var(--text); cursor: pointer; font: inherit; font-weight: 600; font-size: 12.5px; }
+  .btn:hover { border-color: var(--accent); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .btn.slim { flex: none; }
+  select, input[type=number], input[type=text] { background: var(--card2); color: var(--text); border: 1px solid var(--line2); border-radius: 8px; padding: 6px 8px; font: inherit; font-size: 12.5px; outline: none; }
+  select:focus, input:focus { border-color: var(--accent); }
+  input[type=range] { accent-color: var(--accent); }
+  input[type=checkbox] { appearance: none; -webkit-appearance: none; flex: none; width: 34px; height: 20px; border-radius: 20px; margin: 0;
+    background: var(--line2); position: relative; cursor: pointer; transition: background .15s; }
+  input[type=checkbox]::before { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%; background: #fff;
+    box-shadow: 0 1px 3px rgba(0,0,0,.3); transition: transform .15s; }
+  input[type=checkbox]:checked { background: var(--accent); }
+  input[type=checkbox]:checked::before { transform: translateX(14px); }
+  input[type=color] { width: 40px; height: 26px; padding: 0; border: 1px solid var(--line2); border-radius: 7px; background: none; cursor: pointer; }
+  .seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--card2); border: 1px solid var(--line2); border-radius: 9px; }
+  .seg button { border: none; background: none; color: var(--muted); font: inherit; font-size: 12.5px; padding: 5px 12px; border-radius: 7px; cursor: pointer; }
+  .seg button.on { background: var(--card); color: var(--text); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+
+  /* wallpaper */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .thumb { position: relative; aspect-ratio: 16/10; border-radius: 9px; overflow: hidden; border: 2px solid transparent; cursor: pointer; background: var(--card2); }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentBg); }
+  .tag { position: absolute; left: 5px; bottom: 5px; background: rgba(0,0,0,.7); color: #fff; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 4px; }
+  .del { position: absolute; top: 5px; right: 5px; width: 20px; height: 20px; border: none; border-radius: 50%; background: rgba(0,0,0,.7); color: #fff; font-size: 13px; line-height: 20px; cursor: pointer; display: none; padding: 0; }
+  .thumb:hover .del { display: block; }
+  .empty { color: var(--muted); grid-column: 1/-1; text-align: center; padding: 22px 0; border: 1px dashed var(--line2); border-radius: 10px; }
+
+  /* candles */
+  .side { display: grid; gap: 10px; padding: 12px 14px; }
   .side-head { display: flex; align-items: center; justify-content: space-between; font-weight: 600; }
-  input[type=color] { width: 44px; height: 28px; padding: 0; border: 1px solid #2a2e39; border-radius: 6px; background: none; cursor: pointer; }
-  .rgb { display: grid; grid-template-columns: repeat(3, 1fr) 1.4fr; gap: 6px; }
-  .rgb label { display: grid; gap: 2px; font-size: 11px; color: #787b86; }
-  .rgb input { width: 100%; padding: 5px; }
-  .extra { display: none; gap: 6px; grid-template-columns: 1fr 1fr; }
+  .rgb { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(0, 1.6fr); gap: 8px; }
+  input[type=number] { -moz-appearance: textfield; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .rgb label { display: grid; gap: 3px; font-size: 11px; color: var(--muted); }
+  .rgb input { width: 100%; padding: 5px 7px; }
+  .field { display: grid; gap: 4px; }
+  .field > span { color: var(--muted); font-size: 12px; }
+  .extra { display: none; gap: 8px; grid-template-columns: 1fr 1fr; }
   .extra.on { display: grid; }
-  .extra label { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: #787b86; gap: 6px; }
-  .presets { display: flex; flex-wrap: wrap; gap: 6px; }
-  .preset { display: flex; align-items: center; gap: 5px; padding: 5px 8px; border: 1px solid #2a2e39; border-radius: 20px; background: #1e222d; color: #d1d4dc; font: inherit; font-size: 12px; cursor: pointer; }
-  .preset i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-  .srow { display: grid; grid-template-columns: 18px 1fr 120px 28px; gap: 6px; align-items: center; }
-  .srow .lbl { font-size: 12px; }
-  .srow select { padding: 4px; font-size: 12px; }
-  .play { width: 28px; height: 26px; border-radius: 6px; border: 1px solid #2a2e39; background: #1e222d; color: #d1d4dc; cursor: pointer; padding: 0; }
-  .sgroup { display: grid; gap: 6px; padding: 10px; border: 1px solid #2a2e39; border-radius: 8px; background: #1e222d; }
-  .sgroup h3 { margin: 0 0 2px; font-size: 12px; color: #787b86; font-weight: 600; }
+  .extra label { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--muted); gap: 6px; }
+  .candle-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .presets { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 14px; }
+  .preset { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border: 1px solid var(--line2); border-radius: 20px; background: var(--card2); color: var(--text); font: inherit; font-size: 12px; cursor: pointer; }
+  .preset:hover { border-color: var(--accent); }
+  .preset i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .detected { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  .detected i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; border: 1px solid var(--line2); }
+
+  /* sounds & indicators */
+  .srow { display: grid; grid-template-columns: 34px 1fr 140px 30px; gap: 8px; align-items: center; padding: 3px 0; }
+  .srow .lbl { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .srow select { padding: 5px 6px; font-size: 12px; width: 100%; }
+  .play { width: 30px; height: 28px; border-radius: 8px; border: 1px solid var(--line2); background: var(--card2); color: var(--text); cursor: pointer; padding: 0; }
+  .play:hover { border-color: var(--accent); }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-  .chip { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 8px; border: 1px solid #2a2e39; border-radius: 14px; font-size: 12px; max-width: 100%; }
+  .chip { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border: 1px solid var(--line2); border-radius: 16px; font-size: 12px; max-width: 100%; background: var(--card2); }
   .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
-  .chip button { background: none; border: none; color: #787b86; cursor: pointer; font-size: 14px; line-height: 1; }
-  .last { font-size: 12px; color: #d1d4dc; }
-  .iset { display: grid; grid-template-columns: 1fr 120px; gap: 6px 8px; align-items: center; padding: 8px; margin: 0 0 4px 24px; border-left: 2px solid #2962ff; background: #131722; border-radius: 0 6px 6px 0; }
-  .iset label { font-size: 12px; color: #787b86; }
-  .iset input[type=number], .iset select { width: 100%; padding: 4px; font-size: 12px; }
+  .chip button { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 14px; line-height: 1; }
+  .last { font-size: 12px; color: var(--muted); }
+  .last:not(:empty) { padding: 9px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); color: var(--text); }
+  .iset { display: grid; grid-template-columns: 1fr 150px; gap: 8px 10px; align-items: center; padding: 10px 12px; margin: 2px 0 6px 42px;
+    border-left: 2px solid var(--accent); background: var(--card2); border-radius: 0 9px 9px 0; }
+  .iset label { font-size: 12px; color: var(--muted); }
+  .iset input[type=number], .iset select { width: 100%; padding: 5px 6px; font-size: 12px; }
   .iset input[type=color] { width: 44px; height: 24px; }
-  .gear { width: 26px; height: 24px; border-radius: 6px; border: 1px solid #2a2e39; background: #1e222d; color: #d1d4dc; cursor: pointer; padding: 0; font-size: 13px; }
-  .gear.on { border-color: #2962ff; color: #fff; }
-  .detected { display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
-  .detected i { width: 12px; height: 12px; border-radius: 2px; display: inline-block; border: 1px solid #2a2e39; }
+  .gear { width: 28px; height: 26px; border-radius: 7px; border: 1px solid var(--line2); background: var(--card2); color: var(--text); cursor: pointer; padding: 0; font-size: 13px; }
+  .gear.on { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .status { padding: 10px 12px; border-radius: 10px; background: var(--accentBg); color: var(--text); font-size: 12.5px; }
+
+  @media (max-width: 620px) {
+    .panel { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    aside { border-right: none; border-bottom: 1px solid var(--line); }
+    .tabs { flex-direction: row; overflow-x: auto; padding: 6px 8px; }
+    .tabs button { width: auto; white-space: nowrap; }
+    .grp, .quick, .foot, .conn { display: none; }
+    .item select, .item input[type=range] { width: 140px; }
+    .candle-pair { grid-template-columns: 1fr; }
+  }
   `;
 
   const SIDE_HTML = side => `
     <div class="side" data-side="${side}">
-      <div class="side-head"><span>${side === 'up' ? 'Up' : 'Down'} candles</span><input type="color" class="main"></div>
+      <div class="side-head"><span>${side === 'up' ? 'Up candles' : 'Down candles'}</span><input type="color" class="main"></div>
       <div class="rgb">
         <label>R<input type="number" min="0" max="255" data-ch="0"></label>
         <label>G<input type="number" min="0" max="255" data-ch="1"></label>
@@ -1635,90 +1736,153 @@
       </div>
     </div>`;
 
+  const ICON = {
+    logo: '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="7" width="4" height="10" rx="1"/><rect x="5.5" y="4" width="1" height="16" rx=".5"/><rect x="10" y="5" width="4" height="8" rx="1"/><rect x="11.5" y="3" width="1" height="13" rx=".5"/><rect x="16" y="9" width="4" height="9" rx="1"/><rect x="17.5" y="6" width="1" height="15" rx=".5"/></svg>',
+    wall: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>',
+    candles: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M7 3v4M7 17v4M17 3v6M17 17v4"/><rect x="4.5" y="7" width="5" height="10" rx="1"/><rect x="14.5" y="9" width="5" height="8" rx="1"/></svg>',
+    ind: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l5-6 4 3 8-9"/><path d="M3 21h18"/></svg>',
+    sounds: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/></svg>',
+    trading: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 17h16"/><path d="M8 4v6M16 14v6"/></svg>',
+    stream: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M3 3l18 18"/></svg>',
+    extras: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>'
+  };
+  const PAGES = {
+    wall: ['Wallpaper', 'Images and GIFs behind your chart.'],
+    candles: ['Candles', 'Your own candle colors. Only changes what you see.'],
+    ind: ['Indicators', "Extra indicators on the chart, within your plan's limit."],
+    sounds: ['Sounds', 'A sound when your orders fill, per order type.'],
+    trading: ['Brackets', 'Win / lose amounts on your take-profit and stop orders.'],
+    stream: ['Streamer', 'Hide your P&L and balances while streaming.'],
+    extras: ['General', 'Ads, appearance, shortcuts and info.']
+  };
+  const item = (title, desc, control) => `<div class="item"><div class="txt"><b>${title}</b>${desc ? `<small>${desc}</small>` : ''}</div>${control}</div>`;
+  const NAV = (tab, label) => `<button data-tab="${tab}">${ICON[tab]}<span>${label}</span><span class="badge" data-badge="${tab}" hidden></span></button>`;
+
   const HTML = `
-  <button class="fab" title="TV Wallpaper (Alt+Shift+W)">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>
-  </button>
+  <button class="fab" title="TV Wallpaper (Alt+Shift+W)">${ICON.logo}</button>
   <div class="panel">
-    <header><h1>TV Wallpaper <span class="hint">v${VERSION}</span></h1><button class="x" title="Close">×</button></header>
-    <div class="tabs"><button data-tab="wall">Wallpaper</button><button data-tab="candles">Candles</button><button data-tab="sounds">Sounds</button><button data-tab="ind">Indicators</button><button data-tab="extras">Extras</button></div>
-    <section data-tab="wall">
-      <div class="row between"><span class="hint">Images, GIFs, animated WebP</span><label class="sw"><input type="checkbox" id="wEnabled"> On</label></div>
-      <div class="grid" id="grid"></div>
-      <div class="msg" id="wMsg"></div>
-      <div class="row">
-        <label class="btn">Add images / GIFs<input type="file" id="file" accept="image/*" multiple hidden></label>
-        <button class="btn primary" id="next">Next wallpaper</button>
+    <aside>
+      <div class="brand"><span class="logo">${ICON.logo}</span>TV Wallpaper</div>
+      <div class="conn"><span class="dot" id="connDot"></span><div><b>TradingView</b><small id="connText">Checking…</small></div></div>
+      <nav class="tabs">
+        <div class="grp">Chart</div>
+        ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}
+        <div class="grp">Trading</div>
+        ${NAV('sounds', 'Sounds')}${NAV('trading', 'Brackets')}${NAV('stream', 'Streamer')}
+        <div class="grp">App</div>
+        ${NAV('extras', 'General')}
+      </nav>
+      <div class="quick">
+        <label>Wallpaper <input type="checkbox" id="qWall"></label>
+        <label>Candles <input type="checkbox" id="qCandles"></label>
+        <label>Sounds <input type="checkbox" id="qSounds"></label>
+        <label>Streamer <input type="checkbox" id="qStream"></label>
       </div>
-      <div class="field"><span>Strength <b id="opVal"></b></span><input type="range" id="opacity" min="0.05" max="1" step="0.05"></div>
-      <div class="field"><span>Chart theme / blend</span>
-        <select id="blend">
-          <option value="lighten">Dark theme – subtle (lighten)</option>
-          <option value="screen">Dark theme – vivid (screen)</option>
-          <option value="darken">Light theme – subtle (darken)</option>
-          <option value="multiply">Light theme – vivid (multiply)</option>
-        </select></div>
-      <div class="field"><span>Fit</span>
-        <select id="fit">
-          <option value="cover">Fill (crop)</option>
-          <option value="contain">Fit (letterbox)</option>
-          <option value="stretch">Stretch</option>
-        </select></div>
+      <div class="foot">v${VERSION} · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></div>
+    </aside>
+    <main>
+      <header><div class="t"><h1 id="pgTitle"></h1><p id="pgSub"></p></div><span class="pill" id="pill"></span><button class="x" title="Close">×</button></header>
+      <div class="content">
+
+    <section data-tab="wall">
+      <div class="card">${item('Show wallpaper', 'Images, GIFs and animated WebP behind your candles.', '<input type="checkbox" id="wEnabled">')}</div>
+      <div class="card">
+        <div class="card-h">Your wallpapers <small>Click one to use it</small></div>
+        <div class="sub">
+          <div class="grid" id="grid"></div>
+          <div class="msg" id="wMsg"></div>
+          <div class="row">
+            <label class="btn">＋ Add images / GIFs<input type="file" id="file" accept="image/*" multiple hidden></label>
+            <button class="btn primary" id="next">Next wallpaper →</button>
+          </div>
+        </div>
+      </div>
+      <div class="card">
+        ${item('Strength <span class="hint" id="opVal"></span>', 'How strongly the image shows through.', '<input type="range" id="opacity" min="0.05" max="1" step="0.05">')}
+        ${item('Blend', 'Match this to your chart theme.', `<select id="blend">
+          <option value="lighten">Dark chart – subtle</option><option value="screen">Dark chart – vivid</option>
+          <option value="darken">Light chart – subtle</option><option value="multiply">Light chart – vivid</option></select>`)}
+        ${item('Fit', 'How the image fills the chart.', `<select id="fit">
+          <option value="cover">Fill (crop)</option><option value="contain">Fit (letterbox)</option><option value="stretch">Stretch</option></select>`)}
+      </div>
     </section>
+
+    <section data-tab="candles">
+      <div class="card">${item('Custom candle colors', 'Recolors candles, wicks and borders on your screen.', '<input type="checkbox" id="cEnabled">')}</div>
+      <div class="card"><div class="card-h">Presets</div><div class="presets" id="presets"></div></div>
+      <div class="candle-pair">${SIDE_HTML('up')}${SIDE_HTML('down')}</div>
+      <div class="card">
+        ${item('Separate border & wick colors', 'Pick border and wick colors on their own.', '<input type="checkbox" id="cSeparate">')}
+        ${item('Recolor volume bars', 'Volume bars follow your candle colors.', '<input type="checkbox" id="cVolume">')}
+        ${item("Chart's current colors", 'These are the colors being replaced.', '<div class="detected" id="detected"></div>')}
+        <div class="sub"><div class="row"><button class="btn" id="redetect">Re-detect colors</button><button class="btn" id="cReset">Turn off</button></div></div>
+      </div>
+    </section>
+
+    <section data-tab="ind">
+      <div class="status" id="iStatus"></div>
+      <div class="sgroup" id="iList"><h3>Your indicators</h3></div>
+      <div class="card"><div class="sub">
+        <div class="row"><select id="iType" style="flex:1"></select><button class="btn primary slim" id="iAdd">＋ Add</button></div>
+        <div class="msg" id="iMsg"></div>
+        <div class="hint">Drawn on the main chart pane. Click ⚙ on an indicator for its settings.</div>
+      </div></div>
+    </section>
+
     <section data-tab="sounds">
-      <div class="row between"><span class="hint">Plays when your orders fill</span><label class="sw"><input type="checkbox" id="sEnabled"> On</label></div>
-      <div class="field"><span>Volume <b id="sVolVal"></b></span><input type="range" id="sVol" min="0.05" max="1" step="0.05"></div>
-      <label class="sw"><input type="checkbox" id="sOne"> One sound for all fills</label>
+      <div class="card">
+        ${item('Order sounds', 'Plays when your orders fill. Works with any broker in TradingView.', '<input type="checkbox" id="sEnabled">')}
+        ${item('Volume <span class="hint" id="sVolVal"></span>', '', '<input type="range" id="sVol" min="0.05" max="1" step="0.05">')}
+        ${item('One sound for all fills', 'Use the same sound for every order type.', '<input type="checkbox" id="sOne">')}
+        ${item("Mute TradingView's own fill sound", 'So you only hear yours.', '<input type="checkbox" id="sMuteTV">')}
+      </div>
       <div class="sgroup" id="sFills"><h3>Fills</h3></div>
       <div class="sgroup" id="sOther"><h3>Other order events</h3></div>
       <div class="sgroup"><h3>Your sounds</h3>
         <div class="chips" id="sChips"></div>
-        <label class="btn">Upload sounds (MP3, WAV…)<input type="file" id="sFile" accept="audio/*" multiple hidden></label>
+        <label class="btn">＋ Upload sounds (MP3, WAV…)<input type="file" id="sFile" accept="audio/*" multiple hidden></label>
         <div class="msg" id="sMsg"></div>
       </div>
-      <label class="sw"><input type="checkbox" id="sMuteTV"> Mute TradingView's own fill sound</label>
       <div class="last" id="sLast"></div>
-      <div class="hint">Works with any broker you connect in TradingView (Paper Trading, Tradovate, NinjaTrader…). Click anywhere on the page once after opening it so the browser allows sound.</div>
+      <div class="hint">Click anywhere on the chart once after opening it, so the browser allows sound.</div>
     </section>
-    <section data-tab="ind">
-      <div class="hint" id="iStatus"></div>
-      <div class="sgroup" id="iList"><h3>Your indicators</h3></div>
-      <div class="row">
-        <select id="iType"></select>
-        <button class="btn primary" id="iAdd">Add</button>
+
+    <section data-tab="trading">
+      <div class="card">
+        ${item('Show win / lose on TP & SL orders', 'For brokers like Tradovate that turn brackets into plain limit/stop orders.', '<input type="checkbox" id="xBrk">')}
+        ${item('Show as', '', '<select id="xBrkMode"><option value="ticks">Ticks</option><option value="money">Money</option><option value="both">Ticks + money</option></select>')}
+        ${item('Distance from right edge', 'Slide labels so they sit next to your order labels.', '<input type="number" id="xBrkRight" min="0" max="800" step="10">')}
       </div>
-      <div class="msg" id="iMsg"></div>
-      <div class="hint">Drawn on the main chart pane. Together with your TradingView indicators, these stay within your plan's indicators-per-chart limit.</div>
+      <div class="hint">Only reads your orders. It never places or changes anything.</div>
     </section>
+
+    <section data-tab="stream">
+      <div class="card">
+        ${item('Streamer mode', 'Hide P&L, balance, equity and margin. Shortcut: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>', '<input type="checkbox" id="xStream">')}
+        ${item('Also on the chart', 'Mask P&L on position lines and brackets.', '<input type="checkbox" id="xStreamChart">')}
+        ${item('Style', '', '<select id="xStreamStyle"><option value="blur">Blur</option><option value="hide">Cover completely</option></select>')}
+      </div>
+      <div class="hint">Covers the account panel, money columns in your history tables, and any amount with a currency, ticks, pips or points. Prices and symbols stay visible.</div>
+    </section>
+
     <section data-tab="extras">
-      <div class="sgroup"><h3>Streamer mode</h3>
-        <label class="sw"><input type="checkbox" id="xStream"> Hide my P&amp;L and balances</label>
-        <label class="sw"><input type="checkbox" id="xStreamChart"> Also on the chart (position line P&amp;L)</label>
-        <div class="row"><span class="hint" style="flex:1">Style</span>
-          <select id="xStreamStyle" style="width:140px"><option value="blur">Blur</option><option value="hide">Cover completely</option></select></div>
-        <div class="hint">Toggle anytime with <b>Alt+Shift+S</b>. Covers the account panel (P&amp;L, equity, balance, margin), money columns in your history tables, and amounts with a currency anywhere on the page.</div>
+      <div class="card">
+        ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
+        ${item('Theme', 'Auto follows your TradingView theme.', '<div class="seg" id="gTheme"><button data-v="auto">Auto</button><button data-v="dark">Dark</button><button data-v="light">Light</button></div>')}
+        ${item('Button position', 'Drag the floating button anywhere, or put it back here.', '<button class="btn slim" id="gResetPos">Reset</button>')}
       </div>
-      <div class="sgroup"><h3>Trade brackets</h3>
-        <label class="sw"><input type="checkbox" id="xBrk"> Show win / lose on TP &amp; SL orders</label>
-        <div class="row"><span class="hint" style="flex:1">Show as</span>
-          <select id="xBrkMode" style="width:140px"><option value="ticks">Ticks</option><option value="money">Money</option><option value="both">Ticks + money</option></select></div>
-        <div class="row"><span class="hint" style="flex:1">Distance from right edge</span>
-          <input type="number" id="xBrkRight" min="0" max="800" step="10" style="width:80px"></div>
-        <div class="hint">For brokers like Tradovate that turn your brackets into plain limit/stop orders after you enter. Only reads your orders, never changes them.</div>
+      <div class="card">
+        ${item('Open / close this window', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></span>')}
+        ${item('Streamer mode on / off', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></span>')}
       </div>
-      <label class="sw"><input type="checkbox" id="xAds"> Hide ads on the chart</label>
-      <div class="hint">Hides TradingView's ad pop-ups and ad boxes on your screen.</div>
+      <div class="card">
+        ${item('Version', 'Updates install automatically.', `<span class="hint">v${VERSION}</span>`)}
+        ${item('Source & help', '', '<a href="https://github.com/antoniog06/tv-wallpaper" target="_blank" rel="noopener">GitHub ↗</a>')}
+      </div>
     </section>
-    <section data-tab="candles">
-      <div class="row between"><span class="hint">Only changes what you see</span><label class="sw"><input type="checkbox" id="cEnabled"> On</label></div>
-      <div class="presets" id="presets"></div>
-      ${SIDE_HTML('up')}
-      ${SIDE_HTML('down')}
-      <label class="sw"><input type="checkbox" id="cSeparate"> Separate border &amp; wick colors</label>
-      <label class="sw"><input type="checkbox" id="cVolume"> Also recolor volume bars</label>
-      <div class="field"><span>Your chart's current colors (replaced)</span><div class="detected" id="detected"></div></div>
-      <div class="row"><button class="btn" id="redetect">Re-detect colors</button><button class="btn" id="cReset">Turn off</button></div>
-    </section>
+
+      </div>
+    </main>
   </div>`;
 
   function buildUI() {
@@ -1741,16 +1905,29 @@
       return [cx, cy];
     }
     function placePanel() {
-      const [x, y] = placeFab();
-      const pw = 330, ph = Math.min(panel.scrollHeight || 560, window.innerHeight * 0.8);
-      let left = x + 46;
-      if (left + pw > window.innerWidth - 8) left = x - pw - 10;
-      left = Math.max(8, left);
-      let top = Math.min(y, window.innerHeight - ph - 8);
-      top = Math.max(8, top);
+      placeFab();
+      const pw = panel.offsetWidth || 780, ph = panel.offsetHeight || 580;
+      let left = S.ui.px ?? Math.round((window.innerWidth - pw) / 2);
+      let top = S.ui.py ?? Math.round((window.innerHeight - ph) / 2);
+      left = Math.min(Math.max(8, left), Math.max(8, window.innerWidth - pw - 8));
+      top = Math.min(Math.max(8, top), Math.max(8, window.innerHeight - ph - 8));
       panel.style.left = left + 'px';
       panel.style.top = top + 'px';
     }
+    // drag the window by its header
+    const head = $('header');
+    let wdrag = null;
+    head.addEventListener('pointerdown', e => {
+      if (e.target.closest('button, .pill')) return;
+      wdrag = { sx: e.clientX, sy: e.clientY, ox: panel.offsetLeft, oy: panel.offsetTop };
+      try { head.setPointerCapture(e.pointerId); } catch (err) {}
+    });
+    head.addEventListener('pointermove', e => {
+      if (!wdrag) return;
+      S.ui.px = wdrag.ox + e.clientX - wdrag.sx; S.ui.py = wdrag.oy + e.clientY - wdrag.sy;
+      placePanel();
+    });
+    head.addEventListener('pointerup', () => { if (wdrag) { wdrag = null; save(null); } });
     let drag = null;
     fab.addEventListener('pointerdown', e => {
       drag = { sx: e.clientX, sy: e.clientY, ox: fab.offsetLeft, oy: fab.offsetTop, moved: false };
@@ -1787,8 +1964,12 @@
 
     /* ---- tabs ---- */
     function showTab(t) {
+      if (!PAGES[t]) t = 'wall';
       root.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
       root.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.dataset.tab === t));
+      $('#pgTitle').textContent = PAGES[t][0];
+      $('#pgSub').textContent = PAGES[t][1];
+      $('.content').scrollTop = 0;
     }
     root.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
       S.ui.tab = b.dataset.tab; save(null); showTab(b.dataset.tab); placePanel();
@@ -2155,7 +2336,7 @@
         normInd(ind);
         const row = document.createElement('div');
         row.className = 'srow';
-        row.style.gridTemplateColumns = '18px 1fr 34px 26px 22px';
+        row.style.gridTemplateColumns = '34px 1fr 40px 28px 30px';
         const cb = document.createElement('input');
         cb.type = 'checkbox';
         cb.checked = ind.on;
@@ -2184,7 +2365,7 @@
         gear.onclick = () => { openIndId = openIndId === ind.id ? null : ind.id; renderIndUI(); };
         const del = document.createElement('button');
         del.className = 'play'; del.textContent = '×'; del.title = 'Remove';
-        del.style.width = '22px';
+        del.style.width = '30px';
         del.onclick = () => { S.ind.list.splice(i, 1); $('#iMsg').textContent = ''; saveInd(); };
         row.append(cb, lbl, col, gear, del);
         box.appendChild(row);
@@ -2229,10 +2410,64 @@
       $('#xStreamStyle').value = S.extras.streamerStyle || 'blur';
       fab.classList.toggle('live', !!S.extras.streamer);
     }
-    buildUI.onStreamer = renderStreamUI;
+    buildUI.onStreamer = () => { renderStreamUI(); renderQuick(); renderStatus(); };
     renderStreamUI();
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
-    function renderAllUI() { renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
+    /* ---- sidebar quick switches, theme, status ---- */
+    function setQuick(id, on) {
+      if (id === 'qWall') { S.wall.enabled = on; save('wall'); refreshWall(); }
+      if (id === 'qCandles') { S.candles.enabled = on; save('candles'); rebuildLookup(); redraw(); }
+      if (id === 'qSounds') { S.sounds.enabled = on; save('sounds'); applyMute(); }
+      if (id === 'qStream') { S.extras.streamer = on; save('extras'); applyStreamer(); }
+      renderAllUI();
+    }
+    for (const id of ['qWall', 'qCandles', 'qSounds', 'qStream']) $('#' + id).onchange = e => setQuick(id, e.target.checked);
+    function themeIsLight() {
+      const t = S.ui.theme || 'auto';
+      if (t === 'light') return true;
+      if (t === 'dark') return false;
+      const h = document.documentElement;
+      if (h.classList.contains('theme-light')) return true;
+      if (h.classList.contains('theme-dark')) return false;
+      return !(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
+    }
+    function applyTheme() {
+      panel.classList.toggle('light', themeIsLight());
+      root.querySelectorAll('#gTheme button').forEach(b => b.classList.toggle('on', b.dataset.v === (S.ui.theme || 'auto')));
+    }
+    root.querySelectorAll('#gTheme button').forEach(b => b.onclick = () => { S.ui.theme = b.dataset.v; save(null); applyTheme(); });
+    new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    $('#gResetPos').onclick = () => { S.ui.x = S.ui.y = S.ui.px = S.ui.py = null; save(null); placePanel(); };
+    function renderStatus() {
+      let name = '', connected = false;
+      try {
+        const b = currentBroker();
+        if (b) {
+          const mi = typeof b.metainfo === 'function' ? b.metainfo() : null;
+          name = (mi && (mi.title || mi.name || mi.id)) || '';
+          if (name === 'Paper') name = 'Paper Trading';
+          connected = typeof b.isConnected === 'function' ? !!b.isConnected() : true;
+        }
+      } catch (e) {}
+      $('#connDot').classList.toggle('on', connected);
+      $('#connText').textContent = connected ? `${name || 'Broker'} · connected` : 'No broker connected';
+      const pill = $('#pill');
+      pill.className = 'pill' + (S.extras.streamer ? ' live' : connected ? ' ok' : '');
+      pill.textContent = S.extras.streamer ? '● Streamer on' : connected ? '● ' + (name || 'Connected') : 'Not trading';
+      const nOn = S.ind.list.filter(x => x.on).length;
+      const badge = root.querySelector('[data-badge="ind"]');
+      badge.hidden = !nOn; badge.textContent = nOn + ' on';
+    }
+    setInterval(() => { if (panel.classList.contains('open')) renderStatus(); }, 2000);
+    function renderQuick() {
+      $('#qWall').checked = !!S.wall.enabled;
+      $('#qCandles').checked = !!S.candles.enabled;
+      $('#qSounds').checked = !!S.sounds.enabled;
+      $('#qStream').checked = !!S.extras.streamer;
+    }
+    applyTheme();
+
+    function renderAllUI() { renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
   }
 

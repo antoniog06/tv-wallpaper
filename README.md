@@ -6,7 +6,7 @@ Wallpapers (including animated GIFs), custom candle colors, custom order-fill so
 
 1. Install the free [Tampermonkey](https://www.tampermonkey.net/) extension.
 2. Open this link and click **Install**: https://raw.githubusercontent.com/antoniog06/tv-wallpaper/main/tvwp.user.js
-3. Open or refresh a TradingView chart. A round blue button appears near the bottom left. Click it to open the settings, or drag it anywhere. **Alt+Shift+W** also opens the settings.
+3. Open or refresh a TradingView chart. A small square button with a candlestick logo appears near the bottom left. Click it to open the settings window, or drag it anywhere. **Alt+Shift+W** also opens it. The window has a page for each feature on the left, quick on/off switches at the bottom of the sidebar, and can be dragged by its title bar.
 
 Tampermonkey checks for updates on its own.
 
