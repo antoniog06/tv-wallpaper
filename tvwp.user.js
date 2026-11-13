@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.6.0
+// @version      2.7.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.6.0';
+  const VERSION = '2.7.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -27,7 +27,7 @@
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
       volume: true
     },
-    extras: { hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur' },
+    extras: { hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
@@ -89,7 +89,7 @@
   }
 
   // Money amounts: "+125.00 USD", "-$40", "1,250.50 €" (prices on the axis have no currency, so they stay)
-  const MONEY_RE = /[+−\-]?\s?(?:[$€£¥]\s?[\d.,]*\d[KMB]?|[\d.,]*\d[KMB]?\s?(?:USD|EUR|GBP|JPY|AUD|CAD|CHF|USDT|USDC|[$€£¥]))/;
+  const MONEY_RE = /[+−\-]?\s?(?:[$€£¥]\s?[\d.,]*\d[KMB]?|[\d.,]*\d[KMB]?\s?(?:USD|EUR|GBP|JPY|AUD|CAD|CHF|USDT|USDC|[$€£¥]|ticks?\b|pips?\b|points?\b|pts\b))/;
   const MONEY_RE_G = new RegExp(MONEY_RE.source, 'g');
   const DEFAULT_UP = ['#089981', '#26a69a', '#22ab94'];
   const DEFAULT_DOWN = ['#f23645', '#ef5350', '#f7525f'];
@@ -334,6 +334,7 @@
       if (streamObs) { streamObs.disconnect(); streamObs = null; }
       document.querySelectorAll('.tvwp-sblur').forEach(e => e.classList.remove('tvwp-sblur'));
     }
+    if (typeof brkKick === 'function') brkKick();
     // redraw the chart so position-line P&L is masked / shown right away
     try { window.dispatchEvent(new Event('resize')); } catch (e) {}
     if (buildUI.onStreamer) buildUI.onStreamer();
@@ -1185,6 +1186,123 @@
   }, 2000);
 
   /* =========================================================
+   * Win / lose labels on take-profit and stop orders.
+   * Some brokers (e.g. Tradovate) turn brackets into plain limit/stop orders,
+   * so TradingView stops showing what you'd make or lose. This draws it.
+   * Read-only: never touches your orders.
+   * ======================================================= */
+  const brk = { positions: [], orders: [], sym: {}, canvas: null, sig: '', loop: false, busy: false };
+  const symRoot = s => String(s || '').split(':').pop().replace(/\d!$/, '').replace(/[FGHJKMNQUVXZ]\d{1,4}$/, '').toUpperCase();
+  async function brkPoll() {
+    if (brk.busy) return;
+    const b = S.extras.brk ? currentBroker() : null;
+    let connected = false;
+    try { connected = !!(b && (typeof b.isConnected !== 'function' || b.isConnected())); } catch (e) {}
+    if (!connected) { brk.positions = []; brk.orders = []; brkKick(); return; }
+    brk.busy = true;
+    try {
+      const [pos, ords] = await Promise.all([b.positions(), b.orders()]);
+      brk.positions = (pos || []).filter(p => p && p.qty);
+      brk.orders = (ords || []).filter(o => o && o.status === 6 && (o.type === 1 || o.type === 3 || o.type === 4));
+      for (const p of brk.positions) {
+        if (!brk.sym[p.symbol] && typeof b.symbolInfo === 'function') {
+          try { brk.sym[p.symbol] = await b.symbolInfo(p.symbol); } catch (e) { brk.sym[p.symbol] = {}; }
+        }
+      }
+    } catch (e) {
+      brk.positions = []; brk.orders = [];
+    } finally { brk.busy = false; }
+    brkKick();
+  }
+  setInterval(brkPoll, 1000);
+
+  function brkLabels() {
+    let chartSym = '';
+    try { chartSym = window.TradingViewApi.activeChart().symbol(); } catch (e) {}
+    const root = symRoot(chartSym), out = [];
+    for (const p of brk.positions) {
+      if (symRoot(p.symbol) !== root) continue;
+      const info = brk.sym[p.symbol] || {};
+      const tick = +info.minTick || +info.pipSize || 0;
+      if (!tick) continue;
+      const perTick = (+info.pipValue || 0) * (tick / (+info.pipSize || tick));
+      const long = p.side !== -1;
+      for (const o of brk.orders) {
+        if (symRoot(o.symbol) !== root) continue;
+        if (o.parentId) continue;                           // real brackets: TradingView already shows these
+        if ((o.side === -1) !== long) continue;             // only orders that would close the position
+        const price = o.type === 1 ? o.limitPrice : o.stopPrice;
+        if (!isFinite(price)) continue;
+        const ticks = Math.round(((price - p.avgPrice) / tick) * (long ? 1 : -1));
+        const qty = Math.min(+o.qty || 0, Math.abs(+p.qty) || 0) || Math.abs(+p.qty) || 1;
+        const money = ticks * perTick * qty;
+        const sign = v => (v > 0 ? '+' : v < 0 ? '−' : '');
+        const t = `${sign(ticks)}${Math.abs(ticks)} ticks`;
+        const m = perTick ? `${sign(money)}${Math.abs(money).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${info.currency || 'USD'}` : '';
+        const text = S.extras.brkMode === 'money' && m ? m : S.extras.brkMode === 'both' && m ? `${t} · ${m}` : t;
+        out.push({ price, text, win: ticks >= 0, kind: ticks >= 0 ? 'TP' : 'SL' });
+      }
+    }
+    return out;
+  }
+  function brkKick() { brk.sig = ''; if (!brk.loop) { brk.loop = true; requestAnimationFrame(brkFrame); } }
+  function brkFrame() {
+    const labels = S.extras.brk ? brkLabels() : [];
+    if (!labels.length) {
+      if (brk.canvas) { brk.canvas.remove(); brk.canvas = null; }
+      brk.loop = false; brk.sig = '';
+      return;
+    }
+    requestAnimationFrame(brkFrame);
+    let ms, ps, fv;
+    try {
+      const m = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget.model();
+      ms = m.mainSeries(); ps = ms.priceScale(); fv = ms.firstValue();
+    } catch (e) { return; }
+    const host = indPaneEl();
+    if (!host) return;
+    if (!brk.canvas || !brk.canvas.isConnected || brk.canvas.parentElement !== host) {
+      if (brk.canvas) brk.canvas.remove();
+      brk.canvas = document.createElement('canvas');
+      brk.canvas.className = 'tvwp-brk';
+      Object.assign(brk.canvas.style, { position: 'absolute', left: '0', top: '0', width: '100%', height: '100%', pointerEvents: 'none' });
+      host.appendChild(brk.canvas);
+    }
+    const W = host.clientWidth, H = host.clientHeight, dpr = window.devicePixelRatio || 1;
+    const ys = labels.map(l => ps.priceToCoordinate(l.price, fv));
+    const sig = [W, H, dpr, S.extras.streamer, S.extras.streamerChart, S.extras.brkRight, JSON.stringify(labels), ys.map(Math.round).join(',')].join('|');
+    if (sig === brk.sig) return;
+    brk.sig = sig;
+    const cv = brk.canvas;
+    if (cv.width !== Math.round(W * dpr)) cv.width = Math.round(W * dpr);
+    if (cv.height !== Math.round(H * dpr)) cv.height = Math.round(H * dpr);
+    const g = cv.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.clearRect(0, 0, cv.width, cv.height);
+    g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    g.font = '600 11px -apple-system, system-ui, "Segoe UI", sans-serif';
+    g.textBaseline = 'middle';
+    labels.forEach((l, i) => {
+      const y = ys[i];
+      if (!isFinite(y) || y < -10 || y > H + 10) return;
+      const tag = l.kind, text = l.text;            // fillText masks it in Streamer mode
+      const tw = g.measureText(tag).width, xw = g.measureText(text).width;
+      const pad = 6, h = 18, w = tw + xw + pad * 4;
+      const right = W - Math.max(0, +S.extras.brkRight || 0);
+      const x = Math.max(4, right - w);
+      const col = l.win ? '#22ab94' : '#f23645';
+      g.fillStyle = 'rgba(19,23,34,0.92)';
+      g.strokeStyle = col; g.lineWidth = 1;
+      g.beginPath();
+      if (g.roundRect) g.roundRect(x + 0.5, y - h / 2 + 0.5, w, h, 3); else g.rect(x + 0.5, y - h / 2 + 0.5, w, h);
+      g.fill(); g.stroke();
+      g.fillStyle = col;
+      g.fillText(tag, x + pad, y + 1);
+      g.fillText(text, x + pad * 3 + tw, y + 1);
+    });
+  }
+
+  /* =========================================================
    * Wallpaper rendering
    * ======================================================= */
   const LAYER = 'tvwp-layer';
@@ -1557,6 +1675,14 @@
         <div class="row"><span class="hint" style="flex:1">Style</span>
           <select id="xStreamStyle" style="width:140px"><option value="blur">Blur</option><option value="hide">Cover completely</option></select></div>
         <div class="hint">Toggle anytime with <b>Alt+Shift+S</b>. Covers the account panel (P&amp;L, equity, balance, margin), money columns in your history tables, and amounts with a currency anywhere on the page.</div>
+      </div>
+      <div class="sgroup"><h3>Trade brackets</h3>
+        <label class="sw"><input type="checkbox" id="xBrk"> Show win / lose on TP &amp; SL orders</label>
+        <div class="row"><span class="hint" style="flex:1">Show as</span>
+          <select id="xBrkMode" style="width:140px"><option value="ticks">Ticks</option><option value="money">Money</option><option value="both">Ticks + money</option></select></div>
+        <div class="row"><span class="hint" style="flex:1">Distance from right edge</span>
+          <input type="number" id="xBrkRight" min="0" max="800" step="10" style="width:80px"></div>
+        <div class="hint">For brokers like Tradovate that turn your brackets into plain limit/stop orders after you enter. Only reads your orders, never changes them.</div>
       </div>
       <label class="sw"><input type="checkbox" id="xAds"> Hide ads on the chart</label>
       <div class="hint">Hides TradingView's ad pop-ups and ad boxes on your screen.</div>
@@ -2066,7 +2192,16 @@
     $('#xStream').onchange = e => { S.extras.streamer = e.target.checked; save('extras'); applyStreamer(); };
     $('#xStreamChart').onchange = e => { S.extras.streamerChart = e.target.checked; save('extras'); applyStreamer(); };
     $('#xStreamStyle').onchange = e => { S.extras.streamerStyle = e.target.value; save('extras'); applyStreamer(); };
+    $('#xBrk').onchange = e => { S.extras.brk = e.target.checked; save('extras'); brkPoll(); brkKick(); };
+    $('#xBrkMode').onchange = e => { S.extras.brkMode = e.target.value; save('extras'); brkKick(); };
+    $('#xBrkRight').onchange = e => {
+      const v = Math.min(800, Math.max(0, parseInt(e.target.value, 10) || 0));
+      e.target.value = v; S.extras.brkRight = v; save('extras'); brkKick();
+    };
     function renderStreamUI() {
+      $('#xBrk').checked = S.extras.brk !== false;
+      $('#xBrkMode').value = S.extras.brkMode || 'ticks';
+      $('#xBrkRight').value = S.extras.brkRight ?? 300;
       $('#xStream').checked = !!S.extras.streamer;
       $('#xStreamChart').checked = S.extras.streamerChart !== false;
       $('#xStreamStyle').value = S.extras.streamerStyle || 'blur';
@@ -2088,7 +2223,7 @@
       const t = e.data && e.data.type;
       if (t === 'wall') { loadWallpaper(); refreshWall(); }
       if (t === 'candles') { rebuildLookup(); redraw(); }
-      if (t === 'extras') { applyAds(); applyStreamer(); }
+      if (t === 'extras') { applyAds(); applyStreamer(); brkKick(); }
       if (t === 'sounds') applyMute();
       if (t === 'soundlist') bufferCache.clear();
       if (t === 'ind') startInd();

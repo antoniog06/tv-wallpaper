@@ -51,4 +51,8 @@ Also in the Indicators tab, written for this project (not copied from any Tradin
 
 ## Streamer mode
 
-In the **Extras** tab, or with **Alt+Shift+S**, Streamer mode blurs (or fully covers) your P&L and balances so they don't show on a stream or screen share: the account panel (Unrealized/Realized P&L, equity, margin, available funds), the balance on the account button, money columns in your history tables, any amount shown with a currency anywhere on the page, and the P&L on position lines on the chart. Prices, symbols and percentages stay visible. The settings button gets a red ring while it's on.
+In the **Extras** tab, or with **Alt+Shift+S**, Streamer mode blurs (or fully covers) your P&L and balances so they don't show on a stream or screen share: the account panel (Unrealized/Realized P&L, equity, margin, available funds), the balance on the account button, money columns in your history tables, any amount shown with a currency, or in ticks, pips or points, anywhere on the page, and the P&L on position lines on the chart. Prices, symbols and percentages stay visible. The settings button gets a red ring while it's on.
+
+## Trade brackets (Tradovate and similar brokers)
+
+Some brokers turn your take-profit and stop-loss brackets into plain limit and stop orders once you're in a trade, so TradingView stops showing what you'd win or lose. With **Show win / lose on TP & SL orders** on (Extras tab), the script labels those exit orders with the projected result, in ticks, money or both, using your position's average price and the contract's tick value. Brokers whose brackets TradingView already labels (like Paper Trading) are left alone. It only reads your orders and never changes them.
