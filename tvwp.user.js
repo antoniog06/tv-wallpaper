@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.5.1
+// @version      2.6.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.5.1';
+  const VERSION = '2.6.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -27,7 +27,7 @@
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
       volume: true
     },
-    extras: { hideAds: true },
+    extras: { hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur' },
     ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
@@ -88,6 +88,9 @@
     return [Math.round(+m[1]), Math.round(+m[2]), Math.round(+m[3]), a];
   }
 
+  // Money amounts: "+125.00 USD", "-$40", "1,250.50 €" (prices on the axis have no currency, so they stay)
+  const MONEY_RE = /[+−\-]?\s?(?:[$€£¥]\s?[\d.,]*\d[KMB]?|[\d.,]*\d[KMB]?\s?(?:USD|EUR|GBP|JPY|AUD|CAD|CHF|USDT|USDC|[$€£¥]))/;
+  const MONEY_RE_G = new RegExp(MONEY_RE.source, 'g');
   const DEFAULT_UP = ['#089981', '#26a69a', '#22ab94'];
   const DEFAULT_DOWN = ['#f23645', '#ef5350', '#f7525f'];
   let lookup = null;           // Map "r,g,b" -> { t: [r,g,b,a], srcA }
@@ -156,6 +159,9 @@
       const rawSet = setters[prop];
       if (!draw || !rawSet) continue;
       C.prototype[fn] = function (...args) {
+        if (S.extras.streamer && S.extras.streamerChart && typeof args[0] === 'string' && MONEY_RE.test(args[0])) {
+          args[0] = args[0].replace(MONEY_RE_G, '•••••');
+        }
         const o = lookup && original[prop].get(this);
         if (typeof o !== 'string' || translate(o) === o) return draw.apply(this, args);
         const cur = this[prop];
@@ -263,6 +269,84 @@
     }
   }
   applyAds();
+
+  /* =========================================================
+   * Streamer mode: blurs P&L, balances and other account money
+   * ======================================================= */
+  const MONEY_HEADER = /p&l|pnl|profit|loss|balance|equity|margin|funds|commission|fee|buying power|net liq|cash|return|value/i;
+  const STREAM_CSS = `
+    [class*="accountSummaryField-"] [class*="value-"],
+    [data-qa-id="account-selector"] [class*="content-"],
+    .tvwp-sblur { filter: blur(7px) !important; user-select: none !important; }
+    html.tvwp-shide [class*="accountSummaryField-"] [class*="value-"],
+    html.tvwp-shide [data-qa-id="account-selector"] [class*="content-"],
+    html.tvwp-shide .tvwp-sblur { filter: none !important; color: transparent !important; text-shadow: none !important;
+      background: repeating-linear-gradient(45deg,#2a2e39 0 6px,#1e222d 6px 12px) !important; border-radius: 3px; }
+    html.tvwp-shide .tvwp-sblur * { visibility: hidden !important; }`;
+  let streamTimer = null, streamObs = null;
+  function maskTables() {
+    for (const table of document.querySelectorAll('table')) {
+      const head = table.tHead && table.tHead.rows[0];
+      if (!head) continue;
+      const cols = [];
+      [...head.cells].forEach((th, i) => { if (MONEY_HEADER.test(th.textContent || '')) cols.push(i); });
+      for (const row of table.tBodies.length ? [...table.tBodies].flatMap(b => [...b.rows]) : []) {
+        [...row.cells].forEach((td, i) => td.classList.toggle('tvwp-sblur', cols.includes(i)));
+      }
+    }
+    // Any other number with a currency (order panel, DOM, notifications), except inside our own panel
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    let n;
+    while ((n = walker.nextNode())) {
+      const t = n.nodeValue;
+      if (!t || t.length > 60 || !MONEY_RE.test(t)) continue;
+      const el = n.parentElement;
+      if (!el || el.closest('#tvwp-host') || el.classList.contains('tvwp-sblur')) continue;
+      el.classList.add('tvwp-sblur');
+    }
+  }
+  function scheduleMask() {
+    if (streamTimer) return;
+    streamTimer = setTimeout(() => { streamTimer = null; if (S.extras.streamer) maskTables(); }, 120);
+  }
+  function applyStreamer() {
+    if (!document.documentElement || !document.body) {
+      document.addEventListener('DOMContentLoaded', applyStreamer, { once: true });
+      return;
+    }
+    let st = document.getElementById('tvwp-stream');
+    const on = !!S.extras.streamer;
+    document.documentElement.classList.toggle('tvwp-shide', on && S.extras.streamerStyle === 'hide');
+    if (on) {
+      if (!st) {
+        st = document.createElement('style');
+        st.id = 'tvwp-stream';
+        st.textContent = STREAM_CSS;
+        document.documentElement.appendChild(st);
+      }
+      maskTables();
+      if (!streamObs) {
+        streamObs = new MutationObserver(scheduleMask);
+        streamObs.observe(document.body, { childList: true, subtree: true, characterData: true });
+      }
+    } else {
+      if (st) st.remove();
+      if (streamObs) { streamObs.disconnect(); streamObs = null; }
+      document.querySelectorAll('.tvwp-sblur').forEach(e => e.classList.remove('tvwp-sblur'));
+    }
+    // redraw the chart so position-line P&L is masked / shown right away
+    try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+    if (buildUI.onStreamer) buildUI.onStreamer();
+  }
+  function toggleStreamer() {
+    S.extras.streamer = !S.extras.streamer;
+    save('extras');
+    applyStreamer();
+  }
+  window.addEventListener('keydown', e => {
+    if (e.altKey && e.shiftKey && (e.key === 'S' || e.key === 's')) { e.preventDefault(); e.stopPropagation(); toggleStreamer(); }
+  }, true);
+  applyStreamer();
 
   /* =========================================================
    * Wallpaper storage (IndexedDB)
@@ -1328,6 +1412,7 @@
     background: #2962ff; color: #fff; border: none; cursor: grab; display: grid; place-items: center;
     box-shadow: 0 2px 10px rgba(0,0,0,.45); touch-action: none; user-select: none; }
   .fab:active { cursor: grabbing; }
+  .fab.live { box-shadow: 0 0 0 3px #f23645, 0 2px 10px rgba(0,0,0,.45); }
   .fab svg { width: 18px; height: 18px; pointer-events: none; }
   .panel { position: fixed; z-index: 2147483001; width: 330px; max-height: 80vh; overflow: auto;
     background: #131722; color: #d1d4dc; border: 1px solid #2a2e39; border-radius: 10px;
@@ -1466,6 +1551,13 @@
       <div class="hint">Drawn on the main chart pane. Together with your TradingView indicators, these stay within your plan's indicators-per-chart limit.</div>
     </section>
     <section data-tab="extras">
+      <div class="sgroup"><h3>Streamer mode</h3>
+        <label class="sw"><input type="checkbox" id="xStream"> Hide my P&amp;L and balances</label>
+        <label class="sw"><input type="checkbox" id="xStreamChart"> Also on the chart (position line P&amp;L)</label>
+        <div class="row"><span class="hint" style="flex:1">Style</span>
+          <select id="xStreamStyle" style="width:140px"><option value="blur">Blur</option><option value="hide">Cover completely</option></select></div>
+        <div class="hint">Toggle anytime with <b>Alt+Shift+S</b>. Covers the account panel (P&amp;L, equity, balance, margin), money columns in your history tables, and amounts with a currency anywhere on the page.</div>
+      </div>
       <label class="sw"><input type="checkbox" id="xAds"> Hide ads on the chart</label>
       <div class="hint">Hides TradingView's ad pop-ups and ad boxes on your screen.</div>
     </section>
@@ -1971,8 +2063,19 @@
       saveInd();
     };
 
+    $('#xStream').onchange = e => { S.extras.streamer = e.target.checked; save('extras'); applyStreamer(); };
+    $('#xStreamChart').onchange = e => { S.extras.streamerChart = e.target.checked; save('extras'); applyStreamer(); };
+    $('#xStreamStyle').onchange = e => { S.extras.streamerStyle = e.target.value; save('extras'); applyStreamer(); };
+    function renderStreamUI() {
+      $('#xStream').checked = !!S.extras.streamer;
+      $('#xStreamChart').checked = S.extras.streamerChart !== false;
+      $('#xStreamStyle').value = S.extras.streamerStyle || 'blur';
+      fab.classList.toggle('live', !!S.extras.streamer);
+    }
+    buildUI.onStreamer = renderStreamUI;
+    renderStreamUI();
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
-    function renderAllUI() { renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; showTab(S.ui.tab || 'wall'); }
+    function renderAllUI() { renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
   }
 
@@ -1985,7 +2088,7 @@
       const t = e.data && e.data.type;
       if (t === 'wall') { loadWallpaper(); refreshWall(); }
       if (t === 'candles') { rebuildLookup(); redraw(); }
-      if (t === 'extras') applyAds();
+      if (t === 'extras') { applyAds(); applyStreamer(); }
       if (t === 'sounds') applyMute();
       if (t === 'soundlist') bufferCache.clear();
       if (t === 'ind') startInd();

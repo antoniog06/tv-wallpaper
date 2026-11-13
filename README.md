@@ -48,3 +48,7 @@ Also in the Indicators tab, written for this project (not copied from any Tradin
 
 - **Quarterly Theory**: Daye's time quarters in New York time. 6-hour sessions (Asia, London, NY AM, NY PM), 90-minute and optional 22.5-minute quarters, session shading and labels, plus daily (00:00), session (2nd 90-minute quarter) and weekly (Monday 18:00) True Opens.
 - **Power of Three**: the last few 1H / 4H / daily / weekly candles drawn to the right of price, with the current higher-timeframe candle's open, high and low lines.
+
+## Streamer mode
+
+In the **Extras** tab, or with **Alt+Shift+S**, Streamer mode blurs (or fully covers) your P&L and balances so they don't show on a stream or screen share: the account panel (Unrealized/Realized P&L, equity, margin, available funds), the balance on the account button, money columns in your history tables, any amount shown with a currency anywhere on the page, and the P&L on position lines on the chart. Prices, symbols and percentages stay visible. The settings button gets a red ring while it's on.
