@@ -6,14 +6,17 @@
 
 param(
   [switch]$InstallShortcut,
-  [string]$ScriptUrl = 'https://raw.githubusercontent.com/antoniog06/tv-wallpaper/main/tvwp.user.js',
+  [string]$RepoUrl = 'https://raw.githubusercontent.com/antoniog06/tv-wallpaper/main',
   [int]$Port = 9222
 )
 
 $ErrorActionPreference = 'Stop'
 $dir = Join-Path $env:LOCALAPPDATA 'TVWallpaper'
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
+$ScriptUrl = "$RepoUrl/tvwp.user.js"
 $cache = Join-Path $dir 'tvwp.user.js'
+$icon = Join-Path $dir 'logo.ico'
+$installed = Join-Path $dir 'TV-Wallpaper.ps1'
 $log = Join-Path $dir 'launcher.log'
 function Log($m) { "$(Get-Date -Format s)  $m" | Add-Content -Path $log }
 Add-Type -AssemblyName PresentationFramework
@@ -36,21 +39,56 @@ function Find-TradingView {
 $exe = Find-TradingView
 if (-not $exe) { Say "Couldn't find the TradingView desktop app on this PC."; exit 1 }
 
+# ---------- app icon ----------
+function Update-Icon {
+  try {
+    Invoke-WebRequest -Uri "$RepoUrl/logo.ico" -UseBasicParsing -OutFile "$icon.tmp" -TimeoutSec 15
+    Move-Item -Force "$icon.tmp" $icon
+  } catch { Log "Icon download failed: $($_.Exception.Message)" }
+}
+# Points every 'TradingView (Wallpaper)' shortcut (desktop, taskbar pin, Start menu) at our icon.
+function Set-ShortcutIcons {
+  if (-not (Test-Path $icon)) { return }
+  $places = @(
+    [Environment]::GetFolderPath('Desktop'),
+    (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
+    (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
+  )
+  $ws = New-Object -ComObject WScript.Shell
+  $changed = $false
+  foreach ($pl in $places) {
+    $f = Join-Path $pl 'TradingView (Wallpaper).lnk'
+    if (-not (Test-Path $f)) { continue }
+    $lnk = $ws.CreateShortcut($f)
+    if ($lnk.IconLocation -ne "$icon,0") { $lnk.IconLocation = "$icon,0"; $lnk.Save(); $changed = $true; Log "Icon set: $f" }
+  }
+  if ($changed) { try { & "$env:SystemRoot\System32\ie4uinit.exe" -show 2>$null } catch {} }   # ask Windows to refresh icons
+}
+
 # ---------- one-time shortcut install ----------
 if ($InstallShortcut) {
   $self = $MyInvocation.MyCommand.Path
-  $installed = Join-Path $dir 'TV-Wallpaper.ps1'
   if ($self -ne $installed) { Copy-Item -Force $self $installed }
+  Update-Icon
   $ws = New-Object -ComObject WScript.Shell
   $lnk = $ws.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'TradingView (Wallpaper).lnk'))
   $lnk.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
   $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$installed`""
-  $lnk.IconLocation = "$exe,0"
+  $lnk.IconLocation = if (Test-Path $icon) { "$icon,0" } else { "$exe,0" }
   $lnk.WorkingDirectory = $dir
   $lnk.Save()
+  Set-ShortcutIcons
   Say "Done. Use the 'TradingView (Wallpaper)' shortcut on your desktop to open TradingView from now on."
   exit 0
 }
+
+# ---------- keep the launcher, icon and shortcuts up to date ----------
+try {
+  Invoke-WebRequest -Uri "$RepoUrl/TV-Wallpaper.ps1" -UseBasicParsing -OutFile "$installed.tmp" -TimeoutSec 15
+  if ((Get-Item "$installed.tmp").Length -gt 1000) { Move-Item -Force "$installed.tmp" $installed; Log 'Launcher updated (used next launch)' }
+} catch { Log "Launcher update failed: $($_.Exception.Message)" }
+Update-Icon
+Set-ShortcutIcons
 
 # ---------- get the latest script ----------
 try {
