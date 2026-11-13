@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.0.0
+// @version      3.1.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.0.0';
+  const VERSION = '3.1.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -27,7 +27,7 @@
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
       volume: true
     },
-    extras: { hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
+    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
@@ -159,7 +159,7 @@
       const rawSet = setters[prop];
       if (!draw || !rawSet) continue;
       C.prototype[fn] = function (...args) {
-        if (S.extras.streamer && S.extras.streamerChart && typeof args[0] === 'string' && MONEY_RE.test(args[0])) {
+        if (!S.extras.allOff && S.extras.streamer && S.extras.streamerChart && typeof args[0] === 'string' && MONEY_RE.test(args[0])) {
           args[0] = args[0].replace(MONEY_RE_G, '•••••');
         }
         const o = lookup && original[prop].get(this);
@@ -194,7 +194,7 @@
   function rebuildLookup() {
     cache.clear();
     const c = S.candles;
-    if (!c.enabled) { lookup = null; return; }
+    if (!c.enabled || S.extras.allOff) { lookup = null; return; }
     const tgt = (hex, a) => { const p = parseColor(hex); return p ? [p[0], p[1], p[2], a ?? 1] : null; };
     const body = { up: tgt(c.up, c.upA), down: tgt(c.down, c.downA) };
     const border = { up: c.separate ? tgt(c.borderUp, c.upA) : body.up, down: c.separate ? tgt(c.borderDown, c.downA) : body.down };
@@ -257,7 +257,7 @@
       return;
     }
     let st = document.getElementById('tvwp-ads');
-    if (S.extras.hideAds) {
+    if (S.extras.hideAds && !S.extras.allOff) {
       if (!st) {
         st = document.createElement('style');
         st.id = 'tvwp-ads';
@@ -315,7 +315,7 @@
       return;
     }
     let st = document.getElementById('tvwp-stream');
-    const on = !!S.extras.streamer;
+    const on = !!S.extras.streamer && !S.extras.allOff;
     document.documentElement.classList.toggle('tvwp-shide', on && S.extras.streamerStyle === 'hide');
     if (on) {
       if (!st) {
@@ -349,7 +349,7 @@
   }, true);
   // Hide money right away with CSS (before the page draws); the rest starts in start().
   function earlyStreamCss() {
-    if (!S.extras.streamer || document.getElementById('tvwp-stream')) return;
+    if (!S.extras.streamer || S.extras.allOff || document.getElementById('tvwp-stream')) return;
     if (!document.documentElement) {
       const mo = new MutationObserver(() => { if (document.documentElement) { mo.disconnect(); earlyStreamCss(); } });
       mo.observe(document, { childList: true });
@@ -361,6 +361,26 @@
     document.documentElement.appendChild(early);
   }
   earlyStreamCss();
+
+  /* =========================================================
+   * Master switch: turns every feature off at once (your settings are kept)
+   * ======================================================= */
+  function setAllOff(off) {
+    S.extras.allOff = !!off;
+    save('alloff');
+    applyAllOff();
+  }
+  function applyAllOff() {
+    try { refreshWall(); } catch (e) {}
+    try { rebuildLookup(); redraw(); } catch (e) {}
+    try { startInd(); } catch (e) {}
+    try { applyAds(); applyStreamer(); applyMute(); } catch (e) {}
+    try { brkKick(); } catch (e) {}
+    if (buildUI.refresh) buildUI.refresh();
+  }
+  window.addEventListener('keydown', e => {
+    if (e.altKey && e.shiftKey && (e.key === 'X' || e.key === 'x')) { e.preventDefault(); e.stopPropagation(); setAllOff(!S.extras.allOff); }
+  }, true);
 
   /* =========================================================
    * Wallpaper storage (IndexedDB)
@@ -579,7 +599,7 @@
 
   function fireSlot(slot) {
     const so = S.sounds;
-    if (!so.enabled || pageClosing) return;
+    if (!so.enabled || pageClosing || S.extras.allOff) return;
     if (FILL_SLOTS.includes(slot) && so.oneForAll) { playSound(so.all); return; }
     const conf = so.slots[slot];
     if (conf && conf.on) playSound(conf.s);
@@ -704,7 +724,7 @@
   function applyMute() {
     const p = tvSoundPref();
     if (!p || typeof p.value !== 'function') return false;
-    const want = S.sounds.enabled && S.sounds.muteTV;
+    const want = S.sounds.enabled && S.sounds.muteTV && !S.extras.allOff;
     if (want) {
       if (p.value()) { try { localStorage.setItem('tvwp_tvsound_was_on', '1'); } catch (e) {} p.setValue(false); }
     } else if (localStorage.getItem('tvwp_tvsound_was_on') === '1') {
@@ -747,7 +767,7 @@
     return nativeCount;
   }
   function overlaySlots() { return Math.max(0, planLimit().limit - nativeCount); }
-  function activeOverlays() { return S.ind.list.filter(x => x.on).slice(0, overlaySlots()); }
+  function activeOverlays() { return S.extras.allOff ? [] : S.ind.list.filter(x => x.on).slice(0, overlaySlots()); }
 
   function readBars(ms) {
     const b = ms.bars(), f = b.firstIndex(), l = b.lastIndex();
@@ -1217,7 +1237,7 @@
   const symRoot = s => String(s || '').split(':').pop().replace(/\d!$/, '').replace(/[FGHJKMNQUVXZ]\d{1,4}$/, '').toUpperCase();
   async function brkPoll() {
     if (brk.busy) return;
-    const b = S.extras.brk ? currentBroker() : null;
+    const b = S.extras.brk && !S.extras.allOff ? currentBroker() : null;
     let connected = false;
     try { connected = !!(b && (typeof b.isConnected !== 'function' || b.isConnected())); } catch (e) {}
     if (!connected) { brk.positions = []; brk.orders = []; brkKick(); return; }
@@ -1269,7 +1289,7 @@
   }
   function brkKick() { brk.sig = ''; if (!brk.loop) { brk.loop = true; requestAnimationFrame(brkFrame); } }
   function brkFrame() {
-    const labels = S.extras.brk ? brkLabels() : [];
+    const labels = S.extras.brk && !S.extras.allOff ? brkLabels() : [];
     if (!labels.length) {
       if (brk.canvas) { brk.canvas.remove(); brk.canvas = null; }
       brk.loop = false; brk.sig = '';
@@ -1463,7 +1483,7 @@
 
   function renderAll() {
     scheduled = false;
-    if (!S.wall.enabled || !source) {
+    if (!S.wall.enabled || !source || S.extras.allOff) {
       document.querySelectorAll('canvas.' + LAYER).forEach(c => c.remove());
       return;
     }
@@ -1596,6 +1616,15 @@
   .tabs button.on svg { color: #fff; }
   .tabs button .badge { margin-left: auto; font-size: 10.5px; padding: 1px 6px; border-radius: 10px; background: var(--card2); color: var(--muted); }
   .tabs button.on .badge { background: rgba(255,255,255,.22); color: #fff; }
+  .power { width: 28px; height: 28px; border-radius: 8px; border: 1px solid var(--line2); background: var(--card); color: var(--good); cursor: pointer; display: grid; place-items: center; padding: 0; }
+  .power svg { width: 15px; height: 15px; }
+  .power:hover { border-color: var(--bad); color: var(--bad); }
+  .power.off { color: var(--bad); border-color: var(--bad); background: rgba(242,73,92,.12); }
+  .offbar { display: none; align-items: center; justify-content: space-between; gap: 10px; margin: 12px 18px 0; padding: 10px 12px; border-radius: 10px;
+    background: rgba(242,73,92,.12); color: var(--bad); font-size: 12.5px; font-weight: 600; }
+  .panel.alloff .offbar { display: flex; }
+  .panel.alloff .content, .panel.alloff .quick { opacity: .45; pointer-events: none; }
+  .fab.alloff { filter: grayscale(1); opacity: .55; }
   .quick { border-top: 1px solid var(--line); padding: 6px 10px; display: grid; gap: 0; }
   .quick label { display: flex; align-items: center; justify-content: space-between; padding: 4px 4px; font-size: 12.5px; cursor: pointer; }
   .foot { padding: 8px 14px 12px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
@@ -1762,7 +1791,8 @@
   <button class="fab" title="TV Wallpaper (Alt+Shift+W)">${ICON.logo}</button>
   <div class="panel">
     <aside>
-      <div class="brand"><span class="logo">${ICON.logo}</span>TV Wallpaper</div>
+      <div class="brand"><span class="logo">${ICON.logo}</span><span style="flex:1">TV Wallpaper</span>
+        <button class="power" id="power" title="Turn everything off (Alt+Shift+X)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1011.4 0"/></svg></button></div>
       <div class="conn"><span class="dot" id="connDot"></span><div><b>TradingView</b><small id="connText">Checking…</small></div></div>
       <nav class="tabs">
         <div class="grp">Chart</div>
@@ -1782,6 +1812,7 @@
     </aside>
     <main>
       <header><div class="t"><h1 id="pgTitle"></h1><p id="pgSub"></p></div><span class="pill" id="pill"></span><button class="x" title="Close">×</button></header>
+      <div class="offbar" id="offbar">Everything is turned off. Your settings are saved. <button class="btn primary slim" id="powerOn">Turn back on</button></div>
       <div class="content">
 
     <section data-tab="wall">
@@ -1867,6 +1898,7 @@
 
     <section data-tab="extras">
       <div class="card">
+        ${item('Turn everything off', 'Stops every feature at once. Your settings stay saved. Shortcut: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd>', '<input type="checkbox" id="gAllOff">')}
         ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
         ${item('Theme', 'Auto follows your TradingView theme.', '<div class="seg" id="gTheme"><button data-v="auto">Auto</button><button data-v="dark">Dark</button><button data-v="light">Light</button></div>')}
         ${item('Button position', 'Drag the floating button anywhere, or put it back here.', '<button class="btn slim" id="gResetPos">Reset</button>')}
@@ -1874,6 +1906,7 @@
       <div class="card">
         ${item('Open / close this window', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></span>')}
         ${item('Streamer mode on / off', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></span>')}
+        ${item('Everything off / on', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd></span>')}
       </div>
       <div class="card">
         ${item('Version', 'Updates install automatically.', `<span class="hint">v${VERSION}</span>`)}
@@ -2437,6 +2470,17 @@
     }
     root.querySelectorAll('#gTheme button').forEach(b => b.onclick = () => { S.ui.theme = b.dataset.v; save(null); applyTheme(); });
     new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    $('#power').onclick = () => setAllOff(!S.extras.allOff);
+    $('#powerOn').onclick = () => setAllOff(false);
+    $('#gAllOff').onchange = e => setAllOff(e.target.checked);
+    function renderOff() {
+      const off = !!S.extras.allOff;
+      panel.classList.toggle('alloff', off);
+      fab.classList.toggle('alloff', off);
+      $('#power').classList.toggle('off', off);
+      $('#power').title = off ? 'Turn everything back on (Alt+Shift+X)' : 'Turn everything off (Alt+Shift+X)';
+      $('#gAllOff').checked = off;
+    }
     $('#gResetPos').onclick = () => { S.ui.x = S.ui.y = S.ui.px = S.ui.py = null; save(null); placePanel(); };
     function renderStatus() {
       let name = '', connected = false;
@@ -2452,8 +2496,8 @@
       $('#connDot').classList.toggle('on', connected);
       $('#connText').textContent = connected ? `${name || 'Broker'} · connected` : 'No broker connected';
       const pill = $('#pill');
-      pill.className = 'pill' + (S.extras.streamer ? ' live' : connected ? ' ok' : '');
-      pill.textContent = S.extras.streamer ? '● Streamer on' : connected ? '● ' + (name || 'Connected') : 'Not trading';
+      pill.className = 'pill' + (S.extras.allOff ? ' live' : S.extras.streamer ? ' live' : connected ? ' ok' : '');
+      pill.textContent = S.extras.allOff ? '⏻ All off' : S.extras.streamer ? '● Streamer on' : connected ? '● ' + (name || 'Connected') : 'Not trading';
       const nOn = S.ind.list.filter(x => x.on).length;
       const badge = root.querySelector('[data-badge="ind"]');
       badge.hidden = !nOn; badge.textContent = nOn + ' on';
@@ -2467,8 +2511,9 @@
     }
     applyTheme();
 
-    function renderAllUI() { renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
-    buildUI.refresh = () => { if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
+    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
+    buildUI.refresh = () => { renderOff(); if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
+    renderOff();
   }
 
   /* =========================================================
@@ -2481,6 +2526,7 @@
       if (t === 'wall') { loadWallpaper(); refreshWall(); }
       if (t === 'candles') { rebuildLookup(); redraw(); }
       if (t === 'extras') { applyAds(); applyStreamer(); brkKick(); }
+      if (t === 'alloff') applyAllOff();
       if (t === 'sounds') applyMute();
       if (t === 'soundlist') bufferCache.clear();
       if (t === 'ind') startInd();
