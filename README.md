@@ -56,3 +56,9 @@ In the **Extras** tab, or with **Alt+Shift+S**, Streamer mode blurs (or fully co
 ## Trade brackets (Tradovate and similar brokers)
 
 Some brokers turn your take-profit and stop-loss brackets into plain limit and stop orders once you're in a trade, so TradingView stops showing what you'd win or lose. With **Show win / lose on TP & SL orders** on (Extras tab), the script labels those exit orders with the projected result, in ticks, money or both, using your position's average price and the contract's tick value. Brokers whose brackets TradingView already labels (like Paper Trading) are left alone. It only reads your orders and never changes them.
+
+## Journal (trade recording)
+
+The **Journal** page records every trade automatically once **Record my trades** is on: symbol, long/short, size, average entry and exit, ticks, gross and net P&L (after commission), and time held. It builds trades from your broker's actual fills, so scale-ins, scale-outs and long-to-short reversals are handled. It works with any broker connected in TradingView, keeps recording in a background tab or with the desktop app minimized, and when you reopen TradingView it catches up on trades made while it was closed (including trades placed on your broker's own app). Export everything to CSV for Excel or Google Sheets.
+
+**Record chart video** films the chart from entry until 8 seconds after exit, as a WebM video you can watch or download from the trade's ▶ button. It needs no permission pop-ups and works in both Chrome and the desktop app. Only the newest videos are kept (you choose how many). Trades and videos are stored only on your computer, separately in Chrome and in the desktop app.

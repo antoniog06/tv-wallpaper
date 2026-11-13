@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.1.0
+// @version      3.2.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.1.0';
+  const VERSION = '3.2.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -27,6 +27,7 @@
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
       volume: true
     },
+    rec: { on: false, video: false, quality: '720', keep: 25 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
@@ -49,6 +50,7 @@
         wall: { ...DEFAULTS.wall, ...s.wall },
         candles: { ...DEFAULTS.candles, ...s.candles },
         extras: { ...DEFAULTS.extras, ...s.extras },
+        rec: { ...DEFAULTS.rec, ...s.rec },
         ind: { list: Array.isArray(s.ind && s.ind.list) ? s.ind.list : [] },
         sounds: (() => {
           const d = DEFAULTS.sounds, u = s.sounds || {}, slots = {};
@@ -376,6 +378,7 @@
     try { startInd(); } catch (e) {}
     try { applyAds(); applyStreamer(); applyMute(); } catch (e) {}
     try { brkKick(); } catch (e) {}
+    if (!S.extras.allOff) setTimeout(() => { try { recBackfill(); } catch (e) {} }, 500);
     if (buildUI.refresh) buildUI.refresh();
   }
   window.addEventListener('keydown', e => {
@@ -389,11 +392,13 @@
     _db: null,
     open() {
       return this._db || (this._db = new Promise((res, rej) => {
-        const r = indexedDB.open('tvwp', 2);
+        const r = indexedDB.open('tvwp', 3);
         r.onupgradeneeded = () => {
           const db = r.result;
           if (!db.objectStoreNames.contains('wallpapers')) db.createObjectStore('wallpapers', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('sounds')) db.createObjectStore('sounds', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('trades')) db.createObjectStore('trades', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('videos')) db.createObjectStore('videos', { keyPath: 'id' });
         };
         r.onsuccess = () => res(r.result);
         r.onerror = () => rej(r.error);
@@ -416,7 +421,17 @@
     soundsAll() { return this.run('readonly', s => s.getAll(), 'sounds'); },
     soundGet(id) { return this.run('readonly', s => s.get(id), 'sounds'); },
     soundPut(x) { return this.run('readwrite', s => s.put(x), 'sounds'); },
-    soundDel(id) { return this.run('readwrite', s => s.delete(id), 'sounds'); }
+    soundDel(id) { return this.run('readwrite', s => s.delete(id), 'sounds'); },
+    tradesAll() { return this.run('readonly', s => s.getAll(), 'trades'); },
+    tradeGet(id) { return this.run('readonly', s => s.get(id), 'trades'); },
+    tradePut(x) { return this.run('readwrite', s => s.put(x), 'trades'); },
+    tradeDel(id) { return this.run('readwrite', s => s.delete(id), 'trades'); },
+    tradesClear() { return this.run('readwrite', s => s.clear(), 'trades'); },
+    videoGet(id) { return this.run('readonly', s => s.get(id), 'videos'); },
+    videoPut(x) { return this.run('readwrite', s => s.put(x), 'videos'); },
+    videoDel(id) { return this.run('readwrite', s => s.delete(id), 'videos'); },
+    videoKeys() { return this.run('readonly', s => s.getAllKeys(), 'videos'); },
+    videosClear() { return this.run('readwrite', s => s.clear(), 'videos'); }
   };
 
   /* =========================================================
@@ -695,6 +710,7 @@
         unsub(hookedBroker, 'orderUpdate', onOrderUpdate);
         unsub(hookedBroker, 'orderPartialUpdate', onOrderPartial);
         unsub(hookedBroker, 'executionUpdate', onExecution);
+        unsub(hookedBroker, 'executionUpdate', recOnExec);
         unsub(hookedBroker, 'ordersFullUpdate', onFullUpdate);
         unsub(hookedBroker, 'connectionStatusUpdate', onConnection);
       }
@@ -703,6 +719,7 @@
       if (b && sub(b, 'orderUpdate', onOrderUpdate)) {
         sub(b, 'orderPartialUpdate', onOrderPartial);
         sub(b, 'executionUpdate', onExecution);
+        sub(b, 'executionUpdate', recOnExec);
         sub(b, 'ordersFullUpdate', onFullUpdate);
         sub(b, 'connectionStatusUpdate', onConnection);
         hookedBroker = b;
@@ -713,9 +730,298 @@
       let conn = null;
       try { conn = typeof hookedBroker.isConnected === 'function' ? !!hookedBroker.isConnected() : null; } catch (e) {}
       if (conn !== hookedConnected && hookedConnected !== null) onConnection();
+      if (conn && hookedConnected !== true) setTimeout(recBackfill, 3500);   // catch up on trades missed while closed
       hookedConnected = conn;
     }
   }
+
+  /* =========================================================
+   * Trade journal: records every round-trip trade from your broker's fills.
+   * Works for any broker connected in TradingView, keeps working in a
+   * background tab, and catches up on trades made while TradingView was closed.
+   * ======================================================= */
+  const REC_KEY = 'tvwp_rec_state';
+  const recInfoCache = {};
+  function recLoad() {
+    let st = null;
+    try { st = JSON.parse(localStorage.getItem(REC_KEY)); } catch (e) {}
+    st = st || {};
+    return { since: st.since || Date.now(), seen: st.seen || [], open: st.open || {}, lastFill: st.lastFill || 0 };
+  }
+  function recSave(st) {
+    st.seen = st.seen.slice(-4000);
+    try { localStorage.setItem(REC_KEY, JSON.stringify(st)); } catch (e) {}
+  }
+  function recStartFresh() {   // called when recording is switched on
+    const st = recLoad();
+    st.since = Date.now(); st.open = {};
+    recSave(st);
+  }
+  function withLock(name, fn) {
+    if (navigator.locks && navigator.locks.request) return navigator.locks.request(name, fn);
+    return Promise.resolve().then(fn);
+  }
+  async function recTick(symbol) {
+    if (recInfoCache[symbol] !== undefined) return recInfoCache[symbol];
+    let info = null;
+    try { const b = currentBroker(); if (b && typeof b.symbolInfo === 'function') info = await b.symbolInfo(symbol); } catch (e) {}
+    recInfoCache[symbol] = info || {};
+    return recInfoCache[symbol];
+  }
+  function normFill(ex) {
+    if (!ex || !ex.symbol || !(+ex.qty) || !isFinite(+ex.price)) return null;
+    let t = +ex.time || Date.now();
+    if (t < 1e12) t *= 1000;                       // seconds -> ms
+    const id = String(ex.id || `${ex.orderId || ''}:${t}:${ex.price}:${ex.qty}:${ex.side}`);
+    return { id, symbol: ex.symbol, side: ex.side === -1 ? -1 : 1, qty: Math.abs(+ex.qty), price: +ex.price, time: t,
+      commission: +ex.commission || 0, pointValue: +ex.pointValue || 0, orderId: ex.orderId || '' };
+  }
+  function newTrade(f) {
+    return { id: 't' + f.time + Math.random().toString(36).slice(2, 6), symbol: f.symbol, dir: f.side, qty: 0, maxQty: 0,
+      entryQty: 0, entryValue: 0, exitQty: 0, exitValue: 0, points: 0, commission: 0, pointValue: f.pointValue,
+      openTime: f.time, fills: [], video: false, backfilled: false };
+  }
+  async function finishTrade(t) {
+    const info = await recTick(t.symbol);
+    const pv = t.pointValue || (+info.pipValue && +info.pipSize ? +info.pipValue / +info.pipSize : 0);
+    const tick = +info.minTick || +info.pipSize || 0;
+    const entry = t.entryValue / t.entryQty, exit = t.exitValue / t.exitQty;
+    const rec = {
+      id: t.id, symbol: t.symbol, dir: t.dir, qty: t.maxQty, entry, exit,
+      openTime: t.openTime, closeTime: t.closeTime,
+      ticks: tick ? Math.round(((exit - entry) * t.dir) / tick) : null,
+      gross: pv ? t.points * pv : null, commission: t.commission,
+      net: pv ? t.points * pv - t.commission : null, currency: info.currency || 'USD',
+      fills: t.fills, backfilled: t.backfilled, videoId: t.video ? 'v_' + t.id : null
+    };
+    await DB.tradePut(rec);
+    return rec;
+  }
+  // Applies fills (oldest first) to the open trades. Only one window does this at a time.
+  function recProcess(fills, live) {
+    if (!S.rec.on || S.extras.allOff) return Promise.resolve();
+    return withLock('tvwp-rec', async () => {
+      const st = recLoad();
+      const seen = new Set(st.seen);
+      const list = fills.map(normFill).filter(Boolean).sort((a, b) => a.time - b.time);
+      const opened = [], closed = [];
+      for (const f of list) {
+        if (seen.has(f.id) || f.time < st.since - 2000) continue;
+        seen.add(f.id); st.seen.push(f.id);
+        st.lastFill = Math.max(st.lastFill, f.time);
+        let qty = f.qty;
+        while (qty > 0) {
+          let t = st.open[f.symbol];
+          if (!t) {
+            t = st.open[f.symbol] = newTrade(f);
+            t.backfilled = !live;
+            opened.push(t);
+          }
+          if (!t.pointValue && f.pointValue) t.pointValue = f.pointValue;
+          if (t.qty === 0 || Math.sign(t.qty) === f.side) {          // opening / adding
+            t.qty += f.side * qty; t.entryQty += qty; t.entryValue += f.price * qty;
+            t.maxQty = Math.max(t.maxQty, Math.abs(t.qty));
+            t.commission += f.commission; t.fills.push({ time: f.time, side: f.side, qty, price: f.price });
+            qty = 0;
+          } else {                                                     // reducing / closing
+            const c = Math.min(qty, Math.abs(t.qty));
+            const avg = t.entryValue / t.entryQty;
+            t.points += (f.price - avg) * t.dir * c;
+            t.exitQty += c; t.exitValue += f.price * c; t.qty += f.side * c;
+            t.commission += f.commission * (c / f.qty);
+            t.fills.push({ time: f.time, side: f.side, qty: c, price: f.price });
+            qty -= c;
+            if (t.qty === 0) {
+              t.closeTime = f.time;
+              delete st.open[f.symbol];
+              closed.push(t);
+              f.commission = f.commission * (qty / f.qty);   // what's left goes to a flipped position
+            }
+          }
+        }
+      }
+      recSave(st);
+      const recs = [];
+      for (const t of closed) recs.push(await finishTrade(t));
+      return { opened, closed, recs, live };
+    }).then(res => {
+      if (!res) return;
+      if (res.live) for (const t of res.opened) liveTrades.add(t.id);
+      videoSync();
+      if (res.recs.length && buildUI.onJournal) buildUI.onJournal();
+    }).catch(e => console.warn('[TV Wallpaper] journal error', e));
+  }
+  function recOnExec(ex) {
+    if (pageClosing) return;
+    const f = normFill(ex);
+    if (!f) return;
+    recProcess([ex], Date.now() - f.time < 60000);
+  }
+  let backfilling = false;
+  async function recBackfill() {
+    if (!S.rec.on || S.extras.allOff || backfilling) return;
+    const b = currentBroker();
+    if (!b || typeof b.executions !== 'function') return;
+    backfilling = true;
+    try {
+      const st = recLoad();
+      const symbols = new Set(Object.keys(st.open));
+      if (typeof b.ordersHistory === 'function') {
+        for (const o of (await b.ordersHistory()) || []) {
+          const when = +((o.extra && (o.extra.closeDate || o.extra.placingTime)) || o.updateTime || o.time || 0);
+          if (o.status === 2 && o.symbol && (!when || when >= st.since - 2000)) symbols.add(o.symbol);
+        }
+      }
+      try { for (const p of (await b.positions()) || []) if (p && p.symbol) symbols.add(p.symbol); } catch (e) {}
+      const all = [];
+      for (const sym of symbols) {
+        try { all.push(...((await b.executions(sym)) || [])); } catch (e) {}
+      }
+      if (all.length) await recProcess(all, false);
+    } catch (e) {
+      console.warn('[TV Wallpaper] journal catch-up failed', e);
+    } finally { backfilling = false; }
+  }
+
+  /* ---- chart video while you're in a trade ---- */
+  let vid = null;
+  const liveTrades = new Set();   // trades opened while this browser was running (not caught up from history)
+  // Every window checks the shared trade state, so the right one starts/stops filming
+  // no matter which window happened to process the fill.
+  function videoSync() {
+    if (pageClosing) return;
+    const want = S.rec.on && S.rec.video && !S.extras.allOff;
+    const open = recLoad().open;
+    const openList = Object.values(open);
+    if (vid && !vid.stopTimer) {
+      const still = openList.some(t => t.id === vid.tradeId);
+      if (!want) videoStop(vid.tradeId, 0);
+      else if (!still) videoStop(vid.tradeId);
+    }
+    if (!want) return;
+    for (const t of openList) {
+      const fresh = liveTrades.has(t.id) || (!t.backfilled && Date.now() - t.openTime < 15000);
+      if (!fresh || t.video || (vid && vid.tradeId === t.id)) continue;
+      videoStart(t);
+      break;
+    }
+  }
+  setInterval(videoSync, 500);
+  const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+  function videoTicker(fps, fn) {
+    // A worker keeps ticking even when the tab is in the background (normal timers get slowed down there).
+    try {
+      const url = URL.createObjectURL(new Blob([`setInterval(()=>postMessage(0), ${Math.round(1000 / fps)});`], { type: 'text/javascript' }));
+      const w = new Worker(url);
+      w.onmessage = fn;
+      return () => { w.terminate(); URL.revokeObjectURL(url); };
+    } catch (e) {
+      const h = setInterval(fn, Math.round(1000 / fps));
+      return () => clearInterval(h);
+    }
+  }
+  function drawChartFrame(g, cv, t) {
+    const cont = document.querySelector('.chart-container.active') || document.querySelector('.chart-container');
+    if (!cont) return;
+    const cr = cont.getBoundingClientRect();
+    if (cr.width < 50 || cr.height < 50) return;
+    const sc = Math.min(cv.width / cr.width, cv.height / cr.height);
+    const ox = (cv.width - cr.width * sc) / 2, oy = (cv.height - cr.height * sc) / 2;
+    g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1;
+    g.fillStyle = getComputedStyle(cont).backgroundColor || '#131722';
+    if (/rgba\(0, 0, 0, 0\)|transparent/.test(g.fillStyle)) g.fillStyle = '#131722';
+    g.fillRect(0, 0, cv.width, cv.height);
+    for (const c of cont.querySelectorAll('canvas')) {
+      if (!c.width || !c.height) continue;
+      const r = c.getBoundingClientRect();
+      if (r.width < 1 || r.height < 1) continue;
+      const layer = c.classList.contains('tvwp-layer');
+      g.globalAlpha = layer ? (+c.style.opacity || 1) : 1;
+      g.globalCompositeOperation = layer ? (c.style.mixBlendMode || 'source-over') : 'source-over';
+      try { g.drawImage(c, ox + (r.left - cr.left) * sc, oy + (r.top - cr.top) * sc, r.width * sc, r.height * sc); } catch (e) {}
+    }
+    g.globalCompositeOperation = 'source-over'; g.globalAlpha = 1;
+    const label = `${String(t.symbol).split(':').pop()} · ${t.dir > 0 ? 'Long' : 'Short'} · ${new Date().toLocaleTimeString()}`;
+    g.font = `600 ${Math.round(14 * cv.height / 720)}px -apple-system, system-ui, sans-serif`;
+    const pad = 10 * cv.height / 720, w = g.measureText(label).width + pad * 2, h = 24 * cv.height / 720;
+    g.fillStyle = 'rgba(0,0,0,.55)'; g.fillRect(pad, cv.height - h - pad, w, h);
+    g.fillStyle = '#fff'; g.textBaseline = 'middle'; g.fillText(label, pad * 2, cv.height - pad - h / 2);
+  }
+  let nextVideo = null;
+  function videoStart(t) {
+    if (!S.rec.on || !S.rec.video || S.extras.allOff || typeof MediaRecorder === 'undefined') return;
+    if (vid) {
+      // Still filming the last few seconds of the previous trade: finish that video now, then start this one.
+      if (vid.stopTimer) { nextVideo = t; clearTimeout(vid.stopTimer); clearTimeout(vid.maxTimer); try { vid.mr.stop(); } catch (e) {} }
+      return;
+    }
+    if (navigator.locks && navigator.locks.request) {
+      // Only one window records. The lock is held until this recording ends.
+      navigator.locks.request('tvwp-video', { ifAvailable: true }, lock => {
+        if (vid) return;
+        if (!lock) return;                     // another window is filming; the sync tries again
+        return new Promise(done => startRecording(t, done));
+      }).catch(() => {});
+    } else startRecording(t, () => {});
+  }
+  function startRecording(t, done) {
+    const o = recLoad().open[t.symbol];
+    if (!o || o.id !== t.id || o.video) { done(); return; }   // trade already closed, or already being filmed
+    try {
+      const H = S.rec.quality === '1080' ? 1080 : 720, W = Math.round(H * 16 / 9);
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const g = cv.getContext('2d');
+      drawChartFrame(g, cv, t);
+      const stream = cv.captureStream(30);
+      const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
+      const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: H === 1080 ? 5e6 : 2.5e6 });
+      const chunks = [];
+      mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      const stopTick = videoTicker(30, () => drawChartFrame(g, cv, t));
+      vid = { tradeId: t.id, mr, stopTick, started: Date.now(), stopTimer: null, maxTimer: null };
+      vid.maxTimer = setTimeout(() => videoStop(t.id, 0), 30 * 60000);      // 30-minute cap per trade
+      mr.onstop = async () => {
+        stopTick();
+        const blob = new Blob(chunks, { type: mr.mimeType || 'video/webm' });
+        const v = vid; vid = null;
+        try {
+          if (blob.size) {
+            await DB.videoPut({ id: 'v_' + t.id, tradeId: t.id, blob, size: blob.size, mime: blob.type, started: v.started, ended: Date.now() });
+            const rec = await DB.tradeGet(t.id);
+            if (rec && !rec.videoId) { rec.videoId = 'v_' + t.id; await DB.tradePut(rec); }
+            await videoCleanup();
+          }
+        } catch (e) { console.warn('[TV Wallpaper] video save failed', e); }
+        if (buildUI.onJournal) buildUI.onJournal();
+        done();
+        if (nextVideo) { const n = nextVideo; nextVideo = null; setTimeout(() => videoStart(n), 50); }
+      };
+      mr.start(1000);
+      // remember on the open trade that it has a video
+      withLock('tvwp-rec', () => { const st = recLoad(); if (st.open[t.symbol] && st.open[t.symbol].id === t.id) { st.open[t.symbol].video = true; recSave(st); } });
+      if (buildUI.onJournal) buildUI.onJournal();
+    } catch (e) {
+      console.warn('[TV Wallpaper] video recording unavailable', e);
+      vid = null; done();
+    }
+  }
+  function videoStop(tradeId, delay = 8000) {
+    if (!vid || vid.tradeId !== tradeId) return;
+    if (vid.stopTimer && delay) return;            // already finishing
+    clearTimeout(vid.stopTimer);
+    vid.stopTimer = setTimeout(() => {          // keep a few seconds after the exit
+      if (!vid || vid.tradeId !== tradeId) return;
+      clearTimeout(vid.maxTimer);
+      try { vid.mr.state !== 'inactive' ? vid.mr.stop() : null; } catch (e) {}
+    }, delay);
+  }
+  async function videoCleanup() {
+    const keep = Math.max(1, +S.rec.keep || 25);
+    const keys = ((await DB.videoKeys()) || []).map(String).sort();
+    for (const k of keys.slice(0, Math.max(0, keys.length - keep))) await DB.videoDel(k);
+  }
+  window.addEventListener('pagehide', () => { if (vid) try { vid.mr.stop(); } catch (e) {} });
 
   // TradingView's own "play sound on order execution" switch.
   function tvSoundPref() {
@@ -1589,7 +1895,7 @@
   .fab svg { width: 20px; height: 20px; pointer-events: none; }
 
   /* window */
-  .panel { position: fixed; z-index: 2147483001; display: none; grid-template-columns: 196px 1fr;
+  .panel { position: fixed; z-index: 2147483001; isolation: isolate; display: none; grid-template-columns: 196px 1fr;
     width: min(800px, calc(100vw - 24px)); height: min(640px, calc(100vh - 24px));
     background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
     box-shadow: var(--shadow); font-size: 13px; line-height: 1.4; }
@@ -1736,6 +2042,20 @@
   .iset input[type=color] { width: 44px; height: 24px; }
   .gear { width: 28px; height: 26px; border-radius: 7px; border: 1px solid var(--line2); background: var(--card2); color: var(--text); cursor: pointer; padding: 0; font-size: 13px; }
   .gear.on { border-color: var(--accent); background: var(--accent); color: #fff; }
+  .trow { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr) minmax(0, .9fr) 30px 30px; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+  .trow:first-of-type { border-top: none; }
+  .trow b { font-size: 12.5px; display: block; }
+  .trow small { color: var(--muted); font-size: 11.5px; display: block; }
+  .trow .px { font-size: 12px; font-variant-numeric: tabular-nums; }
+  .trow .pnl { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .trow .pnl.win { color: var(--good); } .trow .pnl.loss { color: var(--bad); }
+  .side-l { color: var(--good); } .side-s { color: var(--bad); }
+  .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; animation: blink 1s infinite; }
+  @keyframes blink { 50% { opacity: .25; } }
+  .player { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; z-index: 5; }
+  .player[hidden] { display: none; }
+  .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
+  .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
   .status { padding: 10px 12px; border-radius: 10px; background: var(--accentBg); color: var(--text); font-size: 12.5px; }
 
   @media (max-width: 620px) {
@@ -1773,6 +2093,7 @@
     sounds: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/></svg>',
     trading: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 17h16"/><path d="M8 4v6M16 14v6"/></svg>',
     stream: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M3 3l18 18"/></svg>',
+    journal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>',
     extras: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>'
   };
   const PAGES = {
@@ -1782,6 +2103,7 @@
     sounds: ['Sounds', 'A sound when your orders fill, per order type.'],
     trading: ['Brackets', 'Win / lose amounts on your take-profit and stop orders.'],
     stream: ['Streamer', 'Hide your P&L and balances while streaming.'],
+    journal: ['Journal', 'Every trade recorded automatically, with an optional chart video.'],
     extras: ['General', 'Ads, appearance, shortcuts and info.']
   };
   const item = (title, desc, control) => `<div class="item"><div class="txt"><b>${title}</b>${desc ? `<small>${desc}</small>` : ''}</div>${control}</div>`;
@@ -1798,7 +2120,7 @@
         <div class="grp">Chart</div>
         ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}
         <div class="grp">Trading</div>
-        ${NAV('sounds', 'Sounds')}${NAV('trading', 'Brackets')}${NAV('stream', 'Streamer')}
+        ${NAV('journal', 'Journal')}${NAV('sounds', 'Sounds')}${NAV('trading', 'Brackets')}${NAV('stream', 'Streamer')}
         <div class="grp">App</div>
         ${NAV('extras', 'General')}
       </nav>
@@ -1876,6 +2198,20 @@
       </div>
       <div class="last" id="sLast"></div>
       <div class="hint">Click anywhere on the chart once after opening it, so the browser allows sound.</div>
+    </section>
+
+    <section data-tab="journal">
+      <div class="card">
+        ${item('Record my trades', 'Logs every trade from your broker: entry, exit, size, P&amp;L, time held.', '<input type="checkbox" id="rOn">')}
+        ${item('Record chart video', 'Records the chart from entry until a few seconds after exit. No permission pop-ups.', '<input type="checkbox" id="rVideo">')}
+        ${item('Video quality', '', '<select id="rQuality"><option value="720">720p (smaller files)</option><option value="1080">1080p</option></select>')}
+        ${item('Keep videos', 'Older videos are deleted automatically. Trades are always kept.', '<select id="rKeep"><option value="10">Last 10</option><option value="25">Last 25</option><option value="50">Last 50</option><option value="100">Last 100</option></select>')}
+      </div>
+      <div class="status" id="rStats"></div>
+      <div class="sgroup" id="rList"><h3>Recent trades</h3></div>
+      <div class="row"><button class="btn" id="rCsv">⬇ Export CSV (Excel)</button><button class="btn" id="rClear">Clear journal</button></div>
+      <div class="hint">Keeps recording when TradingView is in a background tab or minimized, and catches up on trades made while it was closed, including trades placed on your broker's own app. In Chrome, add tradingview.com to Settings → Performance → Memory Saver → "Always keep these sites active".</div>
+      <div class="player" id="rPlayer" hidden><div class="pbox"><div class="row between"><b id="rPTitle"></b><button class="x" id="rPClose">×</button></div><video id="rVideoEl" controls playsinline></video><div class="row"><a class="btn" id="rPDown" download>⬇ Download video</a></div></div></div>
     </section>
 
     <section data-tab="trading">
@@ -2445,6 +2781,103 @@
     }
     buildUI.onStreamer = () => { renderStreamUI(); renderQuick(); renderStatus(); };
     renderStreamUI();
+    /* ---- journal ---- */
+    const money = (v, cur) => (v > 0 ? '+' : v < 0 ? '\u2212' : '') + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + (cur || 'USD');
+    const fmtPx = v => (+v).toLocaleString(undefined, { maximumFractionDigits: 6 });
+    const fmtDur = ms => { const sec = Math.max(0, Math.round(ms / 1000)); return sec < 60 ? sec + 's' : sec < 3600 ? Math.floor(sec / 60) + 'm ' + (sec % 60) + 's' : Math.floor(sec / 3600) + 'h ' + Math.floor(sec % 3600 / 60) + 'm'; };
+    const shortSym = sym => String(sym).split(':').pop();
+    let journalCache = [];
+    async function renderJournal() {
+      $('#rOn').checked = !!S.rec.on;
+      $('#rVideo').checked = !!S.rec.video;
+      $('#rQuality').value = S.rec.quality || '720';
+      $('#rKeep').value = String(S.rec.keep || 25);
+      let trades = [];
+      try { trades = (await DB.tradesAll()) || []; } catch (e) {}
+      trades.sort((a, b) => b.closeTime - a.closeTime);
+      journalCache = trades;
+      const hide = S.extras.streamer;
+      const today = new Date().toDateString();
+      const td = trades.filter(t => new Date(t.closeTime).toDateString() === today);
+      const wins = td.filter(t => (t.net ?? t.ticks ?? 0) > 0).length;
+      const net = td.reduce((a, t) => a + (t.net || 0), 0);
+      const open = recLoad().open, openN = Object.keys(open).length;
+      const recLine = vid ? '<span class="rec-dot"></span>Recording video · ' : '';
+      $('#rStats').innerHTML = !S.rec.on ? 'Recording is off. Switch on <b>Record my trades</b> to start your journal.'
+        : `${recLine}<b>Today:</b> ${td.length} trade${td.length === 1 ? '' : 's'} · ${wins} win${wins === 1 ? '' : 's'} · ${hide ? '•••••' : money(net, td[0] && td[0].currency)}${openN ? ` · ${openN} open position${openN === 1 ? '' : 's'} being tracked` : ''}`;
+      const list = $('#rList');
+      list.querySelectorAll('.trow, .empty').forEach(e => e.remove());
+      if (!trades.length) {
+        const e = document.createElement('div'); e.className = 'empty';
+        e.textContent = S.rec.on ? 'No trades yet. Your next trade will show up here.' : 'No trades recorded yet.';
+        list.appendChild(e);
+      }
+      for (const t of trades.slice(0, 50)) {
+        const row = document.createElement('div');
+        row.className = 'trow';
+        const pnl = t.net !== null && t.net !== undefined ? money(t.net, t.currency) : '';
+        const tk = t.ticks !== null && t.ticks !== undefined ? `${t.ticks > 0 ? '+' : ''}${t.ticks} ticks` : '';
+        const win = (t.net ?? t.ticks ?? 0) > 0;
+        row.innerHTML = `<div><b><span class="${t.dir > 0 ? 'side-l' : 'side-s'}">${t.dir > 0 ? 'Long' : 'Short'} ${t.qty}</span> ${shortSym(t.symbol)}</b>
+            <small>${new Date(t.openTime).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${fmtDur(t.closeTime - t.openTime)}${t.backfilled ? ' · caught up' : ''}</small></div>
+          <div class="px">${fmtPx(t.entry)} → ${fmtPx(t.exit)}</div>
+          <div class="pnl ${win ? 'win' : 'loss'}">${hide ? '•••••' : (pnl || tk)}<small>${hide ? '' : (pnl ? tk : '')}</small></div>`;
+        const play = document.createElement('button');
+        play.className = 'play'; play.title = t.videoId ? 'Watch video' : 'No video';
+        play.textContent = '▶'; play.disabled = !t.videoId; play.style.opacity = t.videoId ? 1 : .3;
+        play.onclick = () => openVideo(t);
+        const del = document.createElement('button');
+        del.className = 'play'; del.title = 'Delete trade'; del.textContent = '×';
+        del.onclick = async () => { await DB.tradeDel(t.id); if (t.videoId) await DB.videoDel(t.videoId); renderJournal(); };
+        row.append(play, del);
+        list.appendChild(row);
+      }
+      const badge = root.querySelector('[data-badge="journal"]');
+      badge.hidden = !(S.rec.on && (vid || openN)); badge.textContent = vid ? '● REC' : 'live';
+    }
+    let playerUrl = null;
+    async function openVideo(t) {
+      const v = await DB.videoGet(t.videoId);
+      if (!v) { t.videoId = null; renderJournal(); return; }
+      if (playerUrl) URL.revokeObjectURL(playerUrl);
+      playerUrl = URL.createObjectURL(v.blob);
+      $('#rVideoEl').src = playerUrl;
+      $('#rPTitle').textContent = `${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSym(t.symbol)} · ${new Date(t.openTime).toLocaleString()}`;
+      $('#rPDown').href = playerUrl;
+      $('#rPDown').download = `trade-${shortSym(t.symbol)}-${new Date(t.openTime).toISOString().replace(/[:.]/g, '-')}.webm`;
+      $('#rPlayer').hidden = false;
+    }
+    $('#rPClose').onclick = () => { $('#rPlayer').hidden = true; $('#rVideoEl').pause(); };
+    $('#rOn').onchange = e => { S.rec.on = e.target.checked; if (S.rec.on) recStartFresh(); save('journal'); renderJournal(); };
+    $('#rVideo').onchange = e => { S.rec.video = e.target.checked; save('journal'); renderJournal(); };
+    $('#rQuality').onchange = e => { S.rec.quality = e.target.value; save('journal'); };
+    $('#rKeep').onchange = e => { S.rec.keep = +e.target.value; save('journal'); videoCleanup().then(renderJournal); };
+    $('#rCsv').onclick = () => {
+      const head = ['Open time', 'Close time', 'Symbol', 'Side', 'Qty', 'Entry', 'Exit', 'Ticks', 'Gross P&L', 'Commission', 'Net P&L', 'Currency', 'Seconds held', 'Caught up', 'Has video'];
+      const q = v => { const x = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(x) ? '"' + x.replace(/"/g, '""') + '"' : x; };
+      const rows = journalCache.slice().reverse().map(t => [new Date(t.openTime).toISOString(), new Date(t.closeTime).toISOString(), shortSym(t.symbol), t.dir > 0 ? 'Long' : 'Short', t.qty,
+        t.entry, t.exit, t.ticks, t.gross !== null ? +t.gross.toFixed(2) : '', +(+t.commission || 0).toFixed(2), t.net !== null ? +t.net.toFixed(2) : '', t.currency,
+        Math.round((t.closeTime - t.openTime) / 1000), t.backfilled ? 'yes' : '', t.videoId ? 'yes' : ''].map(q).join(','));
+      const url = URL.createObjectURL(new Blob(['\ufeff' + [head.join(','), ...rows].join('\r\n')], { type: 'text/csv' }));
+      const a = document.createElement('a');
+      a.href = url; a.download = `trade-journal-${new Date().toISOString().slice(0, 10)}.csv`;
+      root.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    };
+    let clearArmed = null;
+    $('#rClear').onclick = async () => {
+      if (!clearArmed) {
+        $('#rClear').textContent = 'Click again to delete all trades & videos';
+        clearArmed = setTimeout(() => { clearArmed = null; $('#rClear').textContent = 'Clear journal'; }, 4000);
+        return;
+      }
+      clearTimeout(clearArmed); clearArmed = null;
+      $('#rClear').textContent = 'Clear journal';
+      await DB.tradesClear(); await DB.videosClear();
+      renderJournal();
+    };
+    buildUI.onJournal = () => { if (panel.classList.contains('open')) renderJournal(); };
+
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
     /* ---- sidebar quick switches, theme, status ---- */
     function setQuick(id, on) {
@@ -2511,7 +2944,7 @@
     }
     applyTheme();
 
-    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
+    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); renderJournal(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { renderOff(); if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
     renderOff();
   }
@@ -2527,6 +2960,7 @@
       if (t === 'candles') { rebuildLookup(); redraw(); }
       if (t === 'extras') { applyAds(); applyStreamer(); brkKick(); }
       if (t === 'alloff') applyAllOff();
+      if (t === 'journal' && buildUI.onJournal) buildUI.onJournal();
       if (t === 'sounds') applyMute();
       if (t === 'soundlist') bufferCache.clear();
       if (t === 'ind') startInd();
