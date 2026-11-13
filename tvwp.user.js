@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      2.5.0
+// @version      2.5.1
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '2.5.0';
+  const VERSION = '2.5.1';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -320,11 +320,32 @@
   const bufferCache = new Map();
   let lastEvent = '';
 
+  let master = null, pageClosing = false;
   function ctx() {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      // Everything plays through a limiter so no sound can come out painfully loud.
+      const lim = audioCtx.createDynamicsCompressor();
+      lim.threshold.value = -10; lim.knee.value = 6; lim.ratio.value = 12;
+      lim.attack.value = 0.003; lim.release.value = 0.15;
+      master = audioCtx.createGain();
+      master.gain.value = 0.9;
+      master.connect(lim).connect(audioCtx.destination);
+    }
+    if (audioCtx.state === 'suspended' && !pageClosing) audioCtx.resume().catch(() => {});
     return audioCtx;
   }
+  function outNode() { ctx(); return master; }
+  // Silence everything the moment the page or app starts closing.
+  function shutUp() {
+    pageClosing = true;
+    pendingEvents.length = 0;
+    clearTimeout(pendingTimer);
+    try { if (audioCtx) audioCtx.close(); } catch (e) {}
+    audioCtx = null; master = null;
+  }
+  window.addEventListener('beforeunload', shutUp, true);
+  window.addEventListener('pagehide', shutUp, true);
   // Browsers only allow sound after a click or key press on the page.
   for (const ev of ['pointerdown', 'keydown']) {
     window.addEventListener(ev, () => { try { ctx(); } catch (e) {} }, { capture: true, passive: true });
@@ -333,8 +354,8 @@
   function playTone(name, vol) {
     const c = ctx(), t = c.currentTime;
     const out = c.createGain();
-    out.gain.value = vol;
-    out.connect(c.destination);
+    out.gain.value = vol * 0.8;
+    out.connect(outNode());
     const note = (freq, start, dur, type = 'sine', g = 0.6) => {
       const o = c.createOscillator(), gn = c.createGain();
       o.type = type;
@@ -364,37 +385,103 @@
     }
   }
 
+  let playing = null;
+  // Measure a file once so loud and quiet uploads come out at a similar level.
+  function loudnessGain(buf) {
+    let peak = 0, sum = 0, count = 0;
+    for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+      const data = buf.getChannelData(ch);
+      for (let i = 0; i < data.length; i += 4) { const v = Math.abs(data[i]); if (v > peak) peak = v; sum += v * v; count++; }
+    }
+    const rms = Math.sqrt(sum / Math.max(1, count));
+    if (!peak || !rms) return 1;
+    return Math.min(0.9 / peak, 0.18 / rms, 4);
+  }
   async function playSound(ref, vol = S.sounds.volume) {
     window.__tvwpLastSound = ref;   // used by the automated tests
+    if (pageClosing) return;
     try {
       if (!ref || ref === 'none') return;
+      if (playing) { try { playing.stop(); } catch (e) {} playing = null; }   // never stack sounds
       if (ref.startsWith('tone:')) { playTone(ref.slice(5), vol); return; }
       if (ref.startsWith('file:')) {
         const id = ref.slice(5);
-        let buf = bufferCache.get(id);
-        if (!buf) {
+        let entry = bufferCache.get(id);
+        if (!entry) {
           const rec = await DB.soundGet(id);
-          if (!rec) return;
-          buf = await ctx().decodeAudioData(await rec.blob.arrayBuffer());
-          bufferCache.set(id, buf);
+          if (!rec || pageClosing) return;
+          const buf = await ctx().decodeAudioData(await rec.blob.arrayBuffer());
+          entry = { buf, norm: loudnessGain(buf) };
+          bufferCache.set(id, entry);
         }
+        if (pageClosing) return;
         const c = ctx(), src = c.createBufferSource(), g = c.createGain();
-        g.gain.value = vol;
-        src.buffer = buf;
-        src.connect(g).connect(c.destination);
+        g.gain.value = vol * entry.norm;
+        src.buffer = entry.buf;
+        src.connect(g).connect(outNode());
+        // Long files are cut off after 4 seconds with a short fade.
+        const end = c.currentTime + Math.min(entry.buf.duration, 4);
+        g.gain.setValueAtTime(vol * entry.norm, Math.max(c.currentTime, end - 0.25));
+        g.gain.linearRampToValueAtTime(0.0001, end);
         src.start();
+        src.stop(end + 0.02);
+        playing = src;
+        src.onended = () => { if (playing === src) playing = null; };
       }
     } catch (e) {
       console.warn('[TV Wallpaper] sound failed', e);
     }
   }
 
-  function fireSlot(slot, text) {
-    lastEvent = text + ' · ' + new Date().toLocaleTimeString();
-    window.__tvwpLastEvent = { slot, text };
+  // Order events are gathered for a moment, then at most ONE sound plays:
+  // the most important event wins. A flood of events (history being re-sent
+  // when connecting, reconnecting or closing) plays nothing at all.
+  const PRIORITY = { rejected: 9, stopLoss: 8, takeProfit: 8, trailing: 7, stop: 7, stopLimit: 7, limit: 6, market: 6, partial: 4, cancelled: 3, placed: 2 };
+  const pendingEvents = [];
+  let pendingTimer = null;
+  const BATCH_MS = 250, FLOOD = 5;
+
+  function queueEvent(slot, text, key) {
+    if (pageClosing || Date.now() < warmUntil) return;
+    pendingEvents.push({ slot, text, key });
+    clearTimeout(pendingTimer);
+    pendingTimer = setTimeout(flushEvents, BATCH_MS);
+  }
+  function flushEvents() {
+    const evs = pendingEvents.splice(0);
+    if (!evs.length || pageClosing || Date.now() < warmUntil) return;
+    if (evs.length >= FLOOD) {             // a replay of old orders, not real trading
+      warmUntil = Date.now() + 2000;
+      return;
+    }
+    evs.sort((a, b) => (PRIORITY[b.slot] || 0) - (PRIORITY[a.slot] || 0));
+    const top = evs[0];
+    lastEvent = evs.map(e => e.text).join(', ') + ' · ' + new Date().toLocaleTimeString();
+    window.__tvwpLastEvent = { slot: top.slot, text: top.text };
     if (buildUI.onEvent) buildUI.onEvent();
+    claimOnce(evs.map(e => e.key).join('|'), () => fireSlot(top.slot));
+  }
+
+  // With several chart windows/tabs open, only one of them plays each sound.
+  function claimOnce(key, fn) {
+    const run = () => {
+      let recent = {};
+      try { recent = JSON.parse(localStorage.getItem('tvwp_sound_claims') || '{}'); } catch (e) {}
+      const now = Date.now();
+      for (const k of Object.keys(recent)) if (now - recent[k] > 10000) delete recent[k];
+      if (recent[key]) return;
+      recent[key] = now;
+      try { localStorage.setItem('tvwp_sound_claims', JSON.stringify(recent)); } catch (e) {}
+      fn();
+    };
+    if (navigator.locks && navigator.locks.request) {
+      navigator.locks.request('tvwp-sound', { ifAvailable: true }, lock => { if (lock) run(); }).catch(run);
+    } else run();
+  }
+
+  function fireSlot(slot) {
     const so = S.sounds;
-    if (!so.enabled) return;
+    if (!so.enabled || pageClosing) return;
     if (FILL_SLOTS.includes(slot) && so.oneForAll) { playSound(so.all); return; }
     const conf = so.slots[slot];
     if (conf && conf.on) playSound(conf.s);
@@ -411,7 +498,7 @@
     return ORDER_TYPES[o.type] || 'market';
   }
   const trackedOrders = new Map();
-  let hookedBroker = null, hookedConnected = null, warmUntil = 0, lastOrderFillAt = 0, lastFallbackAt = 0;
+  let hookedBroker = null, hookedConnected = null, warmUntil = 0, lastOrderFillAt = 0;
   const HOOK = {};
 
   function handleOrder(o) {
@@ -419,25 +506,34 @@
     const prev = trackedOrders.get(o.id);
     const cur = { ...(prev || {}), ...o };
     trackedOrders.set(o.id, cur);
-    if (Date.now() < warmUntil) return;  // ignore the history sent right after connecting
+    if (Date.now() < warmUntil || pageClosing) return;  // history sent while connecting / closing
+    if (hookedBroker && typeof hookedBroker.isConnected === 'function') {
+      try { if (!hookedBroker.isConnected()) return; } catch (e) {}
+    }
     const st = cur.status, pst = prev && prev.status;
     const cat = categorize(cur);
     const side = cur.side === -1 ? 'Sell' : 'Buy';
     const name = `${side} ${SLOT_LABELS[cat].replace(' fill', '')}`;
+    const key = o.id + ':' + st + ':' + (cur.filledQty || 0);
     if (st === 2 && pst !== 2) {
       lastOrderFillAt = Date.now();
-      if (Date.now() - lastFallbackAt < 1500) { lastFallbackAt = 0; return; } // already beeped for this fill
-      fireSlot(cat, name + ' filled');
+      clearTimeout(execTimer);
+      queueEvent(cat, name + ' filled', key);
       return;
     }
-    if (st !== 2 && prev && (cur.filledQty || 0) > (prev.filledQty || 0)) {
+    if (!prev) {         // first time we see this order
+      if (st === 6) queueEvent('placed', name + ' placed', key);
+      if (st === 5) queueEvent('rejected', name + ' rejected', key);  // brokers often reject straight away
+      return;            // a cancelled order we never saw working is old history
+    }
+    if (st !== 2 && (cur.filledQty || 0) > (prev.filledQty || 0)) {
       lastOrderFillAt = Date.now();
-      fireSlot('partial', name + ' partially filled');
+      queueEvent('partial', name + ' partially filled', key);
       return;
     }
-    if (st === 1 && pst !== 1) { fireSlot('cancelled', name + ' cancelled'); return; }
-    if (st === 5 && pst !== 5) { fireSlot('rejected', name + ' rejected'); return; }
-    if (st === 6 && pst !== 6) fireSlot('placed', name + ' placed');
+    if (st === 1 && pst !== 1) { queueEvent('cancelled', name + ' cancelled', key); return; }
+    if (st === 5 && pst !== 5) { queueEvent('rejected', name + ' rejected', key); return; }
+    if (st === 6 && pst !== 6) queueEvent('placed', name + ' placed', key);
   }
   function onOrderUpdate(o) {
     if (Array.isArray(o)) o.forEach(handleOrder); else handleOrder(o);
@@ -446,14 +542,18 @@
     if (id && typeof id === 'object' && data === undefined) { handleOrder(id); return; }
     handleOrder({ ...(data || {}), id });
   }
-  function onExecution() {
-    // Backup for brokers that report the fill only as an execution.
-    if (Date.now() < warmUntil) return;
-    setTimeout(() => {
-      if (Date.now() - lastOrderFillAt > 1200) { lastFallbackAt = Date.now(); fireSlot('market', 'Order filled'); }
+  let execTimer = null;
+  function onExecution(ex) {
+    // Backup for brokers that report a fill only as an execution. One timer, never one per execution.
+    if (Date.now() < warmUntil || pageClosing) return;
+    clearTimeout(execTimer);
+    const key = 'exec:' + ((ex && (ex.id || ex.time)) || Math.floor(Date.now() / 2000));
+    execTimer = setTimeout(() => {
+      if (Date.now() - lastOrderFillAt > 1200) queueEvent('market', 'Order filled', key);
     }, 700);
   }
-  function onFullUpdate() { warmUntil = Date.now() + 3000; }
+  function onFullUpdate() { warmUntil = Date.now() + 3000; pendingEvents.length = 0; clearTimeout(execTimer); }
+  function onConnection() { warmUntil = Date.now() + 3000; pendingEvents.length = 0; clearTimeout(execTimer); trackedOrders.clear(); }
 
   function currentBroker() {
     try {
@@ -478,6 +578,7 @@
         unsub(hookedBroker, 'orderPartialUpdate', onOrderPartial);
         unsub(hookedBroker, 'executionUpdate', onExecution);
         unsub(hookedBroker, 'ordersFullUpdate', onFullUpdate);
+        unsub(hookedBroker, 'connectionStatusUpdate', onConnection);
       }
       hookedBroker = null;
       trackedOrders.clear();
@@ -485,6 +586,7 @@
         sub(b, 'orderPartialUpdate', onOrderPartial);
         sub(b, 'executionUpdate', onExecution);
         sub(b, 'ordersFullUpdate', onFullUpdate);
+        sub(b, 'connectionStatusUpdate', onConnection);
         hookedBroker = b;
         warmUntil = Date.now() + 3000;
       }
@@ -492,7 +594,7 @@
     if (hookedBroker) {
       let conn = null;
       try { conn = typeof hookedBroker.isConnected === 'function' ? !!hookedBroker.isConnected() : null; } catch (e) {}
-      if (conn && hookedConnected === false) { warmUntil = Date.now() + 3000; trackedOrders.clear(); }
+      if (conn !== hookedConnected && hookedConnected !== null) onConnection();
       hookedConnected = conn;
     }
   }
