@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.5.0
+// @version      3.5.1
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.5.0';
+  const VERSION = '3.5.1';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -29,7 +29,7 @@
     },
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
     risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false,
-      sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1 },
+      sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0 },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
@@ -2033,10 +2033,13 @@
     const sameAsChart = !r.sizeSym || symRoot(chartSym) === spec.root || MICRO_OF[symRoot(chartSym)] === spec.root || MINI_OF[symRoot(chartSym)] === spec.root;
     const atr = sameAsChart ? chartAtr() : 0;
     let stopTicks, stopSource;
-    if (r.sizeStopMode === 'manual' || !atr || !spec.tick) {
+    if (r.sizeView !== 'classic' && +r.simplePts > 0 && spec.tick) {
+      stopTicks = Math.max(1, Math.round(+r.simplePts / spec.tick));          // "stop in points" box
+      stopSource = 'yours';
+    } else if (r.sizeView === 'classic' || r.sizeStopMode === 'manual' || !atr || !spec.tick) {
       stopTicks = +r.sizeStop || 0;
       if (r.sizeUnit === 'points' && spec.tick) stopTicks = stopTicks / spec.tick;
-      stopSource = r.sizeStopMode === 'manual' ? 'yours' : 'fallback';
+      stopSource = r.sizeView === 'classic' || r.sizeStopMode === 'manual' ? 'yours' : 'fallback';
     } else {
       stopTicks = Math.max(1, Math.round(atr * (+r.sizeAtr || 1) / spec.tick));
       stopSource = 'auto';
@@ -2842,7 +2845,11 @@
 
     <section data-tab="size">
       <div class="card">
+        ${item('Calculator style', 'Simple: just your risk. Classic: symbol, risk and stop, like before.', '<div class="seg" id="zView"><button data-v="simple">Simple</button><button data-v="classic">Classic</button></div>')}
+      </div>
+      <div class="card">
         ${item('<span id="zRiskLbl">How much do you want to risk?</span>', '<span id="zRiskSub">Per trade, in dollars.</span>', '<div class="money"><span id="zUnitSym">$</span><input type="number" id="zRisk" min="0" max="1000000" step="any"></div>')}
+        ${item('Stop in points', 'Optional. Leave empty for a typical stop from your chart.', '<div class="money"><input type="number" id="zPts" min="0" max="100000" step="any" placeholder="Auto" style="width:90px;font-size:16px"><span style="font-size:13px">pts</span></div>')}
       </div>
       <div class="bigout" id="zOut"></div>
       <div class="sgroup" id="zTable"><h3>With a tighter or wider stop</h3></div>
@@ -3465,6 +3472,11 @@
     $('#zSym').innerHTML = '<option value="">Chart symbol (auto)</option>' + Object.keys(FUTURES).map(k => `<option value="${k}">${k}</option>`).join('');
     bindSel('#zSym', 'risk', 'sizeSym'); bindSel('#zMode', 'risk', 'sizeMode'); bindSel('#zUnit', 'risk', 'sizeUnit');
     bindSel('#zStopMode', 'risk', 'sizeStopMode'); bindSel('#zAtr', 'risk', 'sizeAtr', true);
+    root.querySelectorAll('#zView button').forEach(bt => bt.onclick = () => { S.risk.sizeView = bt.dataset.v; save('risk'); renderRiskInputs(); renderSize(); });
+    $('#zPts').oninput = e => {
+      const raw = e.target.value.trim(), v = raw === '' ? 0 : parseFloat(raw);
+      if (isFinite(v) && v >= 0) { S.risk.simplePts = v; save('risk'); renderSize(); }
+    };
     for (const id of ['#zSym', '#zMode', '#zUnit', '#zStopMode', '#zAtr']) $(id).addEventListener('change', () => renderSize());
     $('#zRisk').oninput = e => {
       const raw = e.target.value.trim(), v = raw === '' ? 0 : parseFloat(raw);
@@ -3502,8 +3514,18 @@
       $('#zStopMode').value = r.sizeStopMode || 'auto'; $('#zAtr').value = String(r.sizeAtr || 1);
       $('#zUnitSym').textContent = r.sizeMode === 'pct' ? '%' : '$';
       $('#zRiskSub').textContent = r.sizeMode === 'pct' ? 'Per trade, as % of your account.' : 'Per trade, in dollars.';
-      $('#zStop').closest('.item').style.display = r.sizeStopMode === 'manual' ? '' : 'none';
-      $('#zAtr').closest('.item').style.display = r.sizeStopMode === 'manual' ? 'none' : '';
+      const classic = r.sizeView === 'classic';
+      root.querySelectorAll('#zView button').forEach(bt => bt.classList.toggle('on', bt.dataset.v === (classic ? 'classic' : 'simple')));
+      if ($('#zPts') !== root.activeElement) $('#zPts').value = +r.simplePts > 0 ? r.simplePts : '';
+      $('#zPts').closest('.item').style.display = classic ? 'none' : '';
+      // Classic: the old layout (symbol, risk, your stop) always open; no automatic stop or table
+      const adv = $('#zAdv');
+      if (classic) adv.open = true;
+      adv.querySelector('summary').style.display = classic ? 'none' : '';
+      $('#zStopMode').closest('.item').style.display = classic ? 'none' : '';
+      $('#zStop').closest('.item').style.display = classic || r.sizeStopMode === 'manual' ? '' : 'none';
+      $('#zAtr').closest('.item').style.display = classic || r.sizeStopMode === 'manual' ? 'none' : '';
+      $('#zStop').closest('.item').querySelector('.txt b').textContent = classic ? 'Stop distance' : 'My stop';
       $('#pOn').checked = !!p.on; $('#pStart').value = p.start; $('#pDd').value = p.dd; $('#pType').value = p.ddType; $('#pStop').checked = !!p.stopAtStart;
       $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear;
       $('#nOn').checked = !!n.on; $('#nMins').value = String(n.mins); $('#nMed').checked = !!n.medium; $('#nSound').checked = !!n.sound;
@@ -3553,6 +3575,14 @@
       if (!c.stopTicks) { out.innerHTML = '<span class="hint">Set your stop under Options, or switch the stop back to Automatic.</span>'; return; }
       const hide = S.extras.streamer;
       const usd = v => hide ? '•••••' : '$' + v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+      if (S.risk.sizeView === 'classic') {
+        const alt = c.qty === 0 && c.other && c.otherQty >= 1 ? c.other : null;
+        out.innerHTML = `<div class="n">${c.qty} <small>${c.spec.root} contract${c.qty === 1 ? '' : 's'}</small></div>
+          <div>Risk per contract <b>$${c.perContract.toFixed(2)}</b> · total <b>$${c.actual.toFixed(2)}</b> of ${hide ? '•••••' : '$' + c.riskUsd.toFixed(2)}</div>
+          ${alt ? `<div class="hint">Too big for 1 ${c.spec.root}. That's <b>${c.otherQty} ${alt.root}</b> instead ($${(c.stopTicks * alt.value).toFixed(2)} each).</div>` : ''}
+          <div class="hint">${c.stopTicks} ticks stop · 1 tick = ${c.spec.tick} = $${(+c.spec.value).toFixed(2)} per contract (${c.spec.from === 'broker' ? 'from your broker' : 'standard contract specs'})</div>`;
+        return;
+      }
       const pts = c.stopTicks * c.spec.tick;
       const fmtPts = v => (+v.toFixed(6)).toLocaleString(undefined, { maximumFractionDigits: 4 });
       const stopTxt = c.stopSource === 'auto' ? `a typical stop of about <b>${c.stopTicks} ticks</b> (${fmtPts(pts)} points)`
