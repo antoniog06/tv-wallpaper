@@ -69,3 +69,9 @@ The **Journal** page records every trade automatically once **Record my trades**
 - **Position size**: enter your risk ($ or % of account) and stop (ticks or points) to get the number of contracts, using your broker's tick values or standard specs for common futures (NQ, MNQ, ES, MES, GC, MGC, CL, MCL and more). It suggests the micro contract when one full-size contract is too much.
 - **Prop tracker**: starting balance, max drawdown (trailing end-of-day, trailing intraday or static, optionally stopping at the starting balance), daily loss limit, profit target and max contracts, tracked live from your connected account with warnings near each limit. It can trigger the daily lockout when you get close to the drawdown limit.
 - **News**: high-impact US events from TradingView's economic calendar, a countdown banner on the chart before each one, an optional beep, and an optional pause on new entries for a few minutes either side.
+
+### Where recordings are kept
+
+Trades and videos live inside the browser's storage for tradingview.com (separately in Chrome and in the desktop app), and the script asks the browser to protect that storage from automatic cleanup. Clearing site data for tradingview.com, or uninstalling the desktop app, still deletes it.
+
+To keep real files, turn on **Journal → Save to a folder** and pick a folder once. The script then keeps `trades.csv` (opens in Excel), `journal-backup.json` (a full copy you can restore from with **Restore trades from folder**) and a `Videos` subfolder with one `.webm` per trade, named like `2026-11-15 09-31-04 Long 2 MNQZ2026 WIN.webm`, up to date after every trade. Clearing the journal never deletes anything from the folder. After a browser restart Chrome may ask you to allow access again (one click, or choose "Allow on every visit").

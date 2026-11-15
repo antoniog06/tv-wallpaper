@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.3.0
+// @version      3.4.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.3.0';
+  const VERSION = '3.4.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -27,7 +27,7 @@
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
       volume: true
     },
-    rec: { on: false, video: false, quality: '720', keep: 25 },
+    rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
     risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false,
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '' },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
@@ -399,13 +399,14 @@
     _db: null,
     open() {
       return this._db || (this._db = new Promise((res, rej) => {
-        const r = indexedDB.open('tvwp', 3);
+        const r = indexedDB.open('tvwp', 4);
         r.onupgradeneeded = () => {
           const db = r.result;
           if (!db.objectStoreNames.contains('wallpapers')) db.createObjectStore('wallpapers', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('sounds')) db.createObjectStore('sounds', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('trades')) db.createObjectStore('trades', { keyPath: 'id' });
           if (!db.objectStoreNames.contains('videos')) db.createObjectStore('videos', { keyPath: 'id' });
+          if (!db.objectStoreNames.contains('kv')) db.createObjectStore('kv', { keyPath: 'k' });
         };
         r.onsuccess = () => res(r.result);
         r.onerror = () => rej(r.error);
@@ -438,7 +439,10 @@
     videoPut(x) { return this.run('readwrite', s => s.put(x), 'videos'); },
     videoDel(id) { return this.run('readwrite', s => s.delete(id), 'videos'); },
     videoKeys() { return this.run('readonly', s => s.getAllKeys(), 'videos'); },
-    videosClear() { return this.run('readwrite', s => s.clear(), 'videos'); }
+    videosClear() { return this.run('readwrite', s => s.clear(), 'videos'); },
+    kvGet(k) { return this.run('readonly', s => s.get(k), 'kv'); },
+    kvPut(x) { return this.run('readwrite', s => s.put(x), 'kv'); },
+    kvDel(k) { return this.run('readwrite', s => s.delete(k), 'kv'); }
   };
 
   /* =========================================================
@@ -856,6 +860,7 @@
       if (res.live) for (const t of res.opened) liveTrades.add(t.id);
       videoSync();
       if (res.recs.length && buildUI.onJournal) buildUI.onJournal();
+      if (res.recs.length) folderSync();
     }).catch(e => console.warn('[TV Wallpaper] journal error', e));
   }
   function recOnExec(ex) {
@@ -1001,6 +1006,7 @@
           }
         } catch (e) { console.warn('[TV Wallpaper] video save failed', e); }
         if (buildUI.onJournal) buildUI.onJournal();
+        folderSync();
         done();
         if (nextVideo) { const n = nextVideo; nextVideo = null; setTimeout(() => videoStart(n), 50); }
       };
@@ -1029,6 +1035,117 @@
     for (const k of keys.slice(0, Math.max(0, keys.length - keep))) await DB.videoDel(k);
   }
   window.addEventListener('pagehide', () => { if (vid) try { vid.mr.stop(); } catch (e) {} });
+
+  /* ---- journal files: CSV, a full backup, and saving into a real folder ---- */
+  const shortSymbol = sym => String(sym).split(':').pop();
+  function tradesToCsv(trades) {
+    const head = ['Open time', 'Close time', 'Symbol', 'Side', 'Qty', 'Entry', 'Exit', 'Ticks', 'Gross P&L', 'Commission', 'Net P&L', 'Currency', 'Seconds held', 'Caught up', 'Has video'];
+    const q = v => { const x = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(x) ? '"' + x.replace(/"/g, '""') + '"' : x; };
+    const rows = trades.slice().sort((a, b) => a.openTime - b.openTime).map(t => [new Date(t.openTime).toISOString(), new Date(t.closeTime).toISOString(), shortSymbol(t.symbol), t.dir > 0 ? 'Long' : 'Short', t.qty,
+      t.entry, t.exit, t.ticks, t.gross !== null && t.gross !== undefined ? +t.gross.toFixed(2) : '', +(+t.commission || 0).toFixed(2), t.net !== null && t.net !== undefined ? +t.net.toFixed(2) : '', t.currency,
+      Math.round((t.closeTime - t.openTime) / 1000), t.backfilled ? 'yes' : '', t.videoId ? 'yes' : ''].map(q).join(','));
+    return '﻿' + [head.join(','), ...rows].join('\r\n');
+  }
+  function pad2(n) { return String(n).padStart(2, '0'); }
+  function videoFileName(t, id) {
+    if (!t) return `${id}.webm`;
+    const d = new Date(t.openTime);
+    const stamp = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}`;
+    const res = (t.net ?? t.ticks ?? 0) > 0 ? 'WIN' : (t.net ?? t.ticks ?? 0) < 0 ? 'LOSS' : 'FLAT';
+    return `${stamp} ${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSymbol(t.symbol)} ${res}.webm`.replace(/[\\/:*?"<>|]/g, '-');
+  }
+  const FOLDER_DONE = 'tvwp_folder_written';
+  const folder = { status: 'off', last: 0, count: 0, error: '' };
+  function folderSupported() { return typeof window.showDirectoryPicker === 'function'; }
+  async function writeFile(dir, name, data) {
+    const fh = await dir.getFileHandle(name, { create: true });
+    const w = await fh.createWritable();
+    await w.write(data);
+    await w.close();
+  }
+  // Some apps don't have the permission check at all; there the folder is simply usable.
+  async function folderPerm(handle, mode, ask) {
+    if (typeof handle.queryPermission !== 'function') return 'granted';
+    let perm = 'prompt';
+    try { perm = await handle.queryPermission({ mode }); } catch (e) {}
+    if (perm !== 'granted' && ask && typeof handle.requestPermission === 'function') { try { perm = await handle.requestPermission({ mode }); } catch (e) {} }
+    return perm;
+  }
+  async function folderHandle() { try { const r = await DB.kvGet('folder'); return r && r.handle; } catch (e) { return null; } }
+  async function chooseFolder() {
+    if (!folderSupported()) throw new Error('This browser can\'t save into folders.');
+    const handle = await window.showDirectoryPicker({ id: 'tvwp-journal', mode: 'readwrite', startIn: 'documents' });
+    await DB.kvPut({ k: 'folder', handle });
+    try { localStorage.removeItem(FOLDER_DONE); } catch (e) {}
+    S.rec.folderOn = true; S.rec.folderName = handle.name;
+    save('journal');
+    await folderSync(true);
+  }
+  // Copies everything not yet in the folder. Safe to run any time; only one window writes at a time.
+  let folderBusy = false, folderAgain = false;
+  async function folderSync(interactive) {
+    if (!S.rec.folderOn) { folder.status = 'off'; return; }
+    if (folderBusy) { folderAgain = true; return; }
+    folderBusy = true;
+    try {
+      const handle = await folderHandle();
+      if (!handle) { folder.status = 'none'; return; }
+      if ((await folderPerm(handle, 'readwrite', interactive)) !== 'granted') { folder.status = 'needs'; return; }
+      await withLock('tvwp-folder', async () => {
+        const trades = (await DB.tradesAll()) || [];
+        await writeFile(handle, 'trades.csv', new Blob([tradesToCsv(trades)], { type: 'text/csv' }));
+        await writeFile(handle, 'journal-backup.json', new Blob([JSON.stringify({ app: 'TV Wallpaper', version: VERSION, saved: new Date().toISOString(), trades }, null, 1)], { type: 'application/json' }));
+        let done = [];
+        try { done = JSON.parse(localStorage.getItem(FOLDER_DONE) || '[]'); } catch (e) {}
+        const doneSet = new Set(done);
+        const byVideo = new Map(trades.filter(t => t.videoId).map(t => [t.videoId, t]));
+        const keys = ((await DB.videoKeys()) || []).map(String).filter(k => !doneSet.has(k));
+        if (keys.length) {
+          const vdir = await handle.getDirectoryHandle('Videos', { create: true });
+          for (const k of keys) {
+            const v = await DB.videoGet(k);
+            if (!v || !v.blob) continue;
+            await writeFile(vdir, videoFileName(byVideo.get(k), k), v.blob);
+            doneSet.add(k);
+            try { localStorage.setItem(FOLDER_DONE, JSON.stringify([...doneSet].slice(-2000))); } catch (e) {}
+          }
+        }
+        folder.count = doneSet.size;
+      });
+      folder.status = 'ok'; folder.last = Date.now(); folder.error = '';
+    } catch (e) {
+      folder.status = 'error'; folder.error = (e && e.message) || String(e);
+      console.warn('[TV Wallpaper] saving to folder failed', e);
+    } finally {
+      folderBusy = false;
+      if (buildUI.onFolder) buildUI.onFolder();
+      if (folderAgain) { folderAgain = false; setTimeout(() => folderSync(), 200); }
+    }
+  }
+  async function restoreFromFolder() {
+    const handle = await folderHandle();
+    if (!handle) throw new Error('Pick a folder first.');
+    if ((await folderPerm(handle, 'read', true)) !== 'granted') throw new Error('Allow access to the folder to restore.');
+    const fh = await handle.getFileHandle('journal-backup.json');
+    const data = JSON.parse(await (await fh.getFile()).text());
+    const have = new Set(((await DB.tradesAll()) || []).map(t => t.id));
+    let added = 0;
+    for (const t of (data && data.trades) || []) {
+      if (!t || !t.id || have.has(t.id) || !isFinite(t.openTime) || !isFinite(t.closeTime)) continue;
+      await DB.tradePut({ ...t, videoId: null });
+      added++;
+    }
+    return added;
+  }
+  // Ask the browser to keep this data even when the disk gets full.
+  let storageInfo = { persisted: false, used: 0 };
+  async function protectStorage() {
+    try {
+      if (navigator.storage && navigator.storage.persist) storageInfo.persisted = (await navigator.storage.persisted()) || (await navigator.storage.persist());
+      if (navigator.storage && navigator.storage.estimate) storageInfo.used = ((await navigator.storage.estimate()) || {}).usage || 0;
+    } catch (e) {}
+  }
+  setTimeout(() => { protectStorage(); folderSync(); }, 4000);
 
   // TradingView's own "play sound on order execution" switch.
   function tvSoundPref() {
@@ -2557,6 +2674,14 @@
       </div>
       <div class="status" id="rStats"></div>
       <div class="sgroup" id="rList"><h3>Recent trades</h3></div>
+      <div class="card">
+        ${item('Save to a folder', 'Copies your trades (trades.csv + a backup file) and every video into a folder you pick, as normal files.', '<input type="checkbox" id="fOn">')}
+        <div class="sub">
+          <div class="row"><span class="hint" id="fStatus" style="flex:1"></span><button class="btn slim" id="fPick">Choose folder…</button><button class="btn slim" id="fReconnect" hidden>Allow access again</button></div>
+          <div class="row"><button class="btn slim" id="fRestore">Restore trades from folder</button><span class="hint" id="fStore" style="flex:1;text-align:right"></span></div>
+          <div class="msg" id="fMsg"></div>
+        </div>
+      </div>
       <div class="row"><button class="btn" id="rCsv">⬇ Export CSV (Excel)</button><button class="btn" id="rClear">Clear journal</button></div>
       <div class="hint">Keeps recording when TradingView is in a background tab or minimized, and catches up on trades made while it was closed, including trades placed on your broker's own app. In Chrome, add tradingview.com to Settings → Performance → Memory Saver → "Always keep these sites active".</div>
       <div class="player" id="rPlayer" hidden><div class="pbox"><div class="row between"><b id="rPTitle"></b><button class="x" id="rPClose">×</button></div><video id="rVideoEl" controls playsinline></video><div class="row"><a class="btn" id="rPDown" download>⬇ Download video</a></div></div></div>
@@ -3369,16 +3494,47 @@
     $('#rQuality').onchange = e => { S.rec.quality = e.target.value; save('journal'); };
     $('#rKeep').onchange = e => { S.rec.keep = +e.target.value; save('journal'); videoCleanup().then(renderJournal); };
     $('#rCsv').onclick = () => {
-      const head = ['Open time', 'Close time', 'Symbol', 'Side', 'Qty', 'Entry', 'Exit', 'Ticks', 'Gross P&L', 'Commission', 'Net P&L', 'Currency', 'Seconds held', 'Caught up', 'Has video'];
-      const q = v => { const x = v === null || v === undefined ? '' : String(v); return /[",\n]/.test(x) ? '"' + x.replace(/"/g, '""') + '"' : x; };
-      const rows = journalCache.slice().reverse().map(t => [new Date(t.openTime).toISOString(), new Date(t.closeTime).toISOString(), shortSym(t.symbol), t.dir > 0 ? 'Long' : 'Short', t.qty,
-        t.entry, t.exit, t.ticks, t.gross !== null ? +t.gross.toFixed(2) : '', +(+t.commission || 0).toFixed(2), t.net !== null ? +t.net.toFixed(2) : '', t.currency,
-        Math.round((t.closeTime - t.openTime) / 1000), t.backfilled ? 'yes' : '', t.videoId ? 'yes' : ''].map(q).join(','));
-      const url = URL.createObjectURL(new Blob(['\ufeff' + [head.join(','), ...rows].join('\r\n')], { type: 'text/csv' }));
+      const url = URL.createObjectURL(new Blob([tradesToCsv(journalCache)], { type: 'text/csv' }));
       const a = document.createElement('a');
       a.href = url; a.download = `trade-journal-${new Date().toISOString().slice(0, 10)}.csv`;
       root.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 5000);
+    };
+    function renderFolder() {
+      $('#fOn').checked = !!S.rec.folderOn;
+      const name = S.rec.folderName ? `“${S.rec.folderName}”` : 'a folder';
+      const st = folder.status;
+      $('#fStatus').textContent = !folderSupported() ? "This app can't save into folders. Use Download / Export CSV instead."
+        : !S.rec.folderOn ? 'Off. Trades and videos stay inside the app.'
+        : st === 'needs' ? `Saving to ${name} paused: allow access again (the browser asks after a restart).`
+        : st === 'none' ? 'Choose a folder to start saving.'
+        : st === 'error' ? `Couldn't save to ${name}: ${folder.error}`
+        : st === 'ok' ? `Saving to ${name} · ${folder.count} video${folder.count === 1 ? '' : 's'} · last saved ${new Date(folder.last).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`
+        : `Saving to ${name}…`;
+      $('#fPick').hidden = !folderSupported();
+      $('#fPick').textContent = S.rec.folderName ? 'Change folder…' : 'Choose folder…';
+      $('#fReconnect').hidden = st !== 'needs';
+      $('#fRestore').hidden = !folderSupported() || !S.rec.folderName;
+      const mb = storageInfo.used / 1048576;
+      $('#fStore').textContent = `In the app: ${mb < 1 ? '<1' : Math.round(mb)} MB${storageInfo.persisted ? ' · protected from cleanup' : ''}`;
+    }
+    buildUI.onFolder = () => { if (panel.classList.contains('open')) renderFolder(); };
+    $('#fPick').onclick = async () => {
+      $('#fMsg').textContent = '';
+      try { await chooseFolder(); } catch (e) { if (e && e.name !== 'AbortError') $('#fMsg').textContent = e.message || String(e); }
+      renderFolder();
+    };
+    $('#fReconnect').onclick = () => folderSync(true).then(renderFolder);
+    $('#fOn').onchange = async e => {
+      S.rec.folderOn = e.target.checked; save('journal');
+      if (S.rec.folderOn && !(await folderHandle())) { try { await chooseFolder(); } catch (err) { S.rec.folderOn = !!(await folderHandle()); save('journal'); } }
+      else folderSync(true);
+      renderFolder();
+    };
+    $('#fRestore').onclick = async () => {
+      $('#fMsg').textContent = '';
+      try { const n = await restoreFromFolder(); $('#fMsg').textContent = n ? `Restored ${n} trade${n === 1 ? '' : 's'}.` : 'Nothing to restore: every trade in the backup is already here.'; renderJournal(); }
+      catch (err) { $('#fMsg').textContent = err && err.name === 'NotFoundError' ? 'No journal-backup.json in that folder yet.' : (err.message || String(err)); }
     };
     let clearArmed = null;
     $('#rClear').onclick = async () => {
@@ -3461,7 +3617,7 @@
     }
     applyTheme();
 
-    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); renderJournal(); renderRiskInputs(); renderRiskPages(); renderSize(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
+    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); renderJournal(); renderFolder(); protectStorage().then(renderFolder); renderRiskInputs(); renderRiskPages(); renderSize(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { renderOff(); if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
     renderOff();
   }
