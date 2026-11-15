@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.2.0
+// @version      3.3.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.2.0';
+  const VERSION = '3.3.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -28,6 +28,10 @@
       volume: true
     },
     rec: { on: false, video: false, quality: '720', keep: 25 },
+    risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false,
+      sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '' },
+    prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
+    news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
@@ -51,6 +55,9 @@
         candles: { ...DEFAULTS.candles, ...s.candles },
         extras: { ...DEFAULTS.extras, ...s.extras },
         rec: { ...DEFAULTS.rec, ...s.rec },
+        risk: { ...DEFAULTS.risk, ...s.risk },
+        prop: { ...DEFAULTS.prop, ...s.prop },
+        news: { ...DEFAULTS.news, ...s.news },
         ind: { list: Array.isArray(s.ind && s.ind.list) ? s.ind.list : [] },
         sounds: (() => {
           const d = DEFAULTS.sounds, u = s.sounds || {}, slots = {};
@@ -1651,6 +1658,307 @@
   }
 
   /* =========================================================
+   * Risk: daily limits & lockout, position sizing, prop-firm rules, news.
+   * None of this ever places, changes or closes an order.
+   * ======================================================= */
+  const RISK_KEY = 'tvwp_risk_state';
+  // Futures trading days start at 18:00 New York time.
+  function tradingDay(ms) { return Math.floor((ms + nyOffset(ms) + SHIFT) / DAY); }
+  function nextSessionStart(ms) {
+    const day = tradingDay(ms) + 1;
+    const wall = day * DAY - SHIFT;               // 18:00 New York, as wall-clock ms
+    return wall - nyOffset(wall);
+  }
+  function riskLoad() {
+    let st = null;
+    try { st = JSON.parse(localStorage.getItem(RISK_KEY)); } catch (e) {}
+    return st || {};
+  }
+  function riskSave(st) { try { localStorage.setItem(RISK_KEY, JSON.stringify(st)); } catch (e) {} }
+
+  // Live account numbers from TradingView's account panel (works for any broker).
+  function acctValues() {
+    const out = {};
+    try {
+      const b = currentBroker();
+      if (!b || (typeof b.isConnected === 'function' && !b.isConnected())) return null;
+      const info = typeof b.accountManagerInfo === 'function' ? b.accountManagerInfo() : null;
+      for (const row of (info && info.summary) || []) {
+        const label = String(row.text || '');
+        let v = null;
+        try { v = row.wValue && typeof row.wValue.value === 'function' ? row.wValue.value() : null; } catch (e) {}
+        if (v === null || v === undefined || !isFinite(+v)) continue;
+        v = +v;
+        if (/unreali[sz]ed|open\s*p/i.test(label)) out.unrealized = v;
+        else if (/reali[sz]ed|closed\s*p/i.test(label)) out.realized = v;
+        else if (/equity|net\s*liq/i.test(label)) out.equity = v;
+        else if (/balance|cash/i.test(label) && out.balance === undefined) out.balance = v;
+      }
+      try { out.account = String(b.currentAccount()); } catch (e) {}
+      if (out.equity === undefined && out.balance !== undefined) out.equity = out.balance + (out.unrealized || 0);
+      return out;
+    } catch (e) { return null; }
+  }
+  function openPositionQty() {
+    let q = 0;
+    for (const p of brk.positions || []) q += Math.abs(+p.qty || 0);
+    if (!q) for (const t of Object.values(recLoad().open)) q += Math.abs(t.qty || 0);
+    return q;
+  }
+
+  /* ---- today's numbers (from the Journal + open P&L) ---- */
+  const day = { pnl: 0, closedPnl: 0, trades: 0, day: -1 };
+  async function refreshDay() {
+    const today = tradingDay(Date.now());
+    let trades = [];
+    try { trades = (await DB.tradesAll()) || []; } catch (e) {}
+    const td = trades.filter(t => tradingDay(t.closeTime) === today);
+    day.day = today;
+    day.trades = td.length;
+    day.closedPnl = td.reduce((a, t) => a + (t.net || 0), 0);
+    const av = acctValues();
+    day.pnl = day.closedPnl + ((av && av.unrealized) || 0);
+  }
+
+  /* ---- lock state ---- */
+  let lockMsg = '', pendingLock = '', newsBlock = '';
+  function unlockedToday() { const st = riskLoad(); return !!st.unlocked && st.lockDay === tradingDay(Date.now()); }
+  function lockedNow() {
+    const st = riskLoad();
+    return st.lockDay === tradingDay(Date.now()) && !st.unlocked ? st : null;
+  }
+  function setLock(reason) {
+    const st = riskLoad();
+    const today = tradingDay(Date.now());
+    if (st.lockDay === today && (st.unlocked || st.lockReason)) return;   // already locked, or unlocked early today
+    st.lockDay = today; st.lockReason = reason; st.lockedAt = Date.now(); st.unlocked = false;
+    riskSave(st);
+    bc && bc.postMessage({ type: 'risk' });
+    playSound('tone:alarm');
+  }
+  function unlockEarly() {
+    const st = riskLoad();
+    st.unlocked = true; st.unlockedAt = Date.now();
+    riskSave(st);
+    bc && bc.postMessage({ type: 'risk' });
+    applyLock();
+  }
+  const LOCK_CSS = `
+    [data-name="buy-order-button"], [data-name="sell-order-button"], [data-name="order-panel"], [class*="tv-dom-panel"],
+    [class*="sellBuyButtonsContainer-"] { pointer-events: none !important; opacity: .28 !important; filter: grayscale(1) !important; }`;
+  function blocking() { return (!!lockedNow() || !!newsBlock) && !S.extras.allOff && openPositionQty() === 0; }
+  function applyLock() {
+    const on = blocking();
+    let st = document.getElementById('tvwp-lock');
+    if (on && !st && document.documentElement) {
+      st = document.createElement('style');
+      st.id = 'tvwp-lock';
+      st.textContent = LOCK_CSS;
+      document.documentElement.appendChild(st);
+    } else if (!on && st) st.remove();
+    renderBanners();
+  }
+  // Backup for anything the CSS doesn't cover: Buy/Sell items in menus and order dialogs.
+  function blockClick(e) {
+    if (!blocking()) return;
+    const el = e.target && e.target.closest && e.target.closest('[role="menuitem"], button, [role="button"], [data-name]');
+    if (!el || el.closest('#tvwp-host')) return;
+    const txt = (el.textContent || '').trim();
+    const dn = el.getAttribute('data-name') || '';
+    if (/^(buy|sell)\b/i.test(txt) || /^(place|submit)\s+(order|buy|sell)/i.test(txt) || /order-button|order-panel|place-order/i.test(dn)) {
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      flashBanner();
+    }
+  }
+  for (const ev of ['pointerdown', 'mousedown', 'click']) window.addEventListener(ev, blockClick, true);
+
+  /* ---- position size ---- */
+  const FUTURES = {
+    NQ: [0.25, 5], MNQ: [0.25, 0.5], ES: [0.25, 12.5], MES: [0.25, 1.25], YM: [1, 5], MYM: [1, 0.5],
+    RTY: [0.1, 5], M2K: [0.1, 0.5], GC: [0.1, 10], MGC: [0.1, 1], SI: [0.005, 25], SIL: [0.005, 5],
+    CL: [0.01, 10], MCL: [0.01, 1], NG: [0.001, 10], HG: [0.0005, 12.5], '6E': [0.00005, 6.25], '6B': [0.0001, 6.25],
+    '6J': [0.0000005, 6.25], ZB: [0.03125, 31.25], ZN: [0.015625, 15.625], BTC: [5, 25], MBT: [5, 0.5]
+  };
+  async function tickSpec(symbol) {
+    const root = symRoot(symbol);
+    try {
+      const b = currentBroker();
+      if (b && typeof b.symbolInfo === 'function' && symbol) {
+        const info = await b.symbolInfo(symbol);
+        const tick = +info.minTick || +info.pipSize;
+        const val = (+info.pipValue || 0) * (tick / (+info.pipSize || tick));
+        if (tick && val) return { root, tick, value: val, from: 'broker' };
+      }
+    } catch (e) {}
+    if (FUTURES[root]) return { root, tick: FUTURES[root][0], value: FUTURES[root][1], from: 'table' };
+    return { root, tick: 0, value: 0, from: 'none' };
+  }
+  async function calcSize() {
+    const r = S.risk;
+    let chartSym = '';
+    try { chartSym = window.TradingViewApi.activeChart().symbol(); } catch (e) {}
+    const sym = r.sizeSym || chartSym;
+    const spec = await tickSpec(sym);
+    const av = acctValues();
+    const riskUsd = r.sizeMode === 'pct' ? ((av && (av.equity || av.balance)) || 0) * (+r.sizePct || 0) / 100 : +r.sizeRisk || 0;
+    let stopTicks = +r.sizeStop || 0;
+    if (r.sizeUnit === 'points' && spec.tick) stopTicks = stopTicks / spec.tick;
+    const perContract = stopTicks * spec.value;
+    const qty = perContract > 0 ? Math.floor(riskUsd / perContract) : 0;
+    let alt = null;
+    const micro = { NQ: 'MNQ', ES: 'MES', YM: 'MYM', RTY: 'M2K', GC: 'MGC', CL: 'MCL', SI: 'SIL', BTC: 'MBT' }[spec.root];
+    if (qty === 0 && micro && FUTURES[micro]) {
+      const per2 = stopTicks * FUTURES[micro][1];
+      if (per2 > 0) alt = { root: micro, qty: Math.floor(riskUsd / per2), per: per2 };
+    }
+    return { sym, spec, riskUsd, stopTicks, perContract, qty, actual: qty * perContract, alt, needsEquity: r.sizeMode === 'pct' && !(av && (av.equity || av.balance)) };
+  }
+
+  /* ---- prop-firm tracker ---- */
+  function propState(av) {
+    const p = S.prop;
+    const st = riskLoad();
+    const acct = (av && av.account) || 'default';
+    const ps = (st.prop && st.prop[acct]) || { peak: +p.start, eodPeak: +p.start, lastDay: tradingDay(Date.now()), dayStart: null };
+    const eq = av && isFinite(av.equity) ? av.equity : null;
+    const bal = av && isFinite(av.balance) ? av.balance : eq;
+    const today = tradingDay(Date.now());
+    if (ps.lastDay !== today) {          // new trading day: end-of-day high-water mark uses yesterday's close
+      if (isFinite(ps.lastBal)) ps.eodPeak = Math.max(ps.eodPeak, ps.lastBal);
+      ps.lastDay = today; ps.dayStart = bal;
+    }
+    if (ps.dayStart === null && bal !== null) ps.dayStart = bal;
+    if (eq !== null) ps.peak = Math.max(ps.peak, eq);
+    if (bal !== null) ps.lastBal = bal;
+    st.prop = st.prop || {}; st.prop[acct] = ps; riskSave(st);
+    const base = p.ddType === 'intraday' ? ps.peak : p.ddType === 'eod' ? ps.eodPeak : +p.start;
+    let floor = base - (+p.dd || 0);
+    if (p.ddType !== 'static' && p.stopAtStart) floor = Math.min(floor, +p.start);   // trailing stops at the starting balance
+    const toFloor = eq !== null ? eq - floor : null;
+    const dailyUsed = ps.dayStart !== null && eq !== null ? Math.max(0, ps.dayStart - eq) : 0;
+    const qty = openPositionQty();
+    return { eq, bal, floor, toFloor, ddLeftPct: toFloor !== null && +p.dd ? Math.max(0, Math.min(1, toFloor / +p.dd)) : null,
+      profit: eq !== null ? eq - +p.start : null, target: +p.target || 0, dailyUsed, daily: +p.daily || 0, qty, maxQty: +p.maxQty || 0 };
+  }
+
+  /* ---- economic news (TradingView's own calendar) ---- */
+  let newsEvents = [], newsFetchedAt = 0, newsTriedAt = 0, newsBusy = false, newsWarned = {};
+  async function fetchNews() {
+    if (!S.news.on || newsBusy) return;
+    newsBusy = true; newsTriedAt = Date.now();
+    try {
+      const from = new Date(Date.now() - 6 * 3600000).toISOString(), to = new Date(Date.now() + 8 * 86400000).toISOString();
+      const r = await fetch(`https://economic-calendar.tradingview.com/events?from=${from}&to=${to}&countries=US`);
+      const j = await r.json();
+      newsEvents = ((j && j.result) || []).map(e => ({ id: e.id, title: e.title, time: Date.parse(e.date), imp: e.importance,
+        forecast: e.forecast, previous: e.previous, actual: e.actual, currency: e.currency })).filter(e => isFinite(e.time)).sort((a, b) => a.time - b.time);
+      newsFetchedAt = Date.now();
+    } catch (e) {
+      if (!newsFetchedAt) console.warn('[TV Wallpaper] news calendar unavailable, will retry in 5 minutes');
+    } finally { newsBusy = false; }
+  }
+  function newsList() {
+    const min = S.news.medium ? 0 : 1;
+    return newsEvents.filter(e => e.imp >= min);
+  }
+  function fmtCountdown(ms) {
+    const s = Math.max(0, Math.round(ms / 1000)), h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+    return h ? `${h}h ${m}m` : `${m}:${String(sec).padStart(2, '0')}`;
+  }
+
+  /* ---- the main check, once a second ---- */
+  let banners = [];
+  function money(v) { return (v < 0 ? '−' : v > 0 ? '+' : '') + '$' + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+  function hideMoney(txt) { return S.extras.streamer ? txt.replace(/[+−\-]?\$[\d,]+(\.\d+)?/g, '•••••') : txt; }
+  async function riskTick() {
+    if (pageClosing) return;
+    await refreshDay();
+    const r = S.risk, out = [];
+    const flat = openPositionQty() === 0;
+    // daily limits
+    if (r.lockOn && !S.extras.allOff) {
+      const lossHit = +r.maxLoss > 0 && day.pnl <= -Math.abs(+r.maxLoss);
+      const tradesHit = +r.maxTrades > 0 && day.trades >= +r.maxTrades && flat;
+      const profitHit = +r.profitLock > 0 && day.closedPnl >= +r.profitLock && flat;
+      const reason = lossHit ? `Daily loss limit hit (${money(day.pnl)} of ${money(-Math.abs(+r.maxLoss))})`
+        : tradesHit ? `Max ${r.maxTrades} trades for today reached` : profitHit ? `Profit goal reached (${money(day.closedPnl)}). Lock it in.` : '';
+      if (reason && !lockedNow() && !unlockedToday()) {
+        if (flat) setLock(reason);
+        else pendingLock = reason;
+      } else pendingLock = '';
+      const L = lockedNow();
+      if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
+      else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. New orders lock once you're flat.` });
+      else if (+r.maxLoss > 0 && day.pnl <= -Math.abs(+r.maxLoss) * (+r.warnPct || 80) / 100)
+        out.push({ kind: 'warn', text: `Careful: ${money(day.pnl)} today, limit is ${money(-Math.abs(+r.maxLoss))}.` });
+    }
+    // prop rules
+    if (S.prop.on && !S.extras.allOff) {
+      const ps = propState(acctValues());
+      if (ps.eq === null) out.push({ kind: 'info', text: 'Prop tracker: connect your account in TradingView to track it.' });
+      else {
+        const p = S.prop;
+        if (ps.toFloor !== null && ps.toFloor <= 0) out.push({ kind: 'bad', text: `Prop: below the drawdown limit (${money(ps.floor)}).` });
+        else if (ps.ddLeftPct !== null && ps.ddLeftPct < 0.25) out.push({ kind: ps.ddLeftPct < 0.1 ? 'bad' : 'warn', text: `Prop: only ${money(ps.toFloor)} left before the drawdown limit.` });
+        if (ps.daily && ps.dailyUsed >= ps.daily * 0.8) out.push({ kind: ps.dailyUsed >= ps.daily ? 'bad' : 'warn', text: `Prop: daily loss ${money(-ps.dailyUsed)} of ${money(-ps.daily)}.` });
+        if (ps.maxQty && ps.qty > ps.maxQty) out.push({ kind: 'bad', text: `Prop: ${ps.qty} contracts open, max allowed is ${ps.maxQty}.` });
+        if (ps.target && ps.profit >= ps.target) out.push({ kind: 'good', text: `Prop: profit target reached (${money(ps.profit)}).` });
+        if (+p.lockNear > 0 && r.lockOn && ps.toFloor !== null && ps.toFloor <= +p.lockNear && !lockedNow() && !unlockedToday() && flat)
+          setLock(`Within ${money(+p.lockNear)} of your prop drawdown limit`);
+      }
+    }
+    // news
+    newsBlock = '';
+    if (S.news.on && !S.extras.allOff) {
+      if (Date.now() - newsFetchedAt > 30 * 60000 && Date.now() - newsTriedAt > 5 * 60000) fetchNews();
+      const now = Date.now(), around = (+S.news.around || 0) * 60000;
+      const hi = newsEvents.filter(e => e.imp >= 1);
+      for (const e of newsList()) {
+        const dt = e.time - now;
+        if (dt > -2 * 60000 && dt <= (+S.news.mins || 15) * 60000) {
+          const live = dt <= 0;
+          out.push({ kind: live ? 'bad' : dt < 2 * 60000 ? 'bad' : 'warn', text: live ? `📰 ${e.title} is out now` : `📰 ${e.title} in ${fmtCountdown(dt)}` });
+          if (S.news.sound && !newsWarned[e.id] && dt > 0 && dt <= 60000) { newsWarned[e.id] = 1; playSound('tone:alarm'); }
+          break;
+        }
+      }
+      if (r.newsLock && around) {
+        const near = hi.find(e => Math.abs(e.time - now) <= around);
+        if (near) newsBlock = near.title;
+      }
+      if (newsBlock) out.push({ kind: 'lock', text: `🔒 New entries paused around ${newsBlock} (±${S.news.around} min).` });
+    }
+    banners = out;
+    applyLock();
+    if (buildUI.onRisk) buildUI.onRisk();
+  }
+  setInterval(riskTick, 1000);
+  setTimeout(fetchNews, 3000);
+
+  function renderBanners() {
+    const box = buildUI.bannerBox;
+    if (!box) return;
+    box.innerHTML = '';
+    for (const b of banners) {
+      const d = document.createElement('div');
+      d.className = 'bn ' + b.kind;
+      d.textContent = hideMoney(b.text);
+      if (b.kind === 'lock' && lockedNow()) {
+        const u = document.createElement('button');
+        u.textContent = 'Unlock early';
+        u.onclick = () => { S.ui.tab = 'risk'; buildUI.open && buildUI.open('risk'); };
+        d.appendChild(u);
+      }
+      box.appendChild(d);
+    }
+  }
+  function flashBanner() {
+    const box = buildUI.bannerBox;
+    if (!box) return;
+    box.classList.remove('flash'); void box.offsetWidth; box.classList.add('flash');
+  }
+
+  /* =========================================================
    * Wallpaper rendering
    * ======================================================= */
   const LAYER = 'tvwp-layer';
@@ -1896,7 +2204,7 @@
 
   /* window */
   .panel { position: fixed; z-index: 2147483001; isolation: isolate; display: none; grid-template-columns: 196px 1fr;
-    width: min(800px, calc(100vw - 24px)); height: min(640px, calc(100vh - 24px));
+    width: min(820px, calc(100vw - 24px)); height: min(720px, calc(100vh - 24px));
     background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
     box-shadow: var(--shadow); font-size: 13px; line-height: 1.4; }
   .panel.open { display: grid; }
@@ -1909,7 +2217,8 @@
   .logo svg { width: 15px; height: 15px; }
   .conn { margin: 0 10px 8px; padding: 9px 10px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); display: flex; gap: 9px; align-items: center; }
   .conn b { display: block; font-size: 12.5px; }
-  .conn small { color: var(--muted); font-size: 11.5px; }
+  .conn small { color: var(--muted); font-size: 11.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .conn > div { min-width: 0; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.on { background: var(--good); box-shadow: 0 0 0 3px rgba(34,195,154,.18); }
   .tabs { flex: 1; overflow: auto; padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 1px; }
@@ -1931,8 +2240,11 @@
   .panel.alloff .offbar { display: flex; }
   .panel.alloff .content, .panel.alloff .quick { opacity: .45; pointer-events: none; }
   .fab.alloff { filter: grayscale(1); opacity: .55; }
-  .quick { border-top: 1px solid var(--line); padding: 6px 10px; display: grid; gap: 0; }
-  .quick label { display: flex; align-items: center; justify-content: space-between; padding: 4px 4px; font-size: 12.5px; cursor: pointer; }
+  .quick { border-top: 1px solid var(--line); padding: 6px 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+  .quick input[type=checkbox] { width: 26px; height: 15px; }
+  .quick input[type=checkbox]::before { width: 11px; height: 11px; }
+  .quick input[type=checkbox]:checked::before { transform: translateX(11px); }
+  .quick label { display: flex; align-items: center; justify-content: space-between; padding: 4px 2px; font-size: 12px !important; gap: 4px; min-width: 0; font-size: 12.5px; cursor: pointer; }
   .foot { padding: 8px 14px 12px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
 
   /* main */
@@ -2056,6 +2368,31 @@
   .player[hidden] { display: none; }
   .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
+  .banners { position: fixed; top: 46px; left: 50%; transform: translateX(-50%); z-index: 2147482999; display: grid; gap: 6px; justify-items: center; pointer-events: none; max-width: 92vw; }
+  .bn { pointer-events: auto; display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 10px; font: 600 12.5px/1.3 Inter, -apple-system, system-ui, sans-serif;
+    color: #fff; background: rgba(28,31,40,.94); border: 1px solid #343949; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+  .bn.warn { background: rgba(245,165,36,.95); border-color: #f5a524; color: #1a1300; }
+  .bn.bad { background: rgba(242,73,92,.95); border-color: #f2495c; }
+  .bn.lock { background: rgba(20,22,30,.97); border-color: #f2495c; box-shadow: 0 0 0 2px rgba(242,73,92,.35), 0 6px 20px rgba(0,0,0,.4); }
+  .bn.good { background: rgba(34,195,154,.95); border-color: #22c39a; color: #04140f; }
+  .bn button { font: inherit; font-size: 11.5px; padding: 3px 9px; border-radius: 7px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.12); color: inherit; cursor: pointer; }
+  .banners.flash .bn.lock { animation: shake .4s; }
+  @keyframes shake { 25% { transform: translateX(-6px); } 50% { transform: translateX(6px); } 75% { transform: translateX(-3px); } }
+  .bigout { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; text-align: center; display: grid; gap: 6px; }
+  .bigout .n { font-size: 34px; font-weight: 800; letter-spacing: -.02em; }
+  .bigout .n small { font-size: 16px; font-weight: 600; color: var(--muted); }
+  .meter { display: grid; gap: 4px; }
+  .meter .bar { height: 8px; border-radius: 6px; background: var(--card2); overflow: hidden; }
+  .meter .bar i { display: block; height: 100%; border-radius: 6px; background: var(--good); }
+  .meter .bar i.warn { background: var(--warn); } .meter .bar i.bad { background: var(--bad); }
+  .meter .lab { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+  .meter .lab b { color: var(--text); font-weight: 600; }
+  .nday { font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 8px; }
+  .nrow { display: grid; grid-template-columns: 64px 1fr auto; gap: 10px; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); font-size: 12.5px; }
+  .nrow .imp { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; background: var(--warn); }
+  .nrow .imp.hi { background: var(--bad); }
+  .nrow small { color: var(--muted); font-size: 11.5px; }
+  .nrow.soon { color: var(--bad); font-weight: 600; }
   .status { padding: 10px 12px; border-radius: 10px; background: var(--accentBg); color: var(--text); font-size: 12.5px; }
 
   @media (max-width: 620px) {
@@ -2093,6 +2430,10 @@
     sounds: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5L6 9H3v6h3l5 4V5z"/><path d="M15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/></svg>',
     trading: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 17h16"/><path d="M8 4v6M16 14v6"/></svg>',
     stream: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/><path d="M3 3l18 18"/></svg>',
+    risk: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 018 0v4"/></svg>',
+    size: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 12h2M14 12h2M8 16h2M14 16h2"/></svg>',
+    prop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V10l7-5 7 5v11"/><path d="M10 21v-6h4v6"/></svg>',
+    news: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14a2 2 0 002 2H6a2 2 0 01-2-2V5z"/><path d="M17 9h3v10a2 2 0 01-2 2"/><path d="M8 9h5M8 13h5M8 17h3"/></svg>',
     journal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>',
     extras: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>'
   };
@@ -2104,6 +2445,10 @@
     trading: ['Brackets', 'Win / lose amounts on your take-profit and stop orders.'],
     stream: ['Streamer', 'Hide your P&L and balances while streaming.'],
     journal: ['Journal', 'Every trade recorded automatically, with an optional chart video.'],
+    risk: ['Limits', 'Daily loss limit and lockout. Never stops you closing a trade.'],
+    size: ['Position size', 'How many contracts to trade for the risk you choose.'],
+    prop: ['Prop tracker', 'Your funded-account rules, tracked live.'],
+    news: ['News', 'High-impact US economic events, with warnings before they hit.'],
     extras: ['General', 'Ads, appearance, shortcuts and info.']
   };
   const item = (title, desc, control) => `<div class="item"><div class="txt"><b>${title}</b>${desc ? `<small>${desc}</small>` : ''}</div>${control}</div>`;
@@ -2111,6 +2456,7 @@
 
   const HTML = `
   <button class="fab" title="TV Wallpaper (Alt+Shift+W)">${ICON.logo}</button>
+  <div class="banners" id="banners"></div>
   <div class="panel">
     <aside>
       <div class="brand"><span class="logo">${ICON.logo}</span><span style="flex:1">TV Wallpaper</span>
@@ -2121,6 +2467,8 @@
         ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}
         <div class="grp">Trading</div>
         ${NAV('journal', 'Journal')}${NAV('sounds', 'Sounds')}${NAV('trading', 'Brackets')}${NAV('stream', 'Streamer')}
+        <div class="grp">Risk</div>
+        ${NAV('risk', 'Limits')}${NAV('size', 'Position size')}${NAV('prop', 'Prop tracker')}${NAV('news', 'News')}
         <div class="grp">App</div>
         ${NAV('extras', 'General')}
       </nav>
@@ -2212,6 +2560,60 @@
       <div class="row"><button class="btn" id="rCsv">⬇ Export CSV (Excel)</button><button class="btn" id="rClear">Clear journal</button></div>
       <div class="hint">Keeps recording when TradingView is in a background tab or minimized, and catches up on trades made while it was closed, including trades placed on your broker's own app. In Chrome, add tradingview.com to Settings → Performance → Memory Saver → "Always keep these sites active".</div>
       <div class="player" id="rPlayer" hidden><div class="pbox"><div class="row between"><b id="rPTitle"></b><button class="x" id="rPClose">×</button></div><video id="rVideoEl" controls playsinline></video><div class="row"><a class="btn" id="rPDown" download>⬇ Download video</a></div></div></div>
+    </section>
+
+    <section data-tab="risk">
+      <div class="status" id="kStatus"></div>
+      <div class="card">
+        ${item('Daily lockout', 'When a limit is hit, covers the Buy/Sell buttons, order panel and price ladder until the next session (6 PM ET).', '<input type="checkbox" id="kOn">')}
+        ${item('Max daily loss ($)', 'Counts closed trades today plus your open P&L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
+        ${item('Max trades per day', '0 = no limit. Counts closed trades.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
+        ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}
+        ${item('Warn me at (% of the loss limit)', 'A yellow warning shows on the chart first.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}
+      </div>
+      <div class="card" id="kLockCard" hidden>
+        <div class="sub"><b id="kLockReason"></b><div class="hint">Unlocking early means breaking your own rule. You have to wait 30 seconds and confirm.</div>
+          <div class="row"><button class="btn" id="kUnlock">Unlock early</button></div></div>
+      </div>
+      <div class="hint">If you hit a limit while in a trade, you can still close it. New orders lock as soon as you're flat. The lockout covers TradingView only, not your broker's own app.</div>
+    </section>
+
+    <section data-tab="size">
+      <div class="card">
+        ${item('Symbol', 'Uses your chart by default.', '<select id="zSym"></select>')}
+        ${item('Risk per trade', '', '<div class="row" style="flex:none"><select id="zMode" style="width:120px"><option value="usd">Dollars</option><option value="pct">% of account</option></select><input type="number" id="zRisk" min="0" max="1000000" step="any"></div>')}
+        ${item('Stop distance', '', '<div class="row" style="flex:none"><input type="number" id="zStop" min="0" max="100000" step="any"><select id="zUnit" style="width:100px"><option value="ticks">Ticks</option><option value="points">Points</option></select></div>')}
+      </div>
+      <div class="bigout" id="zOut"></div>
+    </section>
+
+    <section data-tab="prop">
+      <div class="card">
+        ${item('Track a prop account', 'Uses the account connected in TradingView.', '<input type="checkbox" id="pOn">')}
+        ${item('Starting balance ($)', '', '<input type="number" id="pStart" min="0" max="10000000" step="1000">')}
+        ${item('Max drawdown ($)', '', '<input type="number" id="pDd" min="0" max="1000000" step="100">')}
+        ${item('Drawdown type', 'Check your firm\'s rules for which one applies.', '<select id="pType"><option value="eod">Trailing, end of day</option><option value="intraday">Trailing, intraday (incl. open P&amp;L)</option><option value="static">Static</option></select>')}
+        ${item('Trailing stops at starting balance', 'Most firms stop trailing once the limit reaches your start.', '<input type="checkbox" id="pStop">')}
+        ${item('Daily loss limit ($)', '0 = none.', '<input type="number" id="pDaily" min="0" max="1000000" step="50">')}
+        ${item('Profit target ($)', '', '<input type="number" id="pTarget" min="0" max="10000000" step="100">')}
+        ${item('Max contracts', '0 = no limit.', '<input type="number" id="pMax" min="0" max="1000" step="1">')}
+        ${item('Lock trading this close to drawdown ($)', 'Uses the daily lockout. 0 = off.', '<input type="number" id="pLock" min="0" max="1000000" step="50">')}
+      </div>
+      <div class="card"><div class="sub" id="pLive"></div></div>
+      <div class="row"><button class="btn" id="pReset">Reset high-water mark to current equity</button></div>
+    </section>
+
+    <section data-tab="news">
+      <div class="card">
+        ${item('News warnings', 'A countdown on the chart before high-impact events.', '<input type="checkbox" id="nOn">')}
+        ${item('Warn me', '', '<select id="nMins"><option value="5">5 min before</option><option value="10">10 min before</option><option value="15">15 min before</option><option value="30">30 min before</option><option value="60">1 hour before</option></select>')}
+        ${item('Include medium impact', '', '<input type="checkbox" id="nMed">')}
+        ${item('Beep 1 minute before', '', '<input type="checkbox" id="nSound">')}
+        ${item('Pause new entries around high-impact news', 'Covers the Buy/Sell buttons for a few minutes either side. Never blocks closing a trade.', '<input type="checkbox" id="nLock">')}
+        ${item('Pause window', '', '<select id="nAround"><option value="1">± 1 min</option><option value="2">± 2 min</option><option value="5">± 5 min</option><option value="10">± 10 min</option></select>')}
+      </div>
+      <div class="sgroup" id="nList"><h3>Upcoming (New York time)</h3></div>
+      <div class="hint">From TradingView's economic calendar, US events. Refreshes every 30 minutes.</div>
     </section>
 
     <section data-tab="trading">
@@ -2781,6 +3183,120 @@
     }
     buildUI.onStreamer = () => { renderStreamUI(); renderQuick(); renderStatus(); };
     renderStreamUI();
+    /* ---- risk pages ---- */
+    buildUI.bannerBox = $('#banners');
+    buildUI.open = tab => { toggle(true); S.ui.tab = tab; showTab(tab); };
+    // sec is the settings section name; always read S[sec] at the time of the change (S is replaced when another tab saves)
+    const bindNum = (id, sec, key) => { $(id).onchange = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
+    const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
+    const bindChk = (id, sec, key, after) => { $(id).onchange = e => { S[sec][key] = e.target.checked; if (after) after(); save(sec); riskTick(); renderRiskPages(); }; };
+    bindChk('#kOn', 'risk', 'lockOn', () => { if (S.risk.lockOn && !S.rec.on) { S.rec.on = true; recStartFresh(); save('journal'); } });
+    bindNum('#kLoss', 'risk', 'maxLoss'); bindNum('#kTrades', 'risk', 'maxTrades'); bindNum('#kProfit', 'risk', 'profitLock');
+    bindSel('#kWarn', 'risk', 'warnPct', true);
+    $('#zSym').innerHTML = '<option value="">Chart symbol (auto)</option>' + Object.keys(FUTURES).map(k => `<option value="${k}">${k}</option>`).join('');
+    bindSel('#zSym', 'risk', 'sizeSym'); bindSel('#zMode', 'risk', 'sizeMode'); bindSel('#zUnit', 'risk', 'sizeUnit');
+    $('#zRisk').oninput = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S.risk[S.risk.sizeMode === 'pct' ? 'sizePct' : 'sizeRisk'] = v; save('risk'); renderSize(); } };
+    $('#zStop').oninput = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S.risk.sizeStop = v; save('risk'); renderSize(); } };
+    bindChk('#pOn', 'prop', 'on'); bindNum('#pStart', 'prop', 'start'); bindNum('#pDd', 'prop', 'dd');
+    bindSel('#pType', 'prop', 'ddType'); bindChk('#pStop', 'prop', 'stopAtStart'); bindNum('#pDaily', 'prop', 'daily');
+    bindNum('#pTarget', 'prop', 'target'); bindNum('#pMax', 'prop', 'maxQty'); bindNum('#pLock', 'prop', 'lockNear');
+    $('#pReset').onclick = () => {
+      const av = acctValues(); const st = riskLoad(); const acct = (av && av.account) || 'default';
+      if (st.prop && st.prop[acct] && av && isFinite(av.equity)) { st.prop[acct].peak = av.equity; st.prop[acct].eodPeak = av.balance ?? av.equity; riskSave(st); }
+      riskTick();
+    };
+    bindChk('#nOn', 'news', 'on', () => { if (S.news.on) fetchNews().then(renderNews); });
+    bindSel('#nMins', 'news', 'mins', true); bindChk('#nMed', 'news', 'medium', () => renderNews()); bindChk('#nSound', 'news', 'sound');
+    bindChk('#nLock', 'risk', 'newsLock'); bindSel('#nAround', 'news', 'around', true);
+    let unlockTimer = null, unlockReady = false;
+    $('#kUnlock').onclick = () => {
+      if (unlockReady) { unlockReady = false; unlockEarly(); $('#kUnlock').textContent = 'Unlock early'; renderRiskPages(); return; }
+      if (unlockTimer) { clearInterval(unlockTimer); unlockTimer = null; $('#kUnlock').textContent = 'Unlock early'; return; }
+      let n = 30;
+      $('#kUnlock').textContent = `Wait ${n}s… (click to cancel)`;
+      unlockTimer = setInterval(() => {
+        n--;
+        if (n > 0) { $('#kUnlock').textContent = `Wait ${n}s… (click to cancel)`; return; }
+        clearInterval(unlockTimer); unlockTimer = null; unlockReady = true;
+        $('#kUnlock').textContent = 'Confirm: unlock for the rest of today';
+      }, 1000);
+    };
+    function renderRiskInputs() {
+      const r = S.risk, p = S.prop, n = S.news;
+      $('#kOn').checked = !!r.lockOn; $('#kLoss').value = r.maxLoss; $('#kTrades').value = r.maxTrades; $('#kProfit').value = r.profitLock; $('#kWarn').value = String(r.warnPct);
+      $('#zSym').value = r.sizeSym || ''; $('#zMode').value = r.sizeMode; $('#zRisk').value = r.sizeMode === 'pct' ? r.sizePct : r.sizeRisk; $('#zStop').value = r.sizeStop; $('#zUnit').value = r.sizeUnit;
+      $('#pOn').checked = !!p.on; $('#pStart').value = p.start; $('#pDd').value = p.dd; $('#pType').value = p.ddType; $('#pStop').checked = !!p.stopAtStart;
+      $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear;
+      $('#nOn').checked = !!n.on; $('#nMins').value = String(n.mins); $('#nMed').checked = !!n.medium; $('#nSound').checked = !!n.sound;
+      $('#nLock').checked = !!r.newsLock; $('#nAround').value = String(n.around);
+    }
+    function meter(label, value, frac, cls) {
+      const pct = Math.max(0, Math.min(100, Math.round((frac || 0) * 100)));
+      return `<div class="meter"><div class="lab"><span>${label}</span><b>${value}</b></div><div class="bar"><i class="${cls || ''}" style="width:${pct}%"></i></div></div>`;
+    }
+    function renderRiskPages() {
+      const r = S.risk, hide = S.extras.streamer, m = v => hide ? '•••••' : money(v);
+      // limits
+      const L = lockedNow();
+      $('#kStatus').innerHTML = !r.lockOn ? 'Lockout is off.'
+        : `<b>Today:</b> ${m(day.pnl)} · ${day.trades} trade${day.trades === 1 ? '' : 's'}${L ? ' · <b style="color:var(--bad)">Locked</b>' : unlockedToday() ? ' · Unlocked early' : ''}${S.rec.on ? '' : ' · <b>Turn on Journal → Record my trades</b> (the lockout counts your trades from it)'}`;
+      $('#kLockCard').hidden = !L;
+      if (L) $('#kLockReason').textContent = hideMoney('🔒 ' + L.lockReason);
+      // prop
+      const pl = $('#pLive');
+      if (!S.prop.on) pl.innerHTML = '<span class="hint">Switch on <b>Track a prop account</b> to see your numbers here.</span>';
+      else {
+        const ps = propState(acctValues());
+        if (ps.eq === null) pl.innerHTML = '<span class="hint">Connect your prop account in TradingView (Trade panel) to track it.</span>';
+        else {
+          const left = ps.ddLeftPct ?? 0;
+          pl.innerHTML = [
+            meter('Equity', m(ps.eq).replace(/^\+/, ''), 1, ''),
+            meter(`Room before drawdown limit (${m(ps.floor).replace(/^\+/, '')})`, m(ps.toFloor), left, left < 0.1 ? 'bad' : left < 0.25 ? 'warn' : ''),
+            ps.target ? meter(`Profit toward target (${m(ps.target)})`, m(ps.profit), ps.profit / ps.target, ps.profit >= ps.target ? '' : 'warn') : '',
+            ps.daily ? meter(`Daily loss used (limit ${m(-ps.daily)})`, m(-ps.dailyUsed), ps.dailyUsed / ps.daily, ps.dailyUsed >= ps.daily ? 'bad' : ps.dailyUsed >= ps.daily * .8 ? 'warn' : '') : '',
+            ps.maxQty ? meter('Contracts open', `${ps.qty} / ${ps.maxQty}`, ps.qty / ps.maxQty, ps.qty > ps.maxQty ? 'bad' : '') : ''
+          ].join('');
+        }
+      }
+      renderNews();
+      const rb = root.querySelector('[data-badge="risk"]');
+      rb.hidden = !L; rb.textContent = 'locked';
+    }
+    async function renderSize() {
+      const out = $('#zOut');
+      const c = await calcSize();
+      const unit = S.risk.sizeUnit === 'points' ? 'points' : 'ticks';
+      if (!c.spec.value) { out.innerHTML = `<span class="hint">Pick a symbol: ${c.sym ? `couldn't find tick values for ${String(c.sym).split(':').pop()}` : 'no chart symbol yet'}.</span>`; return; }
+      if (c.needsEquity) { out.innerHTML = '<span class="hint">"% of account" needs your account connected in TradingView. Or switch to Dollars.</span>'; return; }
+      const hide = S.extras.streamer;
+      out.innerHTML = `<div class="n">${c.qty} <small>${c.spec.root} contract${c.qty === 1 ? '' : 's'}</small></div>
+        <div>Risk per contract <b>$${c.perContract.toFixed(2)}</b> · total <b>$${c.actual.toFixed(2)}</b> of ${hide ? '•••••' : '$' + c.riskUsd.toFixed(2)}</div>
+        ${c.alt ? `<div class="hint">Too big for 1 ${c.spec.root}. That's <b>${c.alt.qty} ${c.alt.root}</b> instead ($${c.alt.per.toFixed(2)} each).</div>` : ''}
+        <div class="hint">${Math.round(c.stopTicks)} ticks stop · 1 tick = ${c.spec.tick} = $${(+c.spec.value).toFixed(2)} per contract (${c.spec.from === 'broker' ? 'from your broker' : 'standard contract specs'})</div>`;
+    }
+    function renderNews() {
+      const box = $('#nList');
+      box.querySelectorAll('.nrow, .nday, .empty').forEach(e => e.remove());
+      const list = newsList().filter(e => e.time > Date.now() - 60 * 60000).slice(0, 30);
+      if (!list.length) { const e = document.createElement('div'); e.className = 'empty'; e.textContent = S.news.on ? (newsFetchedAt ? 'No events coming up.' : 'Loading…') : 'News warnings are off.'; box.appendChild(e); return; }
+      let lastDay = '';
+      for (const ev of list) {
+        const d = new Date(ev.time);
+        const dayLbl = d.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric', timeZone: 'America/New_York' });
+        if (dayLbl !== lastDay) { const h = document.createElement('div'); h.className = 'nday'; h.textContent = dayLbl; box.appendChild(h); lastDay = dayLbl; }
+        const row = document.createElement('div');
+        const dt = ev.time - Date.now();
+        row.className = 'nrow' + (dt > -2 * 60000 && dt < 15 * 60000 ? ' soon' : '');
+        const fx = [ev.actual !== null && ev.actual !== undefined ? `Actual ${ev.actual}` : '', ev.forecast !== null && ev.forecast !== undefined ? `Fcst ${ev.forecast}` : '', ev.previous !== null && ev.previous !== undefined ? `Prev ${ev.previous}` : ''].filter(Boolean).join(' · ');
+        row.innerHTML = `<span>${d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York' })}</span>
+          <span><span class="imp ${ev.imp >= 1 ? 'hi' : ''}"></span>${String(ev.title).replace(/[<>&]/g, '')}<br><small>${fx}</small></span>
+          <small>${dt > 0 ? 'in ' + fmtCountdown(dt) : 'out'}</small>`;
+        box.appendChild(row);
+      }
+    }
+    buildUI.onRisk = () => { if (panel.classList.contains('open')) { renderRiskPages(); const cur = root.querySelector('section.on'); if (cur && cur.dataset.tab === 'size') renderSize(); } };
+
     /* ---- journal ---- */
     const money = (v, cur) => (v > 0 ? '+' : v < 0 ? '\u2212' : '') + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + (cur || 'USD');
     const fmtPx = v => (+v).toLocaleString(undefined, { maximumFractionDigits: 6 });
@@ -2927,7 +3443,8 @@
         }
       } catch (e) {}
       $('#connDot').classList.toggle('on', connected);
-      $('#connText').textContent = connected ? `${name || 'Broker'} · connected` : 'No broker connected';
+      $('#connText').textContent = connected ? (name || 'Broker') + ' · connected' : 'No broker connected';
+      $('#connText').title = $('#connText').textContent;
       const pill = $('#pill');
       pill.className = 'pill' + (S.extras.allOff ? ' live' : S.extras.streamer ? ' live' : connected ? ' ok' : '');
       pill.textContent = S.extras.allOff ? '⏻ All off' : S.extras.streamer ? '● Streamer on' : connected ? '● ' + (name || 'Connected') : 'Not trading';
@@ -2944,7 +3461,7 @@
     }
     applyTheme();
 
-    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); renderJournal(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
+    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); renderJournal(); renderRiskInputs(); renderRiskPages(); renderSize(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { renderOff(); if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
     renderOff();
   }
@@ -2961,6 +3478,7 @@
       if (t === 'extras') { applyAds(); applyStreamer(); brkKick(); }
       if (t === 'alloff') applyAllOff();
       if (t === 'journal' && buildUI.onJournal) buildUI.onJournal();
+      if (t === 'risk') applyLock();
       if (t === 'sounds') applyMute();
       if (t === 'soundlist') bufferCache.clear();
       if (t === 'ind') startInd();
