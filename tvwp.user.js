@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.4.1
+// @version      3.5.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.4.1';
+  const VERSION = '3.5.0';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -29,7 +29,7 @@
     },
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
     risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false,
-      sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '' },
+      sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1 },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
@@ -1998,6 +1998,29 @@
     if (FUTURES[root]) return { root, tick: FUTURES[root][0], value: FUTURES[root][1], from: 'table' };
     return { root, tick: 0, value: 0, from: 'none' };
   }
+  // Average candle range (ATR 14) of the chart, in price. Used as a "typical stop" when you don't set one.
+  let atrCache = { key: '', atr: 0 };
+  function chartAtr() {
+    try {
+      const ms = chartWidget().model().mainSeries();
+      const b = ms.bars(), l = b.lastIndex(), f = b.firstIndex();
+      if (l === null || f === null || l === undefined) return 0;
+      const last = b.valueAt(l);
+      const key = `${f}|${l}|${last && last[0]}`;
+      if (atrCache.key === key) return atrCache.atr;
+      const N = 14, rows = [];
+      for (let i = Math.max(f, l - N - 1); i <= l; i++) { const v = b.valueAt(i); if (v) rows.push(v); }
+      let sum = 0, n = 0;
+      for (let i = 1; i < rows.length; i++) {
+        const [, , h, lo] = rows[i], pc = rows[i - 1][4];
+        sum += Math.max(h - lo, Math.abs(h - pc), Math.abs(lo - pc)); n++;
+      }
+      atrCache = { key, atr: n ? sum / n : 0 };
+      return atrCache.atr;
+    } catch (e) { return 0; }
+  }
+  const MICRO_OF = { NQ: 'MNQ', ES: 'MES', YM: 'MYM', RTY: 'M2K', GC: 'MGC', CL: 'MCL', SI: 'SIL', BTC: 'MBT' };
+  const MINI_OF = Object.fromEntries(Object.entries(MICRO_OF).map(([a, b]) => [b, a]));
   async function calcSize() {
     const r = S.risk;
     let chartSym = '';
@@ -2006,17 +2029,32 @@
     const spec = await tickSpec(sym);
     const av = acctValues();
     const riskUsd = r.sizeMode === 'pct' ? ((av && (av.equity || av.balance)) || 0) * (+r.sizePct || 0) / 100 : +r.sizeRisk || 0;
-    let stopTicks = +r.sizeStop || 0;
-    if (r.sizeUnit === 'points' && spec.tick) stopTicks = stopTicks / spec.tick;
+    // the stop: automatic (from the chart's average candle) or your own
+    const sameAsChart = !r.sizeSym || symRoot(chartSym) === spec.root || MICRO_OF[symRoot(chartSym)] === spec.root || MINI_OF[symRoot(chartSym)] === spec.root;
+    const atr = sameAsChart ? chartAtr() : 0;
+    let stopTicks, stopSource;
+    if (r.sizeStopMode === 'manual' || !atr || !spec.tick) {
+      stopTicks = +r.sizeStop || 0;
+      if (r.sizeUnit === 'points' && spec.tick) stopTicks = stopTicks / spec.tick;
+      stopSource = r.sizeStopMode === 'manual' ? 'yours' : 'fallback';
+    } else {
+      stopTicks = Math.max(1, Math.round(atr * (+r.sizeAtr || 1) / spec.tick));
+      stopSource = 'auto';
+    }
     const perContract = stopTicks * spec.value;
     const qty = perContract > 0 ? Math.floor(riskUsd / perContract) : 0;
-    let alt = null;
-    const micro = { NQ: 'MNQ', ES: 'MES', YM: 'MYM', RTY: 'M2K', GC: 'MGC', CL: 'MCL', SI: 'SIL', BTC: 'MBT' }[spec.root];
-    if (qty === 0 && micro && FUTURES[micro]) {
-      const per2 = stopTicks * FUTURES[micro][1];
-      if (per2 > 0) alt = { root: micro, qty: Math.floor(riskUsd / per2), per: per2 };
-    }
-    return { sym, spec, riskUsd, stopTicks, perContract, qty, actual: qty * perContract, alt, needsEquity: r.sizeMode === 'pct' && !(av && (av.equity || av.balance)) };
+    // the other size of the same market (micro <-> mini), when there is one
+    const otherRoot = MICRO_OF[spec.root] || MINI_OF[spec.root] || null;
+    const other = otherRoot && FUTURES[otherRoot] ? { root: otherRoot, value: FUTURES[otherRoot][1] * (spec.tick / FUTURES[otherRoot][0]) } : null;
+    const otherQty = other && stopTicks ? Math.floor(riskUsd / (stopTicks * other.value)) : null;
+    // a few other stop sizes around the main one
+    const mults = [0.5, 1, 2, 3];
+    const rows = stopTicks ? mults.map(m => {
+      const tk = Math.max(1, Math.round(stopTicks * m));
+      return { ticks: tk, points: tk * spec.tick, qty: Math.floor(riskUsd / (tk * spec.value)), otherQty: other ? Math.floor(riskUsd / (tk * other.value)) : null, main: m === 1 };
+    }) : [];
+    return { sym, spec, riskUsd, stopTicks, stopSource, atr, perContract, qty, actual: qty * perContract, other, otherQty, rows,
+      needsEquity: r.sizeMode === 'pct' && !(av && (av.equity || av.balance)) };
   }
 
   /* ---- prop-firm tracker ---- */
@@ -2584,6 +2622,16 @@
   .bn button { font: inherit; font-size: 11.5px; padding: 3px 9px; border-radius: 7px; border: 1px solid rgba(255,255,255,.35); background: rgba(255,255,255,.12); color: inherit; cursor: pointer; }
   .banners.flash .bn.lock { animation: shake .4s; }
   @keyframes shake { 25% { transform: translateX(-6px); } 50% { transform: translateX(6px); } 75% { transform: translateX(-3px); } }
+  .money { display: flex; align-items: center; gap: 6px; background: var(--card2); border: 1px solid var(--line2); border-radius: 10px; padding: 4px 10px; flex: none; }
+  .money:focus-within { border-color: var(--accent); }
+  .money span { font-size: 18px; font-weight: 700; color: var(--muted); }
+  .money input { width: 120px; border: none; background: none; font-size: 20px; font-weight: 700; padding: 4px 0; }
+  details.adv summary { padding: 11px 14px; cursor: pointer; font-weight: 600; font-size: 13px; color: var(--muted); }
+  details.adv[open] summary { border-bottom: 1px solid var(--line); }
+  details.adv > .item + .item { border-top: 1px solid var(--line); }
+  .ztab { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .ztab.head { border-top: none; color: var(--muted); font-size: 11.5px; font-weight: 600; }
+  .ztab.main { color: var(--accent2); font-weight: 700; }
   .bigout { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; text-align: center; display: grid; gap: 6px; }
   .bigout .n { font-size: 34px; font-weight: 800; letter-spacing: -.02em; }
   .bigout .n small { font-size: 16px; font-weight: 600; color: var(--muted); }
@@ -2794,11 +2842,18 @@
 
     <section data-tab="size">
       <div class="card">
-        ${item('Symbol', 'Uses your chart by default.', '<select id="zSym"></select>')}
-        ${item('Risk per trade', '', '<div class="row" style="flex:none"><select id="zMode" style="width:120px"><option value="usd">Dollars</option><option value="pct">% of account</option></select><input type="number" id="zRisk" min="0" max="1000000" step="any"></div>')}
-        ${item('Stop distance', '', '<div class="row" style="flex:none"><input type="number" id="zStop" min="0" max="100000" step="any"><select id="zUnit" style="width:100px"><option value="ticks">Ticks</option><option value="points">Points</option></select></div>')}
+        ${item('<span id="zRiskLbl">How much do you want to risk?</span>', '<span id="zRiskSub">Per trade, in dollars.</span>', '<div class="money"><span id="zUnitSym">$</span><input type="number" id="zRisk" min="0" max="1000000" step="any"></div>')}
       </div>
       <div class="bigout" id="zOut"></div>
+      <div class="sgroup" id="zTable"><h3>With a tighter or wider stop</h3></div>
+      <details class="card adv" id="zAdv">
+        <summary>Options: symbol, your own stop, % of account</summary>
+        ${item('Symbol', 'Uses your chart by default.', '<select id="zSym"></select>')}
+        ${item('Risk as', '', '<select id="zMode"><option value="usd">Dollars</option><option value="pct">% of account</option></select>')}
+        ${item('Stop', 'Automatic uses the average candle size on your chart right now.', '<select id="zStopMode"><option value="auto">Automatic</option><option value="manual">I\'ll set it</option></select>')}
+        ${item('Automatic stop size', 'How many average candles away your stop usually is.', '<select id="zAtr"><option value="0.5">½ candle</option><option value="1">1 candle</option><option value="1.5">1½ candles</option><option value="2">2 candles</option><option value="3">3 candles</option></select>')}
+        ${item('My stop', '', '<div class="row" style="flex:none"><input type="number" id="zStop" min="0" max="100000" step="any"><select id="zUnit" style="width:100px"><option value="ticks">Ticks</option><option value="points">Points</option></select></div>')}
+      </details>
     </section>
 
     <section data-tab="prop">
@@ -3409,7 +3464,12 @@
     bindSel('#kWarn', 'risk', 'warnPct', true);
     $('#zSym').innerHTML = '<option value="">Chart symbol (auto)</option>' + Object.keys(FUTURES).map(k => `<option value="${k}">${k}</option>`).join('');
     bindSel('#zSym', 'risk', 'sizeSym'); bindSel('#zMode', 'risk', 'sizeMode'); bindSel('#zUnit', 'risk', 'sizeUnit');
-    $('#zRisk').oninput = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S.risk[S.risk.sizeMode === 'pct' ? 'sizePct' : 'sizeRisk'] = v; save('risk'); renderSize(); } };
+    bindSel('#zStopMode', 'risk', 'sizeStopMode'); bindSel('#zAtr', 'risk', 'sizeAtr', true);
+    for (const id of ['#zSym', '#zMode', '#zUnit', '#zStopMode', '#zAtr']) $(id).addEventListener('change', () => renderSize());
+    $('#zRisk').oninput = e => {
+      const raw = e.target.value.trim(), v = raw === '' ? 0 : parseFloat(raw);
+      if (isFinite(v) && v >= 0) { S.risk[S.risk.sizeMode === 'pct' ? 'sizePct' : 'sizeRisk'] = v; save('risk'); renderSize(); }
+    };
     $('#zStop').oninput = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S.risk.sizeStop = v; save('risk'); renderSize(); } };
     bindChk('#pOn', 'prop', 'on'); bindNum('#pStart', 'prop', 'start'); bindNum('#pDd', 'prop', 'dd');
     bindSel('#pType', 'prop', 'ddType'); bindChk('#pStop', 'prop', 'stopAtStart'); bindNum('#pDaily', 'prop', 'daily');
@@ -3439,6 +3499,11 @@
       const r = S.risk, p = S.prop, n = S.news;
       $('#kOn').checked = !!r.lockOn; $('#kLoss').value = r.maxLoss; $('#kTrades').value = r.maxTrades; $('#kProfit').value = r.profitLock; $('#kWarn').value = String(r.warnPct);
       $('#zSym').value = r.sizeSym || ''; $('#zMode').value = r.sizeMode; $('#zRisk').value = r.sizeMode === 'pct' ? r.sizePct : r.sizeRisk; $('#zStop').value = r.sizeStop; $('#zUnit').value = r.sizeUnit;
+      $('#zStopMode').value = r.sizeStopMode || 'auto'; $('#zAtr').value = String(r.sizeAtr || 1);
+      $('#zUnitSym').textContent = r.sizeMode === 'pct' ? '%' : '$';
+      $('#zRiskSub').textContent = r.sizeMode === 'pct' ? 'Per trade, as % of your account.' : 'Per trade, in dollars.';
+      $('#zStop').closest('.item').style.display = r.sizeStopMode === 'manual' ? '' : 'none';
+      $('#zAtr').closest('.item').style.display = r.sizeStopMode === 'manual' ? 'none' : '';
       $('#pOn').checked = !!p.on; $('#pStart').value = p.start; $('#pDd').value = p.dd; $('#pType').value = p.ddType; $('#pStop').checked = !!p.stopAtStart;
       $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear;
       $('#nOn').checked = !!n.on; $('#nMins').value = String(n.mins); $('#nMed').checked = !!n.medium; $('#nSound').checked = !!n.sound;
@@ -3478,16 +3543,41 @@
       rb.hidden = !L; rb.textContent = 'locked';
     }
     async function renderSize() {
-      const out = $('#zOut');
+      const out = $('#zOut'), tab = $('#zTable');
       const c = await calcSize();
-      const unit = S.risk.sizeUnit === 'points' ? 'points' : 'ticks';
-      if (!c.spec.value) { out.innerHTML = `<span class="hint">Pick a symbol: ${c.sym ? `couldn't find tick values for ${String(c.sym).split(':').pop()}` : 'no chart symbol yet'}.</span>`; return; }
-      if (c.needsEquity) { out.innerHTML = '<span class="hint">"% of account" needs your account connected in TradingView. Or switch to Dollars.</span>'; return; }
+      tab.querySelectorAll('.ztab, .empty').forEach(e => e.remove());
+      tab.style.display = 'none';
+      if (!c.spec.value) { out.innerHTML = `<span class="hint">${c.sym ? `Couldn't find contract values for ${String(c.sym).split(':').pop()}. Pick a symbol under Options.` : 'Open a chart, or pick a symbol under Options.'}</span>`; return; }
+      if (c.needsEquity) { out.innerHTML = '<span class="hint">"% of account" needs your account connected in TradingView. Or switch to Dollars under Options.</span>'; return; }
+      if (!c.riskUsd) { out.innerHTML = '<span class="hint">Type how much you want to risk above.</span>'; return; }
+      if (!c.stopTicks) { out.innerHTML = '<span class="hint">Set your stop under Options, or switch the stop back to Automatic.</span>'; return; }
       const hide = S.extras.streamer;
-      out.innerHTML = `<div class="n">${c.qty} <small>${c.spec.root} contract${c.qty === 1 ? '' : 's'}</small></div>
-        <div>Risk per contract <b>$${c.perContract.toFixed(2)}</b> · total <b>$${c.actual.toFixed(2)}</b> of ${hide ? '•••••' : '$' + c.riskUsd.toFixed(2)}</div>
-        ${c.alt ? `<div class="hint">Too big for 1 ${c.spec.root}. That's <b>${c.alt.qty} ${c.alt.root}</b> instead ($${c.alt.per.toFixed(2)} each).</div>` : ''}
-        <div class="hint">${Math.round(c.stopTicks)} ticks stop · 1 tick = ${c.spec.tick} = $${(+c.spec.value).toFixed(2)} per contract (${c.spec.from === 'broker' ? 'from your broker' : 'standard contract specs'})</div>`;
+      const usd = v => hide ? '•••••' : '$' + v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+      const pts = c.stopTicks * c.spec.tick;
+      const fmtPts = v => (+v.toFixed(6)).toLocaleString(undefined, { maximumFractionDigits: 4 });
+      const stopTxt = c.stopSource === 'auto' ? `a typical stop of about <b>${c.stopTicks} ticks</b> (${fmtPts(pts)} points)`
+        : `your stop of <b>${c.stopTicks} ticks</b> (${fmtPts(pts)} points)`;
+      let main;
+      if (c.qty >= 1) main = `<div class="n">≈ ${c.qty} <small>${c.spec.root}</small></div>`;
+      else if (c.other && c.otherQty >= 1) main = `<div class="n">≈ ${c.otherQty} <small>${c.other.root}</small></div><div class="hint">Less than 1 ${c.spec.root}, so use the ${c.other.root} instead.</div>`;
+      else main = `<div class="n">0 <small>${c.spec.root}</small></div><div class="hint">Even 1 contract risks more than ${usd(c.riskUsd)} with this stop.</div>`;
+      const otherLine = c.qty >= 1 && c.other && c.otherQty ? `<div class="hint">or about <b>${c.otherQty} ${c.other.root}</b></div>` : '';
+      out.innerHTML = `${main}${otherLine}
+        <div>with ${stopTxt}, risking about ${usd(c.qty >= 1 ? c.actual : c.other && c.otherQty >= 1 ? c.otherQty * c.stopTicks * c.other.value : c.riskUsd)}</div>
+        <div class="hint">${c.stopSource === 'auto' ? `Typical stop = ${S.risk.sizeAtr || 1} average candle${(+S.risk.sizeAtr || 1) === 1 ? '' : 's'} on your chart's current timeframe. ` : c.stopSource === 'fallback' ? 'No chart data for this symbol, so it uses your stop from Options. ' : ''}1 tick = ${c.spec.tick} = $${(+c.spec.value).toFixed(2)} per ${c.spec.root} (${c.spec.from === 'broker' ? 'from your broker' : 'standard contract specs'}).</div>`;
+      if (c.rows.length) {
+        tab.style.display = '';
+        const head = document.createElement('div');
+        head.className = 'ztab head';
+        head.innerHTML = `<span>Stop</span><span>${c.spec.root}</span><span>${c.other ? c.other.root : ''}</span>`;
+        tab.appendChild(head);
+        for (const row of c.rows) {
+          const d = document.createElement('div');
+          d.className = 'ztab' + (row.main ? ' main' : '');
+          d.innerHTML = `<span>${row.ticks} ticks · ${fmtPts(row.points)} pts</span><span>${row.qty}</span><span>${row.otherQty ?? ''}</span>`;
+          tab.appendChild(d);
+        }
+      }
     }
     function renderNews() {
       const box = $('#nList');
