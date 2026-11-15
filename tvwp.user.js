@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.5.2
+// @version      3.5.3
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.5.2';
+  const VERSION = '3.5.3';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -43,8 +43,26 @@
     t.__tvwpDirty = true;                       // so leaving the box still saves it
     t.dispatchEvent(new Event('input', { bubbles: true }));
   }
+  // Remember whether your last click was inside our window or on the chart. While you're working in
+  // our window, keys don't trigger TradingView's chart shortcuts (like a number opening the timeframe box).
+  let inOurWindow = false;
+  window.addEventListener('pointerdown', e => {
+    const host = document.getElementById('tvwp-host');
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    const panel = host && host.shadowRoot && host.shadowRoot.querySelector('.panel');
+    inOurWindow = !!(panel && path.includes(panel));
+  }, true);
+  function inOurWindowNow() {
+    const host = document.getElementById('tvwp-host');
+    const panel = host && host.shadowRoot && host.shadowRoot.querySelector('.panel');
+    return inOurWindow && !!panel && panel.classList.contains('open');
+  }
   for (const ev of ['keydown', 'keypress', 'keyup']) {
-    window.addEventListener(ev, e => { if (inOurField(e)) { typeSwallowed(e); e.stopImmediatePropagation(); } }, true);
+    window.addEventListener(ev, e => {
+      if (inOurField(e)) { typeSwallowed(e); e.stopImmediatePropagation(); return; }
+      // Our own shortcuts (Alt+Shift+…) still work; everything else stays away from the chart.
+      if (inOurWindowNow() && !(e.altKey && e.shiftKey)) e.stopImmediatePropagation();
+    }, true);
   }
 
   /* =========================================================
@@ -2974,6 +2992,12 @@
     // Last resort: if TradingView already swallowed a key before we could stop it (it can get there
     // first in the desktop app), type the character into our box ourselves.
     host.addEventListener('keydown', e => { if (inOurField(e)) typeSwallowed(e); }, true);
+    root.addEventListener('click', e => {
+      const row = e.target.closest && e.target.closest('.item');
+      if (!row || e.target.closest('input, select, button, a, .seg, label, textarea')) return;
+      const boxes = [...row.querySelectorAll('input[type=text]')].filter(i => i.offsetParent !== null);
+      if (boxes.length === 1) { boxes[0].focus(); boxes[0].select(); }
+    });
     root.addEventListener('focusout', e => {
       const t = e.target;
       if (t && t.__tvwpDirty) { t.__tvwpDirty = false; t.dispatchEvent(new Event('change', { bubbles: true })); }
