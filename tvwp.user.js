@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.4.0
+// @version      3.4.1
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.4.0';
+  const VERSION = '3.4.1';
   window.__tvwpLoaded = VERSION;
 
   /* =========================================================
@@ -757,7 +757,9 @@
     let st = null;
     try { st = JSON.parse(localStorage.getItem(REC_KEY)); } catch (e) {}
     st = st || {};
-    return { since: st.since || Date.now(), seen: st.seen || [], open: st.open || {}, lastFill: st.lastFill || 0 };
+    const out = { since: st.since || Date.now(), seen: st.seen || [], open: st.open || {}, lastFill: st.lastFill || 0 };
+    if (!st.since) try { localStorage.setItem(REC_KEY, JSON.stringify(out)); } catch (e) {}
+    return out;
   }
   function recSave(st) {
     st.seen = st.seen.slice(-4000);
@@ -803,7 +805,7 @@
       ticks: tick ? Math.round(((exit - entry) * t.dir) / tick) : null,
       gross: pv ? t.points * pv : null, commission: t.commission,
       net: pv ? t.points * pv - t.commission : null, currency: info.currency || 'USD',
-      fills: t.fills, backfilled: t.backfilled, videoId: t.video ? 'v_' + t.id : null
+      fills: t.fills, backfilled: t.backfilled, adopted: !!t.adopted, videoId: t.video && !pendingNoVideo.has(t.id) ? 'v_' + t.id : null
     };
     await DB.tradePut(rec);
     return rec;
@@ -817,7 +819,7 @@
       const list = fills.map(normFill).filter(Boolean).sort((a, b) => a.time - b.time);
       const opened = [], closed = [];
       for (const f of list) {
-        if (seen.has(f.id) || f.time < st.since - 2000) continue;
+        if (seen.has(f.id) || f.time < st.since - 30000) continue;   // 30 s allowance for the broker's clock
         seen.add(f.id); st.seen.push(f.id);
         st.lastFill = Math.max(st.lastFill, f.time);
         let qty = f.qty;
@@ -829,6 +831,7 @@
             opened.push(t);
           }
           if (!t.pointValue && f.pointValue) t.pointValue = f.pointValue;
+          t.lastFill = f.time;
           if (t.qty === 0 || Math.sign(t.qty) === f.side) {          // opening / adding
             t.qty += f.side * qty; t.entryQty += qty; t.entryValue += f.price * qty;
             t.maxQty = Math.max(t.maxQty, Math.abs(t.qty));
@@ -858,6 +861,7 @@
     }).then(res => {
       if (!res) return;
       if (res.live) for (const t of res.opened) liveTrades.add(t.id);
+      journalDirty = true;
       videoSync();
       if (res.recs.length && buildUI.onJournal) buildUI.onJournal();
       if (res.recs.length) folderSync();
@@ -869,6 +873,60 @@
     if (!f) return;
     recProcess([ex], Date.now() - f.time < 60000);
   }
+  /* Keeps the journal's open trades in step with your broker's real positions.
+     - A trade the journal thinks is open, but the broker shows no position for, is dropped
+       (its exit was missed, e.g. closed while TradingView was shut).
+     - A position the broker has that the journal isn't tracking (opened before recording
+       was switched on) is picked up, so its exit is recorded correctly. */
+  let posCache = { at: 0, list: [], ok: false };
+  const reconcileMiss = {};
+  async function pollPositions() {
+    const b = currentBroker();
+    let ok = false, list = [];
+    try {
+      ok = !!(b && (typeof b.isConnected !== 'function' || b.isConnected()) && typeof b.positions === 'function');
+      if (ok) list = ((await b.positions()) || []).filter(p => p && +p.qty);
+    } catch (e) { ok = false; }
+    posCache = { at: Date.now(), list, ok };
+    return posCache;
+  }
+  async function recReconcile() {
+    if (!S.rec.on || S.extras.allOff || pageClosing) return;
+    const pc = await pollPositions();
+    if (!pc.ok) return;
+    await withLock('tvwp-rec', async () => {
+      const st = recLoad();
+      const now = Date.now();
+      let changed = false;
+      const quiet = t => now - (t.lastFill || t.openTime) > 20000;    // no fills for 20 s
+      for (const sym of Object.keys(st.open)) {
+        const t = st.open[sym];
+        const pos = pc.list.find(p => p.symbol === sym);
+        const match = pos && ((pos.side === -1 ? -1 : 1) === Math.sign(t.qty));
+        if (match || !quiet(t)) { delete reconcileMiss[sym]; continue; }
+        reconcileMiss[sym] = (reconcileMiss[sym] || 0) + 1;
+        if (reconcileMiss[sym] >= 2) {                                    // seen twice in a row: really gone
+          delete st.open[sym]; delete reconcileMiss[sym]; changed = true;
+          console.warn('[TV Wallpaper] journal: dropped a trade whose exit was never reported', sym);
+        }
+      }
+      for (const pos of pc.list) {
+        if (st.open[pos.symbol]) { delete reconcileMiss['+' + pos.symbol]; continue; }
+        const lastAny = st.lastFill || 0;
+        reconcileMiss['+' + pos.symbol] = (reconcileMiss['+' + pos.symbol] || 0) + 1;
+        if (reconcileMiss['+' + pos.symbol] < 2 || now - lastAny < 20000 || !isFinite(+pos.avgPrice)) continue;
+        delete reconcileMiss['+' + pos.symbol];
+        const side = pos.side === -1 ? -1 : 1, qty = Math.abs(+pos.qty);
+        const t = newTrade({ time: now, symbol: pos.symbol, side, pointValue: 0 });
+        t.qty = side * qty; t.entryQty = qty; t.entryValue = +pos.avgPrice * qty; t.maxQty = qty;
+        t.adopted = true; t.lastFill = now;
+        st.open[pos.symbol] = t; changed = true;
+      }
+      if (changed) recSave(st);
+    });
+  }
+  setInterval(() => { recReconcile().catch(() => {}); }, 5000);
+
   let backfilling = false;
   async function recBackfill() {
     if (!S.rec.on || S.extras.allOff || backfilling) return;
@@ -897,6 +955,7 @@
 
   /* ---- chart video while you're in a trade ---- */
   let vid = null;
+  const pendingNoVideo = new Set();   // trades whose video turned out empty
   const liveTrades = new Set();   // trades opened while this browser was running (not caught up from history)
   // Every window checks the shared trade state, so the right one starts/stops filming
   // no matter which window happened to process the fill.
@@ -987,7 +1046,7 @@
       drawChartFrame(g, cv, t);
       const stream = cv.captureStream(30);
       const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
-      const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: H === 1080 ? 5e6 : 2.5e6 });
+      const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: H === 1080 ? 3e6 : 1.5e6 });
       const chunks = [];
       mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
       const stopTick = videoTicker(30, () => drawChartFrame(g, cv, t));
@@ -1003,6 +1062,11 @@
             const rec = await DB.tradeGet(t.id);
             if (rec && !rec.videoId) { rec.videoId = 'v_' + t.id; await DB.tradePut(rec); }
             await videoCleanup();
+          } else {
+            // nothing was filmed (the trade lasted only a moment): don't leave a play button that plays nothing
+            const rec = await DB.tradeGet(t.id);
+            if (rec && rec.videoId) { rec.videoId = null; await DB.tradePut(rec); }
+            pendingNoVideo.add(t.id);
           }
         } catch (e) { console.warn('[TV Wallpaper] video save failed', e); }
         if (buildUI.onJournal) buildUI.onJournal();
@@ -1032,7 +1096,22 @@
   async function videoCleanup() {
     const keep = Math.max(1, +S.rec.keep || 25);
     const keys = ((await DB.videoKeys()) || []).map(String).sort();
-    for (const k of keys.slice(0, Math.max(0, keys.length - keep))) await DB.videoDel(k);
+    let old = keys.slice(0, Math.max(0, keys.length - keep));
+    if (S.rec.folderOn && old.length) {
+      // Keep videos that haven't reached your folder yet (up to 3x the limit), so nothing is lost while it waits.
+      let done = new Set();
+      try { done = new Set(JSON.parse(localStorage.getItem('tvwp_folder_written') || '[]')); } catch (e) {}
+      const waiting = old.filter(k => !done.has(k));
+      if (keys.length <= keep * 3) old = old.filter(k => done.has(k));
+      else old = old.filter(k => done.has(k)).concat(waiting.slice(0, keys.length - keep * 3));
+    }
+    if (!old.length) return;
+    const gone = new Set(old);
+    for (const k of old) await DB.videoDel(k);
+    for (const t of (await DB.tradesAll()) || []) {
+      if (t.videoId && gone.has(t.videoId)) { t.videoId = null; await DB.tradePut(t); }
+    }
+    journalDirty = true;
   }
   window.addEventListener('pagehide', () => { if (vid) try { vid.mr.stop(); } catch (e) {} });
 
@@ -1818,6 +1897,10 @@
   }
   function openPositionQty() {
     let q = 0;
+    if (posCache.ok && Date.now() - posCache.at < 6000) {
+      for (const p of posCache.list) q += Math.abs(+p.qty || 0);
+      return q;
+    }
     for (const p of brk.positions || []) q += Math.abs(+p.qty || 0);
     if (!q) for (const t of Object.values(recLoad().open)) q += Math.abs(t.qty || 0);
     return q;
@@ -1825,10 +1908,14 @@
 
   /* ---- today's numbers (from the Journal + open P&L) ---- */
   const day = { pnl: 0, closedPnl: 0, trades: 0, day: -1 };
+  let journalDirty = true, dayTrades = [], dayLoadedAt = 0;
   async function refreshDay() {
     const today = tradingDay(Date.now());
-    let trades = [];
-    try { trades = (await DB.tradesAll()) || []; } catch (e) {}
+    if (journalDirty || Date.now() - dayLoadedAt > 5000) {
+      journalDirty = false; dayLoadedAt = Date.now();
+      try { dayTrades = (await DB.tradesAll()) || []; } catch (e) {}
+    }
+    const trades = dayTrades;
     const td = trades.filter(t => tradingDay(t.closeTime) === today);
     day.day = today;
     day.trades = td.length;
@@ -1898,6 +1985,7 @@
   };
   async function tickSpec(symbol) {
     const root = symRoot(symbol);
+    if (!String(symbol).includes(':') && FUTURES[root]) return { root, tick: FUTURES[root][0], value: FUTURES[root][1], from: 'table' };
     try {
       const b = currentBroker();
       if (b && typeof b.symbolInfo === 'function' && symbol) {
@@ -1989,6 +2077,7 @@
   function hideMoney(txt) { return S.extras.streamer ? txt.replace(/[+−\-]?\$[\d,]+(\.\d+)?/g, '•••••') : txt; }
   async function riskTick() {
     if (pageClosing) return;
+    if ((S.risk.lockOn || S.risk.newsLock || S.prop.on) && Date.now() - posCache.at > 1500) await pollPositions();
     await refreshDay();
     const r = S.risk, out = [];
     const flat = openPositionQty() === 0;
@@ -3438,8 +3527,8 @@
       trades.sort((a, b) => b.closeTime - a.closeTime);
       journalCache = trades;
       const hide = S.extras.streamer;
-      const today = new Date().toDateString();
-      const td = trades.filter(t => new Date(t.closeTime).toDateString() === today);
+      const today = tradingDay(Date.now());
+      const td = trades.filter(t => tradingDay(t.closeTime) === today);
       const wins = td.filter(t => (t.net ?? t.ticks ?? 0) > 0).length;
       const net = td.reduce((a, t) => a + (t.net || 0), 0);
       const open = recLoad().open, openN = Object.keys(open).length;
@@ -3469,7 +3558,7 @@
         play.onclick = () => openVideo(t);
         const del = document.createElement('button');
         del.className = 'play'; del.title = 'Delete trade'; del.textContent = '×';
-        del.onclick = async () => { await DB.tradeDel(t.id); if (t.videoId) await DB.videoDel(t.videoId); renderJournal(); };
+        del.onclick = async () => { await DB.tradeDel(t.id); if (t.videoId) await DB.videoDel(t.videoId); journalDirty = true; renderJournal(); };
         row.append(play, del);
         list.appendChild(row);
       }
@@ -3533,7 +3622,7 @@
     };
     $('#fRestore').onclick = async () => {
       $('#fMsg').textContent = '';
-      try { const n = await restoreFromFolder(); $('#fMsg').textContent = n ? `Restored ${n} trade${n === 1 ? '' : 's'}.` : 'Nothing to restore: every trade in the backup is already here.'; renderJournal(); }
+      try { const n = await restoreFromFolder(); journalDirty = true; $('#fMsg').textContent = n ? `Restored ${n} trade${n === 1 ? '' : 's'}.` : 'Nothing to restore: every trade in the backup is already here.'; renderJournal(); }
       catch (err) { $('#fMsg').textContent = err && err.name === 'NotFoundError' ? 'No journal-backup.json in that folder yet.' : (err.message || String(err)); }
     };
     let clearArmed = null;
@@ -3545,7 +3634,7 @@
       }
       clearTimeout(clearArmed); clearArmed = null;
       $('#rClear').textContent = 'Clear journal';
-      await DB.tradesClear(); await DB.videosClear();
+      await DB.tradesClear(); await DB.videosClear(); journalDirty = true;
       renderJournal();
     };
     buildUI.onJournal = () => { if (panel.classList.contains('open')) renderJournal(); };
