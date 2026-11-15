@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.5.1
+// @version      3.5.2
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,8 +14,38 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.5.1';
+  const VERSION = '3.5.2';
   window.__tvwpLoaded = VERSION;
+
+  // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
+  // swallows typing in our boxes. While you're typing in one of our fields, keep the keys away
+  // from TradingView. Registered first thing, so it runs before TradingView's own key handling.
+  function inOurField(e) {
+    const host = document.getElementById('tvwp-host');
+    if (!host) return false;
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    if (!path.includes(host)) return false;
+    const t = path[0];
+    return !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName || ''));
+  }
+  // If TradingView got to a key first and swallowed it, put the character into our box ourselves.
+  function typeSwallowed(e) {
+    if (e.type !== 'keydown' || !e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.__tvwpTyped) return;
+    const t = e.composedPath()[0];
+    if (!t || t.tagName !== 'INPUT' || t.type !== 'text') return;
+    const a = t.selectionStart ?? t.value.length, z = t.selectionEnd ?? a;
+    if (e.key.length === 1) t.setRangeText(e.key, a, z, 'end');
+    else if (e.key === 'Backspace') { if (a !== z) t.setRangeText('', a, z, 'end'); else if (a > 0) t.setRangeText('', a - 1, a, 'end'); }
+    else if (e.key === 'Delete') { if (a !== z) t.setRangeText('', a, z, 'end'); else t.setRangeText('', a, a + 1, 'end'); }
+    else if (e.key === 'Enter') { if (t.__tvwpDirty) { t.__tvwpDirty = false; t.dispatchEvent(new Event('change', { bubbles: true })); } e.__tvwpTyped = true; return; }
+    else return;
+    e.__tvwpTyped = true;
+    t.__tvwpDirty = true;                       // so leaving the box still saves it
+    t.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  for (const ev of ['keydown', 'keypress', 'keyup']) {
+    window.addEventListener(ev, e => { if (inOurField(e)) { typeSwallowed(e); e.stopImmediatePropagation(); } }, true);
+  }
 
   /* =========================================================
    * Settings (localStorage, synced across tabs)
@@ -29,7 +59,7 @@
     },
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
     risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false,
-      sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0 },
+      sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
@@ -2033,7 +2063,7 @@
     const sameAsChart = !r.sizeSym || symRoot(chartSym) === spec.root || MICRO_OF[symRoot(chartSym)] === spec.root || MINI_OF[symRoot(chartSym)] === spec.root;
     const atr = sameAsChart ? chartAtr() : 0;
     let stopTicks, stopSource;
-    if (r.sizeView !== 'classic' && +r.simplePts > 0 && spec.tick) {
+    if (r.sizeView !== 'classic' && r.simpleManual && +r.simplePts > 0 && spec.tick) {
       stopTicks = Math.max(1, Math.round(+r.simplePts / spec.tick));          // "stop in points" box
       stopSource = 'yours';
     } else if (r.sizeView === 'classic' || r.sizeStopMode === 'manual' || !atr || !spec.tick) {
@@ -2849,7 +2879,7 @@
       </div>
       <div class="card">
         ${item('<span id="zRiskLbl">How much do you want to risk?</span>', '<span id="zRiskSub">Per trade, in dollars.</span>', '<div class="money"><span id="zUnitSym">$</span><input type="number" id="zRisk" min="0" max="1000000" step="any"></div>')}
-        ${item('Stop in points', 'Optional. Leave empty for a typical stop from your chart.', '<div class="money"><input type="number" id="zPts" min="0" max="100000" step="any" placeholder="Auto" style="width:90px;font-size:16px"><span style="font-size:13px">pts</span></div>')}
+        ${item('Stop', '<span id="zStopSub">Auto: a typical stop from your chart. Manual: type your stop in points.</span>', '<div class="row" style="flex:none"><div class="seg" id="zStopSeg"><button data-v="auto">Auto</button><button data-v="manual">Manual</button></div><div class="money" id="zPtsBox"><input type="number" id="zPts" min="0" max="100000" step="any" placeholder="0" style="width:80px;font-size:16px"><span style="font-size:13px">pts</span></div></div>')}
       </div>
       <div class="bigout" id="zOut"></div>
       <div class="sgroup" id="zTable"><h3>With a tighter or wider stop</h3></div>
@@ -2938,7 +2968,24 @@
     host.id = 'tvwp-host';
     document.documentElement.appendChild(host);
     const root = host.attachShadow({ mode: 'open' });
+    for (const ev of ['keydown', 'keypress', 'keyup']) {
+      host.addEventListener(ev, e => { if (inOurField(e)) e.stopPropagation(); });
+    }
+    // Last resort: if TradingView already swallowed a key before we could stop it (it can get there
+    // first in the desktop app), type the character into our box ourselves.
+    host.addEventListener('keydown', e => { if (inOurField(e)) typeSwallowed(e); }, true);
+    root.addEventListener('focusout', e => {
+      const t = e.target;
+      if (t && t.__tvwpDirty) { t.__tvwpDirty = false; t.dispatchEvent(new Event('change', { bubbles: true })); }
+    }, true);
     root.innerHTML = `<style>${CSS}</style>${HTML}`;
+    const textify = el => { el.type = 'text'; el.inputMode = 'decimal'; el.autocomplete = 'off'; el.spellcheck = false; };
+    root.querySelectorAll('input[type=number]').forEach(textify);
+    new MutationObserver(ms => { for (const m of ms) for (const n of m.addedNodes) {
+      if (n.nodeType !== 1) continue;
+      if (n.matches && n.matches('input[type=number]')) textify(n);
+      if (n.querySelectorAll) n.querySelectorAll('input[type=number]').forEach(textify);
+    } }).observe(root, { childList: true, subtree: true });
     const $ = sel => root.querySelector(sel);
     const fab = $('.fab'), panel = $('.panel');
 
@@ -3473,9 +3520,13 @@
     bindSel('#zSym', 'risk', 'sizeSym'); bindSel('#zMode', 'risk', 'sizeMode'); bindSel('#zUnit', 'risk', 'sizeUnit');
     bindSel('#zStopMode', 'risk', 'sizeStopMode'); bindSel('#zAtr', 'risk', 'sizeAtr', true);
     root.querySelectorAll('#zView button').forEach(bt => bt.onclick = () => { S.risk.sizeView = bt.dataset.v; save('risk'); renderRiskInputs(); renderSize(); });
+    root.querySelectorAll('#zStopSeg button').forEach(bt => bt.onclick = () => {
+      S.risk.simpleManual = bt.dataset.v === 'manual'; save('risk'); renderRiskInputs(); renderSize();
+      if (S.risk.simpleManual) { const i = $('#zPts'); i.focus(); i.select(); }
+    });
     $('#zPts').oninput = e => {
       const raw = e.target.value.trim(), v = raw === '' ? 0 : parseFloat(raw);
-      if (isFinite(v) && v >= 0) { S.risk.simplePts = v; save('risk'); renderSize(); }
+      if (isFinite(v) && v >= 0) { S.risk.simplePts = v; S.risk.simpleManual = true; save('risk'); renderSize(); }
     };
     for (const id of ['#zSym', '#zMode', '#zUnit', '#zStopMode', '#zAtr']) $(id).addEventListener('change', () => renderSize());
     $('#zRisk').oninput = e => {
@@ -3517,6 +3568,9 @@
       const classic = r.sizeView === 'classic';
       root.querySelectorAll('#zView button').forEach(bt => bt.classList.toggle('on', bt.dataset.v === (classic ? 'classic' : 'simple')));
       if ($('#zPts') !== root.activeElement) $('#zPts').value = +r.simplePts > 0 ? r.simplePts : '';
+      root.querySelectorAll('#zStopSeg button').forEach(bt => bt.classList.toggle('on', bt.dataset.v === (r.simpleManual ? 'manual' : 'auto')));
+      $('#zPtsBox').style.display = r.simpleManual ? '' : 'none';
+      $('#zStopSub').textContent = r.simpleManual ? 'Type your stop in points.' : 'A typical stop from your chart (switch to Manual to type your own).';
       $('#zPts').closest('.item').style.display = classic ? 'none' : '';
       // Classic: the old layout (symbol, risk, your stop) always open; no automatic stop or table
       const adv = $('#zAdv');
@@ -3572,6 +3626,7 @@
       if (!c.spec.value) { out.innerHTML = `<span class="hint">${c.sym ? `Couldn't find contract values for ${String(c.sym).split(':').pop()}. Pick a symbol under Options.` : 'Open a chart, or pick a symbol under Options.'}</span>`; return; }
       if (c.needsEquity) { out.innerHTML = '<span class="hint">"% of account" needs your account connected in TradingView. Or switch to Dollars under Options.</span>'; return; }
       if (!c.riskUsd) { out.innerHTML = '<span class="hint">Type how much you want to risk above.</span>'; return; }
+      if (S.risk.sizeView !== 'classic' && S.risk.simpleManual && !(+S.risk.simplePts > 0)) { out.innerHTML = '<span class="hint">Type your stop in points above, or switch the stop back to Auto.</span>'; return; }
       if (!c.stopTicks) { out.innerHTML = '<span class="hint">Set your stop under Options, or switch the stop back to Automatic.</span>'; return; }
       const hide = S.extras.streamer;
       const usd = v => hide ? '•••••' : '$' + v.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
