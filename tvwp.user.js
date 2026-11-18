@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.7.1
+// @version      3.8.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.7.1';
+  const VERSION = '3.8.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -1100,18 +1100,44 @@
       }).catch(() => {});
     } else startRecording(t, () => {});
   }
+  // Video size. "native" = the chart's real screen pixels (sharpest your screen can give, no upscaling).
+  const even = n => Math.max(2, Math.round(n / 2) * 2);
+  function chartPixels() {
+    const cont = document.querySelector('.chart-container.active') || document.querySelector('.chart-container');
+    if (!cont) return null;
+    const r = cont.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+    return r.width > 50 && r.height > 50 ? { w: Math.round(r.width * d), h: Math.round(r.height * d) } : null;
+  }
+  function recSize() {
+    const q = String(S.rec.quality || '720');
+    if (q === 'native') {
+      const c = chartPixels() || { w: 1920, h: 1080 };
+      const k = Math.min(1, 3840 / c.w, 2160 / c.h);              // at most 4K
+      return { W: even(c.w * k), H: even(c.h * k) };
+    }
+    const H = { 540: 540, 720: 720, 1080: 1080, 1440: 1440, 2160: 2160 }[q] || 720;
+    return { W: even(H * 16 / 9), H };
+  }
+  function recBitrate(W, H) {
+    if (String(S.rec.quality) === '540') return 3.5e5;             // small enough for Notion's free plan
+    return Math.max(2e6, Math.min(25e6, Math.round(W * H * 30 * 0.08)));   // ~5 Mbps at 1080p, ~9 at 1440p, ~20 at 4K
+  }
   function startRecording(t, done) {
     const o = recLoad().open[t.symbol];
     if (!o || o.id !== t.id || o.video) { done(); return; }   // trade already closed, or already being filmed
     try {
-      const H = S.rec.quality === '1080' ? 1080 : S.rec.quality === '540' ? 540 : 720, W = Math.round(H * 16 / 9);
+      const { W, H } = recSize();
       const cv = document.createElement('canvas');
       cv.width = W; cv.height = H;
       const g = cv.getContext('2d');
+      g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
       drawChartFrame(g, cv, t);
       const stream = cv.captureStream(30);
-      const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
-      const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: H === 1080 ? 3e6 : H === 540 ? 3.5e5 : 1.5e6 });
+      // 1440p and up: H.264 (.mp4), which graphics cards encode in hardware, so recording doesn't load your CPU. Below that: VP9 (.webm).
+      const hw = ['video/mp4;codecs=avc1.640033', 'video/mp4;codecs=avc1', 'video/mp4'];
+      const sw = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+      const mime = (H >= 1440 ? hw.concat(sw) : sw).find(m => { try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; } }) || '';
+      const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: recBitrate(W, H) });
       const chunks = [];
       mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
       const stopTick = videoTicker(30, () => drawChartFrame(g, cv, t));
@@ -1125,7 +1151,7 @@
           if (blob.size) {
             await DB.videoPut({ id: 'v_' + t.id, tradeId: t.id, blob, size: blob.size, mime: blob.type, started: v.started, ended: Date.now() });
             const rec = await DB.tradeGet(t.id);
-            if (rec && !rec.videoId) { rec.videoId = 'v_' + t.id; await DB.tradePut(rec); }
+            if (rec && (!rec.videoId || rec.videoExt !== videoExt(blob.type))) { rec.videoId = rec.videoId || 'v_' + t.id; rec.videoExt = videoExt(blob.type); await DB.tradePut(rec); }
             await videoCleanup();
           } else {
             // nothing was filmed (the trade lasted only a moment): don't leave a play button that plays nothing
@@ -1191,12 +1217,14 @@
     return '﻿' + [head.join(','), ...rows].join('\r\n');
   }
   function pad2(n) { return String(n).padStart(2, '0'); }
-  function videoFileName(t, id) {
-    if (!t) return `${id}.webm`;
+  const videoExt = mime => /mp4/i.test(String(mime || '')) ? 'mp4' : 'webm';
+  function videoFileName(t, id, ext) {
+    ext = ext || (t && t.videoExt) || 'webm';
+    if (!t) return `${id}.${ext}`;
     const d = new Date(t.openTime);
     const stamp = `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}-${pad2(d.getMinutes())}-${pad2(d.getSeconds())}`;
     const res = (t.net ?? t.ticks ?? 0) > 0 ? 'WIN' : (t.net ?? t.ticks ?? 0) < 0 ? 'LOSS' : 'FLAT';
-    return `${stamp} ${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSymbol(t.symbol)} ${res}.webm`.replace(/[\\/:*?"<>|]/g, '-');
+    return `${stamp} ${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSymbol(t.symbol)} ${res}.${ext}`.replace(/[\\/:*?"<>|]/g, '-');
   }
   const FOLDER_DONE = 'tvwp_folder_written';
   const folder = { status: 'off', last: 0, count: 0, error: '' };
@@ -1248,7 +1276,7 @@
           for (const k of keys) {
             const v = await DB.videoGet(k);
             if (!v || !v.blob) continue;
-            await writeFile(vdir, videoFileName(byVideo.get(k), k), v.blob);
+            await writeFile(vdir, videoFileName(byVideo.get(k), k, videoExt(v.mime || v.blob.type)), v.blob);
             doneSet.add(k);
             try { localStorage.setItem(FOLDER_DONE, JSON.stringify([...doneSet].slice(-2000))); } catch (e) {}
           }
@@ -3001,7 +3029,8 @@
       <div class="card">
         ${item('Record my trades', 'Logs every trade from your broker: entry, exit, size, P&amp;L, time held.', '<input type="checkbox" id="rOn">')}
         ${item('Record chart video', 'Records the chart from entry until a few seconds after exit. No permission pop-ups.', '<input type="checkbox" id="rVideo">')}
-        ${item('Video quality', '', '<select id="rQuality"><option value="540">Small (fits Notion free: ~2 min)</option><option value="720">720p</option><option value="1080">1080p</option></select>')}
+        ${item('Video quality', '', '<select id="rQuality"><option value="540">Small (fits Notion free: ~2 min)</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">4K</option><option value="native">Native (your chart\'s real pixels)</option></select>')}
+        <div class="hint" id="rQualHint"></div>
         ${item('Keep videos', 'Older videos are deleted automatically. Trades are always kept.', '<select id="rKeep"><option value="10">Last 10</option><option value="25">Last 25</option><option value="50">Last 50</option><option value="100">Last 100</option></select>')}
       </div>
       <div class="status" id="rStats"></div>
@@ -3884,6 +3913,7 @@
       $('#rOn').checked = !!S.rec.on;
       $('#rVideo').checked = !!S.rec.video;
       $('#rQuality').value = S.rec.quality || '720';
+      renderQualHint();
       $('#rKeep').value = String(S.rec.keep || 25);
       let trades = [];
       try { trades = (await DB.tradesAll()) || []; } catch (e) {}
@@ -3937,7 +3967,7 @@
       $('#rVideoEl').src = playerUrl;
       $('#rPTitle').textContent = `${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSym(t.symbol)} · ${new Date(t.openTime).toLocaleString()}`;
       $('#rPDown').href = playerUrl;
-      $('#rPDown').download = `trade-${shortSym(t.symbol)}-${new Date(t.openTime).toISOString().replace(/[:.]/g, '-')}.webm`;
+      $('#rPDown').download = `trade-${shortSym(t.symbol)}-${new Date(t.openTime).toISOString().replace(/[:.]/g, '-')}.${videoExt(v.mime || v.blob.type)}`;
       $('#rPlayer').hidden = false;
     }
     $('#rPClose').onclick = () => { $('#rPlayer').hidden = true; $('#rVideoEl').pause(); };
@@ -3946,7 +3976,25 @@
       S.rec.on = e.target.checked; if (S.rec.on) recStartFresh(); save('journal'); renderJournal();
     };
     $('#rVideo').onchange = e => { S.rec.video = e.target.checked; save('journal'); renderJournal(); };
-    $('#rQuality').onchange = e => { S.rec.quality = e.target.value; save('journal'); };
+    $('#rQuality').onchange = e => { S.rec.quality = e.target.value; save('journal'); renderQualHint(); };
+    function renderQualHint() {
+      const c = chartPixels(), { W, H } = recSize(), mb = recBitrate(W, H) * 60 / 8 / 1e6;
+      const up = c && String(S.rec.quality) !== 'native' && H > c.h * 1.05;
+      $('#rQualHint').textContent = `${W}×${H}, up to about ${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB per minute.` +
+        (c ? ` Your chart is ${c.w}×${c.h} pixels right now${up ? ', so this is upscaled: bigger files, not sharper. Native gives the sharpest video your screen can.' : '.'}` : '') +
+        '';
+      // ask the browser whether this size can be encoded on the graphics card
+      const mc = navigator.mediaCapabilities, tok = (renderQualHint.tok = (renderQualHint.tok || 0) + 1);
+      if (H < 1440 || !mc || typeof mc.encodingInfo !== 'function') return;
+      const ct = ['video/mp4;codecs=avc1.640033', 'video/mp4'].find(m => { try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; } });
+      if (!ct) { $('#rQualHint').textContent += ' This browser can\'t record MP4, so this size runs on your CPU and may stutter.'; return; }
+      mc.encodingInfo({ type: 'record', video: { contentType: ct, width: W, height: H, bitrate: recBitrate(W, H), framerate: 30 } }).then(info => {
+        if (tok !== renderQualHint.tok) return;
+        $('#rQualHint').textContent += info && info.supported && info.powerEfficient ? ' Recorded on your graphics card (MP4), so it barely uses your CPU.'
+          : info && info.supported ? ' Your graphics card can\'t take this size, so it runs on your CPU and may stutter. Try 1080p or Native.'
+          : ' This size isn\'t supported here. Try 1080p or Native.';
+      }).catch(() => {});
+    }
     $('#rKeep').onchange = e => { S.rec.keep = +e.target.value; save('journal'); videoCleanup().then(renderJournal); };
     $('#rCsv').onclick = () => {
       const url = URL.createObjectURL(new Blob([tradesToCsv(journalCache)], { type: 'text/csv' }));

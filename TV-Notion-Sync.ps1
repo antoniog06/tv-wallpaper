@@ -243,7 +243,8 @@ foreach ($t in @($backup.trades | Sort-Object closeTime)) {
         $size = (Get-Item $vpath).Length
         $vname = Split-Path $vpath -Leaf
         if ($size -le $maxBytes) {
-          $fid = Send-File $vpath $vname 'video/webm'
+          $vtype = if ($vname -like '*.mp4') { 'video/mp4' } else { 'video/webm' }
+          $fid = Send-File $vpath $vname $vtype
           # plays right in the page...
           Invoke-Notion 'PATCH' "/v1/blocks/$pageId/children" @{ children = @(@{ object = 'block'; type = 'video'; video = @{ type = 'file_upload'; file_upload = @{ id = $fid } } }) } | Out-Null
           # ...and shows in the Screenshots column, when your database has it
