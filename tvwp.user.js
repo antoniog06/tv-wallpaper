@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         TV Wallpaper
+// @name         Wick
 // @namespace    tvwp
-// @version      3.8.0
-// @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
+// @version      3.9.0
+// @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
 // @grant        none
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.8.0';
+  const VERSION = '3.9.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -624,7 +624,7 @@
         src.onended = () => { if (playing === src) playing = null; };
       }
     } catch (e) {
-      console.warn('[TV Wallpaper] sound failed', e);
+      console.warn('[Wick] sound failed', e);
     }
   }
 
@@ -930,7 +930,7 @@
       videoSync();
       if (res.recs.length && buildUI.onJournal) buildUI.onJournal();
       if (res.recs.length) folderSync();
-    }).catch(e => console.warn('[TV Wallpaper] journal error', e));
+    }).catch(e => console.warn('[Wick] journal error', e));
   }
   function recOnExec(ex) {
     if (pageClosing) return;
@@ -972,7 +972,7 @@
         reconcileMiss[sym] = (reconcileMiss[sym] || 0) + 1;
         if (reconcileMiss[sym] >= 2) {                                    // seen twice in a row: really gone
           delete st.open[sym]; delete reconcileMiss[sym]; changed = true;
-          console.warn('[TV Wallpaper] journal: dropped a trade whose exit was never reported', sym);
+          console.warn('[Wick] journal: dropped a trade whose exit was never reported', sym);
         }
       }
       for (const pos of pc.list) {
@@ -1014,7 +1014,7 @@
       }
       if (all.length) await recProcess(all, false);
     } catch (e) {
-      console.warn('[TV Wallpaper] journal catch-up failed', e);
+      console.warn('[Wick] journal catch-up failed', e);
     } finally { backfilling = false; }
   }
 
@@ -1159,7 +1159,7 @@
             if (rec && rec.videoId) { rec.videoId = null; await DB.tradePut(rec); }
             pendingNoVideo.add(t.id);
           }
-        } catch (e) { console.warn('[TV Wallpaper] video save failed', e); }
+        } catch (e) { console.warn('[Wick] video save failed', e); }
         if (buildUI.onJournal) buildUI.onJournal();
         folderSync();
         done();
@@ -1170,7 +1170,7 @@
       withLock('tvwp-rec', () => { const st = recLoad(); if (st.open[t.symbol] && st.open[t.symbol].id === t.id) { st.open[t.symbol].video = true; recSave(st); } });
       if (buildUI.onJournal) buildUI.onJournal();
     } catch (e) {
-      console.warn('[TV Wallpaper] video recording unavailable', e);
+      console.warn('[Wick] video recording unavailable', e);
       vid = null; done();
     }
   }
@@ -1284,12 +1284,12 @@
         folder.count = doneSet.size;
         // full backup; each trade lists its video file so other tools (like the Notion sync) can find it
         const withFiles = trades.map(t => ({ ...t, videoFile: t.videoId && doneSet.has(t.videoId) ? 'Videos/' + videoFileName(t, t.videoId) : null }));
-        await writeFile(handle, 'journal-backup.json', new Blob([JSON.stringify({ app: 'TV Wallpaper', version: VERSION, saved: new Date().toISOString(), trades: withFiles }, null, 1)], { type: 'application/json' }));
+        await writeFile(handle, 'journal-backup.json', new Blob([JSON.stringify({ app: 'Wick', version: VERSION, saved: new Date().toISOString(), trades: withFiles }, null, 1)], { type: 'application/json' }));
       });
       folder.status = 'ok'; folder.last = Date.now(); folder.error = '';
     } catch (e) {
       folder.status = 'error'; folder.error = (e && e.message) || String(e);
-      console.warn('[TV Wallpaper] saving to folder failed', e);
+      console.warn('[Wick] saving to folder failed', e);
     } finally {
       folderBusy = false;
       if (buildUI.onFolder) buildUI.onFolder();
@@ -1715,7 +1715,7 @@
     try { indFrameInner(); indErrors = 0; }
     catch (e) {
       // never let a bad frame spam errors or freeze the chart; back off and retry
-      if (++indErrors === 1) console.warn('[TV Wallpaper] indicators paused:', e && e.message);
+      if (++indErrors === 1) console.warn('[Wick] indicators paused:', e && e.message);
       if (indErrors > 3) { indLoop = false; removeIndCanvas(); setTimeout(() => { indErrors = 0; startInd(); }, 5000); }
     }
   }
@@ -1769,7 +1769,7 @@
       if (IND_DRAW[ind.type]) {
         normInd(ind);
         g.save();
-        try { IND_DRAW[ind.type](g, ind, d, { ts, ps, fv, W, H }); } catch (e) { console.warn('[TV Wallpaper] indicator failed', e); }
+        try { IND_DRAW[ind.type](g, ind, d, { ts, ps, fv, W, H }); } catch (e) { console.warn('[Wick] indicator failed', e); }
         g.restore();
         g.font = '11px -apple-system, system-ui, sans-serif';
         g.fillStyle = ind.type === 'qt' ? ind.color2 : ind.color;
@@ -2153,9 +2153,9 @@
   }
   function guardMsg() {
     const L = lockedNow();
-    if (!L && !pendingLock && !newsBlock && lastTradeUsed()) return `TV Wallpaper: that would go past your max of ${S.risk.maxTrades} trades for today. You can still manage or close the trade you're in.`;
-    if (L || pendingLock) return `TV Wallpaper: trading is locked for today${L ? ` (${L.lockReason})` : ''}. You can still close or reduce your position. New orders unlock at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`;
-    return `TV Wallpaper: new entries are paused around ${newsBlock}.`;
+    if (!L && !pendingLock && !newsBlock && lastTradeUsed()) return `Wick: that would go past your max of ${S.risk.maxTrades} trades for today. You can still manage or close the trade you're in.`;
+    if (L || pendingLock) return `Wick: trading is locked for today${L ? ` (${L.lockReason})` : ''}. You can still close or reduce your position. New orders unlock at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`;
+    return `Wick: new entries are paused around ${newsBlock}.`;
   }
   function guardBroker(b) {
     if (!b || typeof b !== 'object' || b.__tvwpGuard) return;
@@ -2170,7 +2170,7 @@
           return riskTick().catch(() => {}).then(() => {
             if (!orderAllowed(m, args[0])) {
               flashBanner();
-              console.warn('[TV Wallpaper] order turned down by the lockout');
+              console.warn('[Wick] order turned down by the lockout');
               throw new Error(guardMsg());
             }
             return orig.apply(this, args);
@@ -2305,7 +2305,7 @@
         forecast: e.forecast, previous: e.previous, actual: e.actual, currency: e.currency })).filter(e => isFinite(e.time)).sort((a, b) => a.time - b.time);
       newsFetchedAt = Date.now();
     } catch (e) {
-      if (!newsFetchedAt) console.warn('[TV Wallpaper] news calendar unavailable, will retry in 5 minutes');
+      if (!newsFetchedAt) console.warn('[Wick] news calendar unavailable, will retry in 5 minutes');
     } finally { newsBusy = false; }
   }
   function newsList() {
@@ -2483,7 +2483,7 @@
       if (token !== loadToken) { dispose(src); return; }
       setSource(src, id);
     } catch (e) {
-      console.warn('[TV Wallpaper] could not load wallpaper', e);
+      console.warn('[Wick] could not load wallpaper', e);
       setSource(null, null);
     }
   }
@@ -2932,11 +2932,11 @@
   const NAV = (tab, label) => `<button data-tab="${tab}">${ICON[tab]}<span>${label}</span><span class="badge" data-badge="${tab}" hidden></span></button>`;
 
   const HTML = `
-  <button class="fab" title="TV Wallpaper (Alt+Shift+W)">${ICON.logo}</button>
+  <button class="fab" title="Wick (Alt+Shift+W)">${ICON.logo}</button>
   <div class="banners" id="banners"></div>
   <div class="panel">
     <aside>
-      <div class="brand"><span class="logo">${ICON.logo}</span><span style="flex:1">TV Wallpaper</span>
+      <div class="brand"><span class="logo">${ICON.logo}</span><span style="flex:1">Wick</span>
         <button class="power" id="power" title="Turn everything off (Alt+Shift+X)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1011.4 0"/></svg></button></div>
       <div class="conn"><span class="dot" id="connDot"></span><div><b>TradingView</b><small id="connText">Checking…</small></div></div>
       <nav class="tabs">

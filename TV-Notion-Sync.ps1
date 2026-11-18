@@ -1,4 +1,4 @@
-# TV Wallpaper -> Notion sync (Windows)
+# Wick -> Notion sync (Windows)
 # Sends each trade the Journal records (from your recordings folder) to your Notion Trades database,
 # with its chart video attached when it fits your Notion plan's file size limit.
 #
@@ -17,7 +17,8 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 $configPath = Join-Path $dir 'notion-sync.json'
 $statePath = Join-Path $dir 'notion-sync-state.json'
 $logPath = Join-Path $dir 'notion-sync.log'
-$taskName = 'TV Wallpaper Notion Sync'
+$taskName = 'Wick Notion Sync'
+$oldTaskName = 'TV Wallpaper Notion Sync'
 $api = if ($env:TVWP_NOTION_API) { $env:TVWP_NOTION_API.TrimEnd('/') } else { 'https://api.notion.com' }
 $notionVersion = '2022-06-28'
 
@@ -172,12 +173,13 @@ function Register-Task {
 }
 if ($Uninstall) {
   schtasks /Delete /F /TN $taskName 2>$null | Out-Null
+  schtasks /Delete /F /TN $oldTaskName 2>$null | Out-Null
   Remove-Item -Force -ErrorAction SilentlyContinue $configPath
   Write-Host 'Notion sync removed. Your recordings and your Notion pages are untouched.'
   exit 0
 }
 if ($Setup) {
-  Write-Host "`nTV Wallpaper -> Notion setup`n"
+  Write-Host "`nWick -> Notion setup`n"
   Write-Host '1. Make a Notion integration: open https://www.notion.so/profile/integrations , click New integration,'
   Write-Host '   pick your workspace, save, then copy its "Internal Integration Secret".'
   Write-Host '2. In Notion, open your Trades database, click ... (top right) > Connections, and add that integration.'

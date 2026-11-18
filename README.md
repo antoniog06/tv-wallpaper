@@ -1,4 +1,6 @@
-# TV Wallpaper
+# Wick
+
+*Formerly TV Wallpaper. Same install: existing setups update to the new name on their own.*
 
 Wallpapers (including animated GIFs), custom candle colors, custom order-fill sounds, extra indicators and ad hiding for TradingView charts, in the browser and in the TradingView desktop app. It only changes what your screen shows: nothing is sent anywhere and your TradingView settings are never changed.
 
@@ -18,7 +20,7 @@ Paste this into a normal PowerShell window (no admin needed):
 $d="$env:LOCALAPPDATA\TVWallpaper"; New-Item -ItemType Directory -Force $d | Out-Null; Invoke-WebRequest https://raw.githubusercontent.com/antoniog06/tv-wallpaper/main/TV-Wallpaper.ps1 -UseBasicParsing -OutFile "$d\TV-Wallpaper.ps1"; powershell -NoProfile -ExecutionPolicy Bypass -File "$d\TV-Wallpaper.ps1" -InstallShortcut
 ```
 
-This puts a **TradingView (Wallpaper)** shortcut on your desktop. Open TradingView with that shortcut from now on. It downloads the latest script each time and runs quietly in the background until you close TradingView.
+This puts a **Wick** shortcut on your desktop. Open TradingView with that shortcut from now on. It downloads the latest script each time and runs quietly in the background until you close TradingView.
 
 The desktop app keeps its own wallpapers and settings, separate from the browser's.
 
@@ -80,7 +82,7 @@ To keep real files, turn on **Journal → Save to a folder** and pick a folder o
 
 `TV-Notion-Sync.ps1` copies each finished trade into your Notion trade journal database, with its chart video when it fits your Notion plan. It runs on your PC (Notion doesn't let web pages call it directly) and reads the folder from **Journal → Save to a folder**, so it covers both Chrome and the desktop app.
 
-1. In TV Wallpaper: **Journal → Save to a folder** on. On Notion's free plan, set **Video quality → Small** so videos of trades up to about 2 minutes fit under the 5 MB upload limit.
+1. In Wick: **Journal → Save to a folder** on. On Notion's free plan, set **Video quality → Small** so videos of trades up to about 2 minutes fit under the 5 MB upload limit.
 2. Go to notion.so/profile/integrations, create an **internal integration**, and copy its secret.
 3. Open your Trades database in Notion, then **••• → Connections →** add your integration.
 4. Download `TV-Notion-Sync.ps1`, right-click it → **Run with PowerShell** (or run `powershell -ExecutionPolicy Bypass -File TV-Notion-Sync.ps1 -Setup`), and paste the secret and your database link when asked.

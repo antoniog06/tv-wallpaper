@@ -1,8 +1,8 @@
-# TV Wallpaper launcher for the TradingView desktop app (Windows)
-# - Downloads the latest TV Wallpaper script (falls back to the last copy if offline)
+# Wick launcher for the TradingView desktop app (Windows)
+# - Downloads the latest Wick script (falls back to the last copy if offline)
 # - Starts TradingView with a local debug connection
 # - Loads the script into every chart window, and again after reloads
-# Run once with -InstallShortcut to put a "TradingView (Wallpaper)" shortcut on your desktop.
+# Run once with -InstallShortcut to put a "Wick" shortcut on your desktop.
 
 param(
   [switch]$InstallShortcut,
@@ -20,7 +20,7 @@ $installed = Join-Path $dir 'TV-Wallpaper.ps1'
 $log = Join-Path $dir 'launcher.log'
 function Log($m) { "$(Get-Date -Format s)  $m" | Add-Content -Path $log }
 Add-Type -AssemblyName PresentationFramework
-function Say($m, $buttons = 'OK') { [System.Windows.MessageBox]::Show($m, 'TV Wallpaper', $buttons) }
+function Say($m, $buttons = 'OK') { [System.Windows.MessageBox]::Show($m, 'Wick', $buttons) }
 
 # ---------- find TradingView ----------
 function Find-TradingView {
@@ -46,21 +46,29 @@ function Update-Icon {
     Move-Item -Force "$icon.tmp" $icon
   } catch { Log "Icon download failed: $($_.Exception.Message)" }
 }
-# Points every 'TradingView (Wallpaper)' shortcut (desktop, taskbar pin, Start menu) at our icon.
+# Keeps every Wick shortcut (desktop, taskbar pin, Start menu) on our icon and name.
+# Shortcuts from before the rename ('TradingView (Wallpaper)') become 'Wick'. Taskbar pins keep their file so the pin isn't lost.
 function Set-ShortcutIcons {
   if (-not (Test-Path $icon)) { return }
+  $taskbar = Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'
   $places = @(
     [Environment]::GetFolderPath('Desktop'),
-    (Join-Path $env:APPDATA 'Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar'),
+    $taskbar,
     (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs')
   )
   $ws = New-Object -ComObject WScript.Shell
   $changed = $false
   foreach ($pl in $places) {
-    $f = Join-Path $pl 'TradingView (Wallpaper).lnk'
-    if (-not (Test-Path $f)) { continue }
-    $lnk = $ws.CreateShortcut($f)
-    if ($lnk.IconLocation -ne "$icon,0") { $lnk.IconLocation = "$icon,0"; $lnk.Save(); $changed = $true; Log "Icon set: $f" }
+    $old = Join-Path $pl 'TradingView (Wallpaper).lnk'
+    $new = Join-Path $pl 'Wick.lnk'
+    if ($pl -ne $taskbar -and (Test-Path $old) -and -not (Test-Path $new)) {
+      try { Rename-Item -LiteralPath $old -NewName 'Wick.lnk'; $changed = $true; Log "Renamed: $old" } catch { Log "Rename failed: $($_.Exception.Message)" }
+    }
+    foreach ($f in @($new, $old)) {
+      if (-not (Test-Path $f)) { continue }
+      $lnk = $ws.CreateShortcut($f)
+      if ($lnk.IconLocation -ne "$icon,0" -or $lnk.Description -ne 'Wick') { $lnk.IconLocation = "$icon,0"; $lnk.Description = 'Wick'; $lnk.Save(); $changed = $true; Log "Shortcut updated: $f" }
+    }
   }
   if ($changed) { try { & "$env:SystemRoot\System32\ie4uinit.exe" -show 2>$null } catch {} }   # ask Windows to refresh icons
 }
@@ -71,14 +79,14 @@ if ($InstallShortcut) {
   if ($self -ne $installed) { Copy-Item -Force $self $installed }
   Update-Icon
   $ws = New-Object -ComObject WScript.Shell
-  $lnk = $ws.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'TradingView (Wallpaper).lnk'))
+  $lnk = $ws.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Wick.lnk'))
   $lnk.TargetPath = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
   $lnk.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$installed`""
   $lnk.IconLocation = if (Test-Path $icon) { "$icon,0" } else { "$exe,0" }
   $lnk.WorkingDirectory = $dir
   $lnk.Save()
   Set-ShortcutIcons
-  Say "Done. Use the 'TradingView (Wallpaper)' shortcut on your desktop to open TradingView from now on."
+  Say "Done. Use the 'Wick' shortcut on your desktop to open TradingView from now on."
   exit 0
 }
 
@@ -98,7 +106,7 @@ try {
 } catch {
   Log "Download failed, using cached copy: $($_.Exception.Message)"
 }
-if (-not (Test-Path $cache)) { Say "Couldn't download the TV Wallpaper script and there's no saved copy yet. Check your internet and try again."; exit 1 }
+if (-not (Test-Path $cache)) { Say "Couldn't download the Wick script and there's no saved copy yet. Check your internet and try again."; exit 1 }
 $userScript = [IO.File]::ReadAllText($cache)
 $injectExpr = "(function(){ if (window.__tvwpLoaded) return 'already'; `n" + $userScript + "`n; return 'injected'; })()"
 
@@ -108,7 +116,7 @@ function Test-Port {
 }
 if (-not (Test-Port)) {
   if (Get-Process -Name 'TradingView' -ErrorAction SilentlyContinue) {
-    $a = Say "TradingView is already open without wallpaper support.`n`nClose it and reopen with TV Wallpaper?" 'YesNo'
+    $a = Say "TradingView is already open without Wick.`n`nClose it and reopen with Wick?" 'YesNo'
     if ($a -ne 'Yes') { exit 0 }
     Get-Process -Name 'TradingView' -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 2
