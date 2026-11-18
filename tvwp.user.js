@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.7.0
+// @version      3.7.1
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.7.0';
+  const VERSION = '3.7.1';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2095,8 +2095,24 @@
      the + on the price scale, hotkeys, chart trading). Orders that shrink or close a position always go through, and so does
      closing a position, so you're never stuck in a trade. This only says no; it never places, changes or cancels anything. ---- */
   function entryBlocked() { return !!lockedNow() || !!pendingLock || (!!newsBlock && !S.extras.allOff); }
+  // On your last allowed trade: you can manage that trade, but nothing new, and the moment it closes nothing gets through
+  // (even before the lock banner appears).
+  function lastTradeUsed() {
+    const r = S.risk;
+    if (!r.lockOn || !(+r.maxTrades > 0) || unlockedToday()) return false;
+    let open = 0;
+    try { open = Object.keys(recLoad().open || {}).length; } catch (e) {}
+    return day.day === tradingDay(Date.now()) && day.trades + open >= +r.maxTrades;
+  }
   function orderAllowed(method, o) {
-    if (!entryBlocked()) return true;
+    if (!entryBlocked()) {
+      if (!lastTradeUsed()) return true;
+      if (method === 'reversePosition' || openPositionQty() === 0) return false;
+      o = o || {};
+      const fresh = posCache.ok && Date.now() - posCache.at < 6000;
+      const list = fresh ? posCache.list : (brk.positions || []);
+      return !!list.find(x => x && (x.symbol === o.symbol || symRoot(x.symbol) === symRoot(o.symbol))) || !fresh;
+    }
     if (method === 'reversePosition') return false;                       // flips into a new trade; closing still works
     if (openPositionQty() === 0) return false;                            // flat: everything would be a new entry
     o = o || {};
@@ -2109,6 +2125,7 @@
   }
   function guardMsg() {
     const L = lockedNow();
+    if (!L && !pendingLock && !newsBlock && lastTradeUsed()) return `TV Wallpaper: that would go past your max of ${S.risk.maxTrades} trades for today. You can still manage or close the trade you're in.`;
     if (L || pendingLock) return `TV Wallpaper: trading is locked for today${L ? ` (${L.lockReason})` : ''}. You can still close or reduce your position. New orders unlock at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`;
     return `TV Wallpaper: new entries are paused around ${newsBlock}.`;
   }
@@ -2119,12 +2136,17 @@
         const orig = b[m];
         if (typeof orig !== 'function') continue;
         b[m] = function (...args) {
-          if (!orderAllowed(m, args[0])) {
-            flashBanner();
-            console.warn('[TV Wallpaper] order turned down by the lockout');
-            return Promise.reject(new Error(guardMsg()));
-          }
-          return orig.apply(this, args);
+          if (!S.risk.lockOn && !entryBlocked()) return orig.apply(this, args);
+          // limits are on: re-check them right now (positions from the broker, today's trades from the journal), then decide
+          journalDirty = true; posCache.at = 0;
+          return riskTick().catch(() => {}).then(() => {
+            if (!orderAllowed(m, args[0])) {
+              flashBanner();
+              console.warn('[TV Wallpaper] order turned down by the lockout');
+              throw new Error(guardMsg());
+            }
+            return orig.apply(this, args);
+          });
         };
       }
       Object.defineProperty(b, '__tvwpGuard', { value: true });
@@ -3002,7 +3024,7 @@
       <div class="card">
         ${item('Daily lockout', 'When a limit is hit, TradingView turns down every new order (buttons, order panel, price ladder, right-click menus, hotkeys) until the next session at 6 PM ET.', '<input type="checkbox" id="kOn">')}
         ${item('Max daily loss ($)', 'Counts closed trades today plus your open P&L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
-        ${item('Max trades per day', '0 = no limit. Counts closed trades.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
+        ${item('Max trades per day', 'Once your last trade closes (win or loss), you\'re locked until 6 PM ET. During that last trade you can manage it, but not open another market. 0 = no limit.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
         ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}
         ${item('Warn me at (% of the loss limit)', 'A yellow warning shows on the chart first.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}
       </div>
