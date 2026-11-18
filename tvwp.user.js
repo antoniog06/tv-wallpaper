@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.6.0
+// @version      3.7.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.6.0';
+  const VERSION = '3.7.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -124,6 +124,9 @@
     try { localStorage.setItem('tvwp_settings', JSON.stringify(S)); } catch (e) {}
     if (part) bc && bc.postMessage({ type: part });
   }
+  // Trade recording keeps going while the daily lockout is on, even with "Turn everything off" (the lockout counts trades from it).
+  function recActive() { return !!S.rec.on && (!S.extras.allOff || !!S.risk.lockOn); }
+  const IN_APP = /Electron|TradingView\//i.test(navigator.userAgent);
 
   /* =========================================================
    * Candle colors: swap colors as the chart draws them
@@ -874,7 +877,7 @@
   }
   // Applies fills (oldest first) to the open trades. Only one window does this at a time.
   function recProcess(fills, live) {
-    if (!S.rec.on || S.extras.allOff) return Promise.resolve();
+    if (!recActive()) return Promise.resolve();
     return withLock('tvwp-rec', async () => {
       const st = recLoad();
       const seen = new Set(st.seen);
@@ -953,7 +956,7 @@
     return posCache;
   }
   async function recReconcile() {
-    if (!S.rec.on || S.extras.allOff || pageClosing) return;
+    if (!recActive() || pageClosing) return;
     const pc = await pollPositions();
     if (!pc.ok) return;
     await withLock('tvwp-rec', async () => {
@@ -991,7 +994,7 @@
 
   let backfilling = false;
   async function recBackfill() {
-    if (!S.rec.on || S.extras.allOff || backfilling) return;
+    if (!recActive() || backfilling) return;
     const b = currentBroker();
     if (!b || typeof b.executions !== 'function') return;
     backfilling = true;
@@ -1981,9 +1984,12 @@
     }
     const trades = dayTrades;
     const td = trades.filter(t => tradingDay(t.closeTime) === today);
+    // trades deleted with "Clear journal" today still count toward today's limits
+    const carry = riskLoad().carry, have = new Set(td.map(t => t.id));
+    const gone = carry && carry.day === today ? (carry.items || []).filter(x => !have.has(x.id)) : [];
     day.day = today;
-    day.trades = td.length;
-    day.closedPnl = td.reduce((a, t) => a + (t.net || 0), 0);
+    day.trades = td.length + gone.length;
+    day.closedPnl = td.reduce((a, t) => a + (t.net || 0), 0) + gone.reduce((a, x) => a + (x.net || 0), 0);
     const av = acctValues();
     day.pnl = day.closedPnl + ((av && av.unrealized) || 0);
   }
@@ -2003,6 +2009,7 @@
     riskSave(st);
     bc && bc.postMessage({ type: 'risk' });
     playSound('tone:alarm');
+    lockFileWrite();
   }
   function unlockEarly() {
     const st = riskLoad();
@@ -2010,11 +2017,55 @@
     riskSave(st);
     bc && bc.postMessage({ type: 'risk' });
     applyLock();
+    lockFileWrite();
+  }
+  // Limits can't be loosened while you're locked, or while a limit is hit and you're still in the trade.
+  function rulesFrozen() { return !!lockedNow() || !!pendingLock; }
+
+  /* ---- one lock for Chrome and the desktop app: both read and write lockout.json in your Journal folder ---- */
+  const LOCK_FILE = 'lockout.json';
+  let lockFileAt = 0;
+  async function lockFolder(mode) {
+    if (!S.rec.folderOn) return null;
+    const h = await folderHandle();
+    if (!h || (await folderPerm(h, mode, false)) !== 'granted') return null;
+    return h;
+  }
+  async function lockFileWrite() {
+    try {
+      const h = await lockFolder('readwrite');
+      if (!h) return;
+      const st = riskLoad();
+      await writeFile(h, LOCK_FILE, new Blob([JSON.stringify({ lockDay: st.lockDay ?? null, lockReason: st.lockReason || '', lockedAt: st.lockedAt || 0,
+        unlocked: !!st.unlocked, unlockedAt: st.unlockedAt || 0, from: IN_APP ? 'app' : 'browser', saved: Date.now() })], { type: 'application/json' }));
+    } catch (e) {}
+  }
+  async function lockFileSync() {
+    if (!S.rec.folderOn || Date.now() - lockFileAt < 10000) return;
+    lockFileAt = Date.now();
+    try {
+      const h = await lockFolder('read');
+      if (!h) return;
+      let f = null;
+      try { f = JSON.parse(await (await (await h.getFileHandle(LOCK_FILE)).getFile()).text()); } catch (e) {}
+      const today = tradingDay(Date.now()), st = riskLoad();
+      const hereLocked = st.lockDay === today && !!st.lockReason;
+      const fileToday = f && f.lockDay === today && !!f.lockReason;
+      if (!fileToday) { if (hereLocked) lockFileWrite(); return; }          // tell the other side about our lock
+      if (!hereLocked && !st.unlocked) {
+        if (f.unlocked) return;                                             // the other side already unlocked early
+        const where = f.from === 'app' ? 'desktop app' : 'browser';
+        st.lockDay = today; st.lockReason = `${f.lockReason} (in the ${where})`; st.lockedAt = f.lockedAt || Date.now(); st.unlocked = false;
+        riskSave(st); bc && bc.postMessage({ type: 'risk' }); playSound('tone:alarm'); applyLock();
+      } else if (hereLocked && !st.unlocked && f.unlocked && (f.unlockedAt || 0) >= (st.lockedAt || 0) - 60000) {
+        st.unlocked = true; st.unlockedAt = f.unlockedAt; riskSave(st); bc && bc.postMessage({ type: 'risk' }); applyLock();
+      }
+    } catch (e) {}
   }
   const LOCK_CSS = `
     [data-name="buy-order-button"], [data-name="sell-order-button"], [data-name="order-panel"], [class*="tv-dom-panel"],
     [class*="sellBuyButtonsContainer-"] { pointer-events: none !important; opacity: .28 !important; filter: grayscale(1) !important; }`;
-  function blocking() { return (!!lockedNow() || !!newsBlock) && !S.extras.allOff && openPositionQty() === 0; }
+  function blocking() { return (!!lockedNow() || (!!newsBlock && !S.extras.allOff)) && openPositionQty() === 0; }
   function applyLock() {
     const on = blocking();
     let st = document.getElementById('tvwp-lock');
@@ -2039,6 +2090,46 @@
     }
   }
   for (const ev of ['pointerdown', 'mousedown', 'click']) window.addEventListener(ev, blockClick, true);
+
+  /* ---- order guard: while locked, TradingView turns down new entries however they're placed (buttons, right-click menus,
+     the + on the price scale, hotkeys, chart trading). Orders that shrink or close a position always go through, and so does
+     closing a position, so you're never stuck in a trade. This only says no; it never places, changes or cancels anything. ---- */
+  function entryBlocked() { return !!lockedNow() || !!pendingLock || (!!newsBlock && !S.extras.allOff); }
+  function orderAllowed(method, o) {
+    if (!entryBlocked()) return true;
+    if (method === 'reversePosition') return false;                       // flips into a new trade; closing still works
+    if (openPositionQty() === 0) return false;                            // flat: everything would be a new entry
+    o = o || {};
+    const fresh = posCache.ok && Date.now() - posCache.at < 6000;
+    const list = fresh ? posCache.list : (brk.positions || []);
+    const p = list.find(x => x && (x.symbol === o.symbol || symRoot(x.symbol) === symRoot(o.symbol)));
+    if (!p) return !fresh;                                                // another market = new entry (unless we can't tell)
+    const dir = p.side === -1 || +p.qty < 0 ? -1 : 1;
+    return +o.side !== dir;                                               // same side = adding to the trade
+  }
+  function guardMsg() {
+    const L = lockedNow();
+    if (L || pendingLock) return `TV Wallpaper: trading is locked for today${L ? ` (${L.lockReason})` : ''}. You can still close or reduce your position. New orders unlock at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`;
+    return `TV Wallpaper: new entries are paused around ${newsBlock}.`;
+  }
+  function guardBroker(b) {
+    if (!b || typeof b !== 'object' || b.__tvwpGuard) return;
+    try {
+      for (const m of ['placeOrder', 'reversePosition']) {
+        const orig = b[m];
+        if (typeof orig !== 'function') continue;
+        b[m] = function (...args) {
+          if (!orderAllowed(m, args[0])) {
+            flashBanner();
+            console.warn('[TV Wallpaper] order turned down by the lockout');
+            return Promise.reject(new Error(guardMsg()));
+          }
+          return orig.apply(this, args);
+        };
+      }
+      Object.defineProperty(b, '__tvwpGuard', { value: true });
+    } catch (e) {}
+  }
 
   /* ---- position size ---- */
   const FUTURES = {
@@ -2184,23 +2275,31 @@
     if (pageClosing) return;
     if ((S.risk.lockOn || S.risk.newsLock || S.prop.on) && Date.now() - posCache.at > 1500) await pollPositions();
     await refreshDay();
+    guardBroker(currentBroker());
+    lockFileSync();
     const r = S.risk, out = [];
-    const flat = openPositionQty() === 0;
-    // daily limits
-    if (r.lockOn && !S.extras.allOff) {
+    let flat = openPositionQty() === 0;
+    // daily limits (keep running with "Turn everything off": that switch is for looks, not for your rules)
+    if (!r.lockOn) pendingLock = '';
+    if (r.lockOn) {
       const lossHit = +r.maxLoss > 0 && day.pnl <= -Math.abs(+r.maxLoss);
       const tradesHit = +r.maxTrades > 0 && day.trades >= +r.maxTrades && flat;
       const profitHit = +r.profitLock > 0 && day.closedPnl >= +r.profitLock && flat;
       const reason = lossHit ? `Daily loss limit hit (${money(day.pnl)} of ${money(-Math.abs(+r.maxLoss))})`
         : tradesHit ? `Max ${r.maxTrades} trades for today reached` : profitHit ? `Profit goal reached (${money(day.closedPnl)}). Lock it in.` : '';
       if (reason && !lockedNow() && !unlockedToday()) {
+        // check the broker right now before locking, so a fill from a second ago isn't missed
+        if (flat && Date.now() - posCache.at > 300) { await pollPositions(); flat = openPositionQty() === 0; }
         if (flat) setLock(reason);
         else pendingLock = reason;
       } else pendingLock = '';
-      const L = lockedNow();
-      if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
-      else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. New orders lock once you're flat.` });
-      else if (+r.maxLoss > 0 && day.pnl <= -Math.abs(+r.maxLoss) * (+r.warnPct || 80) / 100)
+    }
+    const L = lockedNow();
+    if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
+    else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. You can't add to it, and new orders lock once you're flat.` });
+    if (r.lockOn && S.rec.folderOn && folder.status === 'needs') out.push({ kind: 'info', act: 'folder', text: 'Allow access to your Journal folder so the lockout stays in step with the desktop app.' });
+    if (r.lockOn && !L && !pendingLock) {
+      if (+r.maxLoss > 0 && day.pnl <= -Math.abs(+r.maxLoss) * (+r.warnPct || 80) / 100)
         out.push({ kind: 'warn', text: `Careful: ${money(day.pnl)} today, limit is ${money(-Math.abs(+r.maxLoss))}.` });
     }
     // prop rules
@@ -2258,6 +2357,12 @@
         const u = document.createElement('button');
         u.textContent = 'Unlock early';
         u.onclick = () => { S.ui.tab = 'risk'; buildUI.open && buildUI.open('risk'); };
+        d.appendChild(u);
+      }
+      if (b.act === 'folder') {
+        const u = document.createElement('button');
+        u.textContent = 'Allow';
+        u.onclick = () => { folderSync(true).then(() => { lockFileAt = 0; riskTick(); }); };
         d.appendChild(u);
       }
       box.appendChild(d);
@@ -2677,6 +2782,7 @@
   @keyframes blink { 50% { opacity: .25; } }
   .player { position: absolute; inset: 0; background: rgba(0,0,0,.6); display: grid; place-items: center; z-index: 5; }
   .player[hidden] { display: none; }
+  #kPhraseBox[hidden], #kUnlock[hidden], #kFrozen[hidden] { display: none !important; }
   .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
   .banners { position: fixed; top: 46px; left: 50%; transform: translateX(-50%); z-index: 2147482999; display: grid; gap: 6px; justify-items: center; pointer-events: none; max-width: 92vw; }
@@ -2894,17 +3000,21 @@
     <section data-tab="risk">
       <div class="status" id="kStatus"></div>
       <div class="card">
-        ${item('Daily lockout', 'When a limit is hit, covers the Buy/Sell buttons, order panel and price ladder until the next session (6 PM ET).', '<input type="checkbox" id="kOn">')}
+        ${item('Daily lockout', 'When a limit is hit, TradingView turns down every new order (buttons, order panel, price ladder, right-click menus, hotkeys) until the next session at 6 PM ET.', '<input type="checkbox" id="kOn">')}
         ${item('Max daily loss ($)', 'Counts closed trades today plus your open P&L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
         ${item('Max trades per day', '0 = no limit. Counts closed trades.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
         ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}
         ${item('Warn me at (% of the loss limit)', 'A yellow warning shows on the chart first.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}
       </div>
+      <div class="hint" id="kFrozen" hidden>🔒 Your limits can't be changed until the lock ends at 6 PM ET.</div>
       <div class="card" id="kLockCard" hidden>
-        <div class="sub"><b id="kLockReason"></b><div class="hint">Unlocking early means breaking your own rule. You have to wait 30 seconds and confirm.</div>
-          <div class="row"><button class="btn" id="kUnlock">Unlock early</button></div></div>
+        <div class="sub"><b id="kLockReason"></b><div class="hint">Unlocking early means breaking your own rule. You have to wait 5 minutes, then type a sentence.</div>
+          <div class="row"><button class="btn" id="kUnlock">Unlock early</button></div>
+          <div id="kPhraseBox" hidden><div class="hint">Type exactly: <b>I am breaking my own trading rules</b></div>
+            <div class="row"><input type="text" id="kPhrase" autocomplete="off" spellcheck="false" style="flex:1"></div>
+            <div class="row"><button class="btn" id="kConfirm" disabled>Unlock for the rest of today</button><button class="btn slim" id="kCancel">Stay locked</button></div></div></div>
       </div>
-      <div class="hint">If you hit a limit while in a trade, you can still close it. New orders lock as soon as you're flat. The lockout covers TradingView only, not your broker's own app.</div>
+      <div class="hint">If you hit a limit while in a trade, you can still close or shrink it, but not add to it. New orders lock as soon as you're flat. With <b>Journal → Save to a folder</b> set to the same folder in Chrome and the desktop app, a lock in one locks the other. "Turn everything off" doesn't stop the lockout. It covers TradingView only, not your broker's own app.</div>
     </section>
 
     <section data-tab="size">
@@ -2976,7 +3086,7 @@
 
     <section data-tab="extras">
       <div class="card">
-        ${item('Turn everything off', 'Stops every feature at once. Your settings stay saved. Shortcut: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd>', '<input type="checkbox" id="gAllOff">')}
+        ${item('Turn everything off', 'Stops every feature at once (except the daily lockout, if it\'s on). Your settings stay saved. Shortcut: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd>', '<input type="checkbox" id="gAllOff">')}
         ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
         ${item('Theme', 'Auto follows your TradingView theme.', '<div class="seg" id="gTheme"><button data-v="auto">Auto</button><button data-v="dark">Dark</button><button data-v="light">Light</button></div>')}
         ${item('Button position', 'Drag the floating button anywhere, or put it back here.', '<button class="btn slim" id="gResetPos">Reset</button>')}
@@ -3550,9 +3660,11 @@
     buildUI.bannerBox = $('#banners');
     buildUI.open = tab => { toggle(true); S.ui.tab = tab; showTab(tab); };
     // sec is the settings section name; always read S[sec] at the time of the change (S is replaced when another tab saves)
-    const bindNum = (id, sec, key) => { $(id).onchange = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
+    const FROZEN = new Set(['#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock']);
+    const frozenNo = id => { if (!FROZEN.has(id) || !rulesFrozen()) return false; renderRiskInputs(); renderRiskPages(); flashBanner(); return true; };
+    const bindNum = (id, sec, key) => { $(id).onchange = e => { if (frozenNo(id)) return; const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
     const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
-    const bindChk = (id, sec, key, after) => { $(id).onchange = e => { S[sec][key] = e.target.checked; if (after) after(); save(sec); riskTick(); renderRiskPages(); }; };
+    const bindChk = (id, sec, key, after) => { $(id).onchange = e => { if (frozenNo(id)) return; S[sec][key] = e.target.checked; if (after) after(); save(sec); riskTick(); renderRiskPages(); }; };
     bindChk('#kOn', 'risk', 'lockOn', () => { if (S.risk.lockOn && !S.rec.on) { S.rec.on = true; recStartFresh(); save('journal'); } });
     bindNum('#kLoss', 'risk', 'maxLoss'); bindNum('#kTrades', 'risk', 'maxTrades'); bindNum('#kProfit', 'risk', 'profitLock');
     bindSel('#kWarn', 'risk', 'warnPct', true);
@@ -3585,19 +3697,30 @@
     bindChk('#nOn', 'news', 'on', () => { if (S.news.on) fetchNews().then(renderNews); });
     bindSel('#nMins', 'news', 'mins', true); bindChk('#nMed', 'news', 'medium', () => renderNews()); bindChk('#nSound', 'news', 'sound');
     bindChk('#nLock', 'risk', 'newsLock'); bindSel('#nAround', 'news', 'around', true);
-    let unlockTimer = null, unlockReady = false;
+    const UNLOCK_PHRASE = 'I am breaking my own trading rules';
+    let unlockTimer = null;
+    const unlockReset = () => {
+      clearInterval(unlockTimer); unlockTimer = null;
+      $('#kUnlock').textContent = 'Unlock early'; $('#kUnlock').hidden = false;
+      $('#kPhraseBox').hidden = true; $('#kPhrase').value = ''; $('#kConfirm').disabled = true;
+    };
     $('#kUnlock').onclick = () => {
-      if (unlockReady) { unlockReady = false; unlockEarly(); $('#kUnlock').textContent = 'Unlock early'; renderRiskPages(); return; }
-      if (unlockTimer) { clearInterval(unlockTimer); unlockTimer = null; $('#kUnlock').textContent = 'Unlock early'; return; }
-      let n = 30;
-      $('#kUnlock').textContent = `Wait ${n}s… (click to cancel)`;
+      if (unlockTimer) { unlockReset(); return; }
+      let n = Math.max(1, +window.__tvwpUnlockSecs || 300);
+      const show = () => { $('#kUnlock').textContent = `Wait ${Math.floor(n / 60)}:${String(n % 60).padStart(2, '0')}… (click to cancel)`; };
+      show();
       unlockTimer = setInterval(() => {
-        n--;
-        if (n > 0) { $('#kUnlock').textContent = `Wait ${n}s… (click to cancel)`; return; }
-        clearInterval(unlockTimer); unlockTimer = null; unlockReady = true;
-        $('#kUnlock').textContent = 'Confirm: unlock for the rest of today';
+        if (!lockedNow()) { unlockReset(); return; }
+        if (--n > 0) { show(); return; }
+        clearInterval(unlockTimer); unlockTimer = 1;   // waited; now the phrase
+        $('#kUnlock').hidden = true; $('#kPhraseBox').hidden = false; $('#kPhrase').focus();
       }, 1000);
     };
+    const phraseOk = () => $('#kPhrase').value.trim().replace(/\s+/g, ' ').toLowerCase() === UNLOCK_PHRASE.toLowerCase();
+    $('#kPhrase').oninput = () => { $('#kConfirm').disabled = !phraseOk(); };
+    for (const ev of ['paste', 'drop']) $('#kPhrase').addEventListener(ev, e => e.preventDefault());
+    $('#kConfirm').onclick = () => { if (!phraseOk() || !lockedNow()) return; unlockReset(); unlockEarly(); renderRiskPages(); };
+    $('#kCancel').onclick = unlockReset;
     function renderRiskInputs() {
       const r = S.risk, p = S.prop, n = S.news;
       $('#kOn').checked = !!r.lockOn; $('#kLoss').value = r.maxLoss; $('#kTrades').value = r.maxTrades; $('#kProfit').value = r.profitLock; $('#kWarn').value = String(r.warnPct);
@@ -3636,6 +3759,9 @@
       $('#kStatus').innerHTML = !r.lockOn ? 'Lockout is off.'
         : `<b>Today:</b> ${m(day.pnl)} · ${day.trades} trade${day.trades === 1 ? '' : 's'}${L ? ' · <b style="color:var(--bad)">Locked</b>' : unlockedToday() ? ' · Unlocked early' : ''}${S.rec.on ? '' : ' · <b>Turn on Journal → Record my trades</b> (the lockout counts your trades from it)'}`;
       $('#kLockCard').hidden = !L;
+      const fz = rulesFrozen();
+      for (const id of FROZEN) { const el = $(id); if (el.disabled !== fz) el.disabled = fz; }
+      $('#kFrozen').hidden = !fz;
       if (L) $('#kLockReason').textContent = hideMoney('🔒 ' + L.lockReason);
       // prop
       const pl = $('#pLive');
@@ -3793,7 +3919,10 @@
       $('#rPlayer').hidden = false;
     }
     $('#rPClose').onclick = () => { $('#rPlayer').hidden = true; $('#rVideoEl').pause(); };
-    $('#rOn').onchange = e => { S.rec.on = e.target.checked; if (S.rec.on) recStartFresh(); save('journal'); renderJournal(); };
+    $('#rOn').onchange = e => {
+      if (!e.target.checked && S.risk.lockOn) { e.target.checked = true; $('#fMsg').textContent = 'The daily lockout counts your trades from the journal, so recording stays on. Turn off Limits → Daily lockout first (not possible while locked).'; return; }
+      S.rec.on = e.target.checked; if (S.rec.on) recStartFresh(); save('journal'); renderJournal();
+    };
     $('#rVideo').onchange = e => { S.rec.video = e.target.checked; save('journal'); renderJournal(); };
     $('#rQuality').onchange = e => { S.rec.quality = e.target.value; save('journal'); };
     $('#rKeep').onchange = e => { S.rec.keep = +e.target.value; save('journal'); videoCleanup().then(renderJournal); };
@@ -3849,6 +3978,13 @@
       }
       clearTimeout(clearArmed); clearArmed = null;
       $('#rClear').textContent = 'Clear journal';
+      try {
+        const today = tradingDay(Date.now()), st = riskLoad();
+        const prev = st.carry && st.carry.day === today ? st.carry.items || [] : [];
+        const ids = new Set(prev.map(x => x.id));
+        const add = ((await DB.tradesAll()) || []).filter(t => tradingDay(t.closeTime) === today && !ids.has(t.id)).map(t => ({ id: t.id, net: t.net || 0 }));
+        st.carry = { day: today, items: prev.concat(add) }; riskSave(st);
+      } catch (e) {}
       await DB.tradesClear(); await DB.videosClear(); journalDirty = true;
       renderJournal();
     };
