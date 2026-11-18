@@ -75,3 +75,14 @@ The **Journal** page records every trade automatically once **Record my trades**
 Trades and videos live inside the browser's storage for tradingview.com (separately in Chrome and in the desktop app), and the script asks the browser to protect that storage from automatic cleanup. Clearing site data for tradingview.com, or uninstalling the desktop app, still deletes it.
 
 To keep real files, turn on **Journal → Save to a folder** and pick a folder once. The script then keeps `trades.csv` (opens in Excel), `journal-backup.json` (a full copy you can restore from with **Restore trades from folder**) and a `Videos` subfolder with one `.webm` per trade, named like `2026-11-15 09-31-04 Long 2 MNQZ2026 WIN.webm`, up to date after every trade. Clearing the journal never deletes anything from the folder. After a browser restart Chrome may ask you to allow access again (one click, or choose "Allow on every visit").
+
+## Send trades to Notion
+
+`TV-Notion-Sync.ps1` copies each finished trade into your Notion trade journal database, with its chart video when it fits your Notion plan. It runs on your PC (Notion doesn't let web pages call it directly) and reads the folder from **Journal → Save to a folder**, so it covers both Chrome and the desktop app.
+
+1. In TV Wallpaper: **Journal → Save to a folder** on. On Notion's free plan, set **Video quality → Small** so videos of trades up to about 2 minutes fit under the 5 MB upload limit.
+2. Go to notion.so/profile/integrations, create an **internal integration**, and copy its secret.
+3. Open your Trades database in Notion, then **••• → Connections →** add your integration.
+4. Download `TV-Notion-Sync.ps1`, right-click it → **Run with PowerShell** (or run `powershell -ExecutionPolicy Bypass -File TV-Notion-Sync.ps1 -Setup`), and paste the secret and your database link when asked.
+
+It then checks every 5 minutes in the background. Each trade becomes a page with Trade, Ticker, Direction, Account, Market, Entry/Exit Price and Time, Size, Fees, Multiplier, Session and Timeframe, and only fills properties your database already has, with matching types. A video that's too big gets a note on the page saying where it is on your PC. Your secret is stored encrypted for your Windows user only, never in TradingView or this repo. `-Uninstall` removes the background task.

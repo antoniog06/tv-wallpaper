@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TV Wallpaper
 // @namespace    tvwp
-// @version      3.5.3
+// @version      3.6.0
 // @description  Wallpapers (including animated GIFs) and custom candle colors for TradingView charts. Purely visual, local to your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.5.3';
+  const VERSION = '3.6.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -837,10 +837,24 @@
     return { id, symbol: ex.symbol, side: ex.side === -1 ? -1 : 1, qty: Math.abs(+ex.qty), price: +ex.price, time: t,
       commission: +ex.commission || 0, pointValue: +ex.pointValue || 0, orderId: ex.orderId || '' };
   }
+  function tradeContext(symbol) {
+    let broker = '', tf = '';
+    try {
+      const b = currentBroker(), mi = b && typeof b.metainfo === 'function' ? b.metainfo() : null;
+      broker = (mi && (mi.title || mi.name || mi.id)) || '';
+      if (broker === 'Paper') broker = 'Paper Trading';
+    } catch (e) {}
+    try {
+      const ch = window.TradingViewApi.activeChart();
+      if (symRoot(ch.symbol()) === symRoot(symbol)) tf = String(ch.resolution());   // timeframe of the chart you traded on
+    } catch (e) {}
+    return { broker, tf };
+  }
   function newTrade(f) {
+    const ctx = tradeContext(f.symbol);
     return { id: 't' + f.time + Math.random().toString(36).slice(2, 6), symbol: f.symbol, dir: f.side, qty: 0, maxQty: 0,
       entryQty: 0, entryValue: 0, exitQty: 0, exitValue: 0, points: 0, commission: 0, pointValue: f.pointValue,
-      openTime: f.time, fills: [], video: false, backfilled: false };
+      openTime: f.time, fills: [], video: false, backfilled: false, broker: ctx.broker, tf: ctx.tf };
   }
   async function finishTrade(t) {
     const info = await recTick(t.symbol);
@@ -853,7 +867,7 @@
       ticks: tick ? Math.round(((exit - entry) * t.dir) / tick) : null,
       gross: pv ? t.points * pv : null, commission: t.commission,
       net: pv ? t.points * pv - t.commission : null, currency: info.currency || 'USD',
-      fills: t.fills, backfilled: t.backfilled, adopted: !!t.adopted, videoId: t.video && !pendingNoVideo.has(t.id) ? 'v_' + t.id : null
+      fills: t.fills, backfilled: t.backfilled, adopted: !!t.adopted, broker: t.broker || '', tf: t.tf || '', pointValue: pv || null, videoId: t.video && !pendingNoVideo.has(t.id) ? 'v_' + t.id : null
     };
     await DB.tradePut(rec);
     return rec;
@@ -1087,14 +1101,14 @@
     const o = recLoad().open[t.symbol];
     if (!o || o.id !== t.id || o.video) { done(); return; }   // trade already closed, or already being filmed
     try {
-      const H = S.rec.quality === '1080' ? 1080 : 720, W = Math.round(H * 16 / 9);
+      const H = S.rec.quality === '1080' ? 1080 : S.rec.quality === '540' ? 540 : 720, W = Math.round(H * 16 / 9);
       const cv = document.createElement('canvas');
       cv.width = W; cv.height = H;
       const g = cv.getContext('2d');
       drawChartFrame(g, cv, t);
       const stream = cv.captureStream(30);
       const mime = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'].find(m => MediaRecorder.isTypeSupported(m)) || '';
-      const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: H === 1080 ? 3e6 : 1.5e6 });
+      const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: H === 1080 ? 3e6 : H === 540 ? 3.5e5 : 1.5e6 });
       const chunks = [];
       mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
       const stopTick = videoTicker(30, () => drawChartFrame(g, cv, t));
@@ -1221,7 +1235,6 @@
       await withLock('tvwp-folder', async () => {
         const trades = (await DB.tradesAll()) || [];
         await writeFile(handle, 'trades.csv', new Blob([tradesToCsv(trades)], { type: 'text/csv' }));
-        await writeFile(handle, 'journal-backup.json', new Blob([JSON.stringify({ app: 'TV Wallpaper', version: VERSION, saved: new Date().toISOString(), trades }, null, 1)], { type: 'application/json' }));
         let done = [];
         try { done = JSON.parse(localStorage.getItem(FOLDER_DONE) || '[]'); } catch (e) {}
         const doneSet = new Set(done);
@@ -1238,6 +1251,9 @@
           }
         }
         folder.count = doneSet.size;
+        // full backup; each trade lists its video file so other tools (like the Notion sync) can find it
+        const withFiles = trades.map(t => ({ ...t, videoFile: t.videoId && doneSet.has(t.videoId) ? 'Videos/' + videoFileName(t, t.videoId) : null }));
+        await writeFile(handle, 'journal-backup.json', new Blob([JSON.stringify({ app: 'TV Wallpaper', version: VERSION, saved: new Date().toISOString(), trades: withFiles }, null, 1)], { type: 'application/json' }));
       });
       folder.status = 'ok'; folder.last = Date.now(); folder.error = '';
     } catch (e) {
@@ -2857,7 +2873,7 @@
       <div class="card">
         ${item('Record my trades', 'Logs every trade from your broker: entry, exit, size, P&amp;L, time held.', '<input type="checkbox" id="rOn">')}
         ${item('Record chart video', 'Records the chart from entry until a few seconds after exit. No permission pop-ups.', '<input type="checkbox" id="rVideo">')}
-        ${item('Video quality', '', '<select id="rQuality"><option value="720">720p (smaller files)</option><option value="1080">1080p</option></select>')}
+        ${item('Video quality', '', '<select id="rQuality"><option value="540">Small (fits Notion free: ~2 min)</option><option value="720">720p</option><option value="1080">1080p</option></select>')}
         ${item('Keep videos', 'Older videos are deleted automatically. Trades are always kept.', '<select id="rKeep"><option value="10">Last 10</option><option value="25">Last 25</option><option value="50">Last 50</option><option value="100">Last 100</option></select>')}
       </div>
       <div class="status" id="rStats"></div>
