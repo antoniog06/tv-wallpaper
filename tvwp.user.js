@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.14.0
+// @version      3.15.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.14.0';
+  const VERSION = '3.15.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -78,7 +78,7 @@
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
     risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false, counter: true, counterPos: null, symOnly: '',
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
-    prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false },
+    prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false, stopOffset: 0, preset: '' },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
@@ -2341,12 +2341,27 @@
     st.prop = st.prop || {}; st.prop[acct] = ps; riskSave(st);
     const base = p.ddType === 'intraday' ? ps.peak : p.ddType === 'eod' ? ps.eodPeak : +p.start;
     let floor = base - (+p.dd || 0);
-    if (p.ddType !== 'static' && p.stopAtStart) floor = Math.min(floor, +p.start);   // trailing stops at the starting balance
+    if (p.ddType !== 'static' && p.stopAtStart) floor = Math.min(floor, +p.start + (+p.stopOffset || 0));   // trailing stops at the starting balance (+ an offset some firms use)
     const toFloor = eq !== null ? eq - floor : null;
     const dailyUsed = ps.dayStart !== null && eq !== null ? Math.max(0, ps.dayStart - eq) : 0;
     const qty = openPositionQty();
     return { days: ps.days || {}, today, eq, bal, floor, toFloor, ddLeftPct: toFloor !== null && +p.dd ? Math.max(0, Math.min(1, toFloor / +p.dd)) : null,
       profit: eq !== null ? eq - +p.start : null, target: +p.target || 0, dailyUsed, daily: +p.daily || 0, qty, maxQty: +p.maxQty || 0 };
+  }
+
+  /* ---- firm presets: one pick fills in the account's rules (still editable after) ---- */
+  const PROP_PRESETS = {
+    'lucidflex-25': { name: 'Lucid Flex 25K (evaluation)', start: 25000, dd: 1000, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 1250, maxQty: 20, consistency: 50 },
+    'lucidflex-50': { name: 'Lucid Flex 50K (evaluation)', start: 50000, dd: 2000, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 3000, maxQty: 40, consistency: 50 },
+    'lucidflex-100': { name: 'Lucid Flex 100K (evaluation)', start: 100000, dd: 3000, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 6000, maxQty: 60, consistency: 50 },
+    'lucidflex-150': { name: 'Lucid Flex 150K (evaluation)', start: 150000, dd: 4500, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 9000, maxQty: 100, consistency: 50 }
+  };
+  function applyPreset(key) {
+    const pr = PROP_PRESETS[key];
+    S.prop.preset = pr ? key : '';
+    if (!pr) return;
+    for (const k of ['start', 'dd', 'ddType', 'stopAtStart', 'stopOffset', 'daily', 'target', 'maxQty', 'consistency']) S.prop[k] = pr[k];
+    S.prop.on = true;
   }
 
   /* ---- consistency rule: your best day can be at most C% of your total profit ----
@@ -3362,7 +3377,10 @@
     </section>
 
     <section data-tab="prop">
-      <div class="card">${item('Track a prop account', 'Uses the account connected in TradingView.', '<input type="checkbox" id="pOn">')}</div>
+      <div class="card">
+        ${item('Track a prop account', 'Uses the account connected in TradingView.', '<input type="checkbox" id="pOn">')}
+        ${item('Firm preset', 'Fills in your account\'s rules.', '<select id="pPreset"><option value="">Custom</option><optgroup label="Lucid Trading"><option value="lucidflex-25">Lucid Flex 25K</option><option value="lucidflex-50">Lucid Flex 50K</option><option value="lucidflex-100">Lucid Flex 100K</option><option value="lucidflex-150">Lucid Flex 150K</option></optgroup></select>', 'Evaluation rules: profit target, max loss limit (end of day, stops trailing at your start + $100), no daily loss limit, 50% consistency, max contracts in micros (4 minis = 40 micros on the 50K). You can still change any field after. Firms change rules, so check your dashboard.')}
+      </div>
       ${dep('#pOn', `
         <div class="card"><div class="sub" id="pLive"></div></div>
         ${grp('Account', `
@@ -3370,6 +3388,7 @@
           ${item('Max loss limit ($)', 'Your firm\'s max loss (drawdown).', '<input type="number" id="pDd" min="0" max="1000000" step="100">')}
           ${item('Max loss type', 'Check your firm\'s rules.', '<select id="pType"><option value="eod">Trailing, end of day</option><option value="intraday">Trailing, intraday</option><option value="static">Static</option></select>', 'End of day trails your highest closing balance. Intraday trails your highest equity, including open P&amp;L. Static never moves.')}
           ${item('Trailing stops at starting balance', 'Most firms do.', '<input type="checkbox" id="pStop">', 'Most firms stop trailing once the limit reaches your starting balance.')}
+          ${dep('#pStop', item('Stops at start plus ($)', 'Lucid uses +$100. Usually 0.', '<input type="number" id="pOff" min="0" max="100000" step="50">', 'Where the max loss limit stops trailing, above your starting balance. Lucid: start + $100, so $50,100 on a 50K.'))}
           ${item('Daily loss limit ($)', 'Your firm\'s. 0 = none.', '<input type="number" id="pDaily" min="0" max="1000000" step="50">')}
           ${item('Max contracts', '0 = no limit.', '<input type="number" id="pMax" min="0" max="1000" step="1">')}`)}
         ${grp('Locks', `
@@ -4051,7 +4070,7 @@
     }
     buildUI.open = tab => { toggle(true); S.ui.tab = tab; showTab(tab); };
     // sec is the settings section name; always read S[sec] at the time of the change (S is replaced when another tab saves)
-    const FROZEN = new Set(['#pCons', '#pConsLock', '#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock', '#kSyms', '#pOn', '#pDd', '#pDaily', '#pEnforce', '#pType', '#pStart', '#pStop']);
+    const FROZEN = new Set(['#pPreset', '#pOff', '#pCons', '#pConsLock', '#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock', '#kSyms', '#pOn', '#pDd', '#pDaily', '#pEnforce', '#pType', '#pStart', '#pStop']);
     const frozenNo = id => { if (!FROZEN.has(id) || !rulesFrozen()) return false; renderRiskInputs(); renderRiskPages(); flashBanner(); return true; };
     const bindNum = (id, sec, key) => { $(id).onchange = e => { if (frozenNo(id)) return; const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
     const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { if (frozenNo(id)) return; S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
@@ -4085,7 +4104,11 @@
     $('#zStop').oninput = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S.risk.sizeStop = v; save('risk'); renderSize(); } };
     bindChk('#pOn', 'prop', 'on'); bindNum('#pStart', 'prop', 'start'); bindNum('#pDd', 'prop', 'dd');
     bindSel('#pType', 'prop', 'ddType'); bindChk('#pStop', 'prop', 'stopAtStart'); bindNum('#pDaily', 'prop', 'daily');
-    bindNum('#pTarget', 'prop', 'target'); bindNum('#pMax', 'prop', 'maxQty'); bindNum('#pLock', 'prop', 'lockNear'); bindChk('#pEnforce', 'prop', 'enforce');
+    bindNum('#pTarget', 'prop', 'target'); bindNum('#pMax', 'prop', 'maxQty'); bindNum('#pLock', 'prop', 'lockNear'); bindChk('#pEnforce', 'prop', 'enforce'); bindNum('#pOff', 'prop', 'stopOffset');
+    $('#pPreset').onchange = e => {
+      if (rulesFrozen()) { e.target.value = S.prop.preset || ''; flashBanner(); return; }
+      applyPreset(e.target.value); save('prop'); riskTick(); renderRiskInputs(); renderRiskPages(); syncDeps();
+    };
     bindNum('#pCons', 'prop', 'consistency'); bindNum('#pDays', 'prop', 'planDays'); bindNum('#pBest', 'prop', 'bestDay'); bindChk('#pConsLock', 'prop', 'consLock');
     $('#pReset').onclick = () => {
       const av = acctValues(); const st = riskLoad(); const acct = (av && av.account) || 'default';
@@ -4142,12 +4165,20 @@
       $('#zAtr').closest('.item').style.display = classic || r.sizeStopMode === 'manual' ? 'none' : '';
       $('#zStop').closest('.item').querySelector('.txt b').textContent = classic ? 'Stop distance' : 'My stop';
       $('#pOn').checked = !!p.on; $('#pStart').value = p.start; $('#pDd').value = p.dd; $('#pType').value = p.ddType; $('#pStop').checked = !!p.stopAtStart;
-      $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear; $('#pEnforce').checked = p.enforce !== false;
+      $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear; $('#pEnforce').checked = p.enforce !== false; $('#pOff').value = p.stopOffset || 0;
+      presetSync();
       $('#pCons').value = p.consistency || 0; $('#pDays').value = p.planDays || 0; $('#pBest').value = p.bestDay || 0; $('#pConsLock').checked = !!p.consLock;
       $('#nOn').checked = !!n.on; $('#nMins').value = String(n.mins); $('#nMed').checked = !!n.medium; $('#nSound').checked = !!n.sound;
       $('#nLock').checked = !!r.newsLock; $('#nAround').value = String(n.around);
     }
+    // the preset shows only while the fields still match it
+    function presetSync() {
+      const p = S.prop, pr = PROP_PRESETS[p.preset], sel = $('#pPreset');
+      const v = pr && ['start', 'dd', 'ddType', 'daily', 'target', 'consistency'].every(k => String(pr[k]) === String(p[k])) ? p.preset : '';
+      if (sel && sel.value !== v && sel.getRootNode().activeElement !== sel) sel.value = v;
+    }
     function renderConsPlan() {
+      presetSync();
       const box = $('#pPlan');
       if (!box) return;
       const p = S.prop;
