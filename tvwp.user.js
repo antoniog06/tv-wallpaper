@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.12.0
+// @version      3.13.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.12.0';
+  const VERSION = '3.13.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -78,7 +78,7 @@
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
     risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false, counter: true, counterPos: null, symOnly: '',
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
-    prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true },
+    prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
@@ -2331,6 +2331,13 @@
     if (ps.dayStart === null && bal !== null) ps.dayStart = bal;
     if (eq !== null) ps.peak = Math.max(ps.peak, eq);
     if (bal !== null) ps.lastBal = bal;
+    // closed profit per trading day, for the consistency rule (keeps the last 180 days)
+    if (bal !== null && ps.dayStart !== null) {
+      ps.days = ps.days || {};
+      ps.days[today] = Math.round((bal - ps.dayStart) * 100) / 100;
+      const ks = Object.keys(ps.days);
+      if (ks.length > 180) for (const k of ks.sort().slice(0, ks.length - 180)) delete ps.days[k];
+    }
     st.prop = st.prop || {}; st.prop[acct] = ps; riskSave(st);
     const base = p.ddType === 'intraday' ? ps.peak : p.ddType === 'eod' ? ps.eodPeak : +p.start;
     let floor = base - (+p.dd || 0);
@@ -2338,8 +2345,53 @@
     const toFloor = eq !== null ? eq - floor : null;
     const dailyUsed = ps.dayStart !== null && eq !== null ? Math.max(0, ps.dayStart - eq) : 0;
     const qty = openPositionQty();
-    return { eq, bal, floor, toFloor, ddLeftPct: toFloor !== null && +p.dd ? Math.max(0, Math.min(1, toFloor / +p.dd)) : null,
+    return { days: ps.days || {}, today, eq, bal, floor, toFloor, ddLeftPct: toFloor !== null && +p.dd ? Math.max(0, Math.min(1, toFloor / +p.dd)) : null,
       profit: eq !== null ? eq - +p.start : null, target: +p.target || 0, dailyUsed, daily: +p.daily || 0, qty, maxQty: +p.maxQty || 0 };
+  }
+
+  /* ---- consistency rule: your best day can be at most C% of your total profit ----
+     need  = total profit you'll need so your best day fits the rule (the target, or more if a big day pushed it up)
+     cap   = the most you can make today without raising "need"
+     plan  = how to split what's left across the days you want, staying under the cap with a 10% cushion */
+  function consPlan(ps) {
+    const p = S.prop, C = (+p.consistency || 0) / 100, T = Math.max(0, +p.target || 0);
+    if (!(C > 0 && C < 1) || !T) return null;
+    const days = (ps && ps.days) || {}, today = ps ? ps.today : tradingDay(Date.now());
+    let best = Math.max(0, +p.bestDay || 0), bestWhen = best > 0 ? 'entered' : '';
+    for (const [d, v] of Object.entries(days)) if (String(d) !== String(today) && v > best) { best = v; bestWhen = d; }
+    const todayP = +days[today] || 0;
+    const profit = ps && ps.bal !== null && ps.bal !== undefined ? ps.bal - +p.start : 0;     // closed profit
+    const bestAll = Math.max(best, todayP);
+    const need = Math.max(T, bestAll / C);
+    const cap = Math.max(C * T, best);
+    const left = Math.max(0, need - profit);
+    const dayMax = C * need;                                         // no single day above this
+    // today already has todayP in it, so today can only add up to the room left (none if you're locked for the day)
+    const live = !!(ps && ps.eq !== null);
+    const room = live && !lockedNow() ? Math.max(0, dayMax * 0.9 - Math.max(0, todayP)) : 0;
+    const useToday = live && room >= Math.min(left, dayMax * 0.15);   // skip today if only crumbs are left
+    const todayRoomMax = Math.max(0, dayMax - Math.max(0, todayP));     // today, right at the cap
+    const fastest = left <= 0 ? 0 : useToday ? (left <= todayRoomMax ? 1 : 1 + Math.ceil((left - todayRoomMax) / dayMax - 1e-9)) : Math.ceil(left / dayMax - 1e-9);
+    let n = 0;
+    const plan = [];
+    if (left > 0) {
+      const fullDays = rest => Math.ceil(rest / (dayMax * 0.9) - 1e-9);
+      const comfy = useToday ? (left <= room ? 1 : 1 + fullDays(left - room)) : fullDays(left);
+      n = Math.max(1, +p.planDays > 0 ? Math.round(+p.planDays) : comfy);
+      let rest = left, tot = profit;
+      for (let i = 0; i < n; i++) {
+        const isToday = useToday && i === 0;
+        const daysLeft = n - i;
+        let g = rest / daysLeft;
+        if (isToday && daysLeft > 1) g = Math.min(g, room);   // (a 1-day plan shows the full amount, with the warning)
+        tot += g; rest -= g;
+        plan.push({ label: isToday ? 'Day 1 (today)' : `Day ${i + 1}${!live || useToday || i ? '' : ' (next session)'}`, goal: g, total: tot });
+      }
+    }
+    const per = plan.length ? plan[plan.length - 1].goal : 0;
+    return { C, T, best, bestWhen, todayP, profit, need, cap, left, dayMax, fastest, n, per, plan,
+      tooFew: n > 0 && n < fastest, over: plan.some(d => d.goal > dayMax + 0.5 || (d.label.startsWith('Today') && d.goal + todayP > dayMax + 0.5)),
+      pct: profit > 0 ? bestAll / profit : null, ok: profit >= need };
   }
 
   /* ---- economic news (TradingView's own calendar) ---- */
@@ -2411,6 +2463,15 @@
         }
       }
     }
+    // consistency cap: optionally stop for the day once today's closed profit reaches the cap
+    if (S.prop.on && S.prop.consLock) {
+      const cp = consPlan(propState(acctValues()));
+      if (cp && cp.todayP > 0 && cp.todayP >= cp.cap && !lockedNow() && !unlockedToday()) {
+        const why = `Consistency cap reached for today (${money(cp.todayP)} of ${money(cp.cap).replace(/^\+/, '')})`;
+        if (flat && Date.now() - posCache.at > 300) { await pollPositions(); flat = openPositionQty() === 0; }
+        if (flat) setLock(why); else if (!pendingLock) pendingLock = why;
+      }
+    }
     const L = lockedNow();
     if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
     else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. You can't add to it, and new orders lock once you're flat.` });
@@ -2434,8 +2495,16 @@
         else if (ps.toFloor !== null && ps.toFloor <= 0) out.push({ kind: 'bad', text: `Prop: at the max loss limit (${money(ps.floor)}).` });
         else if (ps.ddLeftPct !== null && ps.ddLeftPct < 0.25) out.push({ kind: ps.ddLeftPct < 0.1 ? 'bad' : 'warn', text: `Prop: only ${money(ps.toFloor).replace(/^\+/, '')} left before the max loss limit.` });
         if (!quiet && ps.daily && ps.dailyUsed >= ps.daily * 0.8) out.push({ kind: ps.dailyUsed >= ps.daily ? 'bad' : 'warn', text: `Prop: daily loss ${money(-ps.dailyUsed)} of ${money(-ps.daily)}.` });
+        const cp = consPlan(ps);
+        if (cp && !quiet && cp.todayP > 0 && cp.todayP >= cp.cap * 0.8)
+          out.push({ kind: cp.todayP >= cp.cap ? 'bad' : 'warn', text: cp.todayP >= cp.cap
+            ? `Prop consistency: ${money(cp.todayP)} today is over your ${money(cp.cap).replace(/^\+/, '')} cap. You now need ${money(cp.need).replace(/^\+/, '')} total.`
+            : `Prop consistency: ${money(cp.todayP)} today, cap is ${money(cp.cap).replace(/^\+/, '')}. Going over raises the profit you need.` });
         if (ps.maxQty && ps.qty > ps.maxQty) out.push({ kind: 'bad', text: `Prop: ${ps.qty} contracts open, max allowed is ${ps.maxQty}.` });
-        if (ps.target && ps.profit >= ps.target) out.push({ kind: 'good', text: `Prop: profit target reached (${money(ps.profit)}).` });
+        if (ps.target && ps.profit >= ps.target) {
+          if (cp && !cp.ok) out.push({ kind: 'warn', text: `Prop: ${money(ps.profit)} reaches your target, but the consistency rule needs ${money(cp.need).replace(/^\+/, '')} total.` });
+          else out.push({ kind: 'good', text: `Prop: profit target reached (${money(ps.profit)}).` });
+        }
       }
     }
     // news
@@ -2950,6 +3019,14 @@
   #kPhraseBox[hidden], #kUnlock[hidden], #kFrozen[hidden] { display: none !important; }
   .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
+  .kv { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 12.5px; border-bottom: 1px solid rgba(255,255,255,.05); }
+  .kv span { color: #9aa1b2; } .kv b { font-weight: 600; text-align: right; } .kv b .hint { display: inline; font-weight: 400; }
+  table.plan { width: 100%; border-collapse: collapse; margin: 8px 0 6px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  table.plan th { text-align: right; font-weight: 500; color: #7d8496; font-size: 11px; padding: 4px 6px; }
+  table.plan td { text-align: right; padding: 5px 6px; border-top: 1px solid rgba(255,255,255,.05); }
+  table.plan td:first-child, table.plan th:first-child { text-align: left; color: #9aa1b2; }
+  .plan-ok { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: rgba(34,195,154,.12); color: #4fd8b0; font-size: 12.5px; }
+  .plan-warn { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: rgba(242,73,92,.12); color: #ff8a97; font-size: 12.5px; }
   .counter { position: fixed; z-index: 2147482998; display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; border-radius: 10px;
     cursor: grab; user-select: none; touch-action: none; font: 600 12px/1 Inter, -apple-system, system-ui, sans-serif; color: #e8eaf0;
     background: rgba(18,20,27,.82); border: 1px solid rgba(255,255,255,.08); box-shadow: 0 6px 18px rgba(0,0,0,.28); backdrop-filter: blur(8px);
@@ -3271,6 +3348,13 @@
         ${item('Stop early, with this much left ($)', 'Locks before the max loss limit. 200 = lock when $200 is left. 0 = lock right at the limit.', '<input type="number" id="pLock" min="0" max="1000000" step="50">')}
       </div>
       <div class="card"><div class="sub" id="pLive"></div></div>
+      <div class="card">
+        ${item('Consistency rule (%)', 'Your best day can be at most this % of your total profit. Common: 30% to 50%. 0 = off.', '<input type="number" id="pCons" min="0" max="99" step="5">')}
+        ${item('Days to plan for', 'How many more trading days you want to take to reach the target. 0 = suggest a comfortable number.', '<input type="number" id="pDays" min="0" max="60" step="1">')}
+        ${item('Best day before Wick tracked ($)', 'If you started this account before Wick was tracking it, enter your best day so far.', '<input type="number" id="pBest" min="0" max="1000000" step="50">')}
+        ${item('Stop for the day at the cap', 'Once today\'s closed profit reaches the cap, new orders lock until 6 PM ET.', '<input type="checkbox" id="pConsLock">')}
+      </div>
+      <div class="card"><div class="sub" id="pPlan"></div></div>
       <div class="row"><button class="btn" id="pReset">Reset high-water mark to current equity</button></div>
     </section>
 
@@ -3909,7 +3993,7 @@
     }
     buildUI.open = tab => { toggle(true); S.ui.tab = tab; showTab(tab); };
     // sec is the settings section name; always read S[sec] at the time of the change (S is replaced when another tab saves)
-    const FROZEN = new Set(['#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock', '#kSyms', '#pOn', '#pDd', '#pDaily', '#pEnforce', '#pType', '#pStart', '#pStop']);
+    const FROZEN = new Set(['#pCons', '#pConsLock', '#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock', '#kSyms', '#pOn', '#pDd', '#pDaily', '#pEnforce', '#pType', '#pStart', '#pStop']);
     const frozenNo = id => { if (!FROZEN.has(id) || !rulesFrozen()) return false; renderRiskInputs(); renderRiskPages(); flashBanner(); return true; };
     const bindNum = (id, sec, key) => { $(id).onchange = e => { if (frozenNo(id)) return; const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
     const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { if (frozenNo(id)) return; S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
@@ -3944,6 +4028,7 @@
     bindChk('#pOn', 'prop', 'on'); bindNum('#pStart', 'prop', 'start'); bindNum('#pDd', 'prop', 'dd');
     bindSel('#pType', 'prop', 'ddType'); bindChk('#pStop', 'prop', 'stopAtStart'); bindNum('#pDaily', 'prop', 'daily');
     bindNum('#pTarget', 'prop', 'target'); bindNum('#pMax', 'prop', 'maxQty'); bindNum('#pLock', 'prop', 'lockNear'); bindChk('#pEnforce', 'prop', 'enforce');
+    bindNum('#pCons', 'prop', 'consistency'); bindNum('#pDays', 'prop', 'planDays'); bindNum('#pBest', 'prop', 'bestDay'); bindChk('#pConsLock', 'prop', 'consLock');
     $('#pReset').onclick = () => {
       const av = acctValues(); const st = riskLoad(); const acct = (av && av.account) || 'default';
       if (st.prop && st.prop[acct] && av && isFinite(av.equity)) { st.prop[acct].peak = av.equity; st.prop[acct].eodPeak = av.balance ?? av.equity; riskSave(st); }
@@ -4000,8 +4085,42 @@
       $('#zStop').closest('.item').querySelector('.txt b').textContent = classic ? 'Stop distance' : 'My stop';
       $('#pOn').checked = !!p.on; $('#pStart').value = p.start; $('#pDd').value = p.dd; $('#pType').value = p.ddType; $('#pStop').checked = !!p.stopAtStart;
       $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear; $('#pEnforce').checked = p.enforce !== false;
+      $('#pCons').value = p.consistency || 0; $('#pDays').value = p.planDays || 0; $('#pBest').value = p.bestDay || 0; $('#pConsLock').checked = !!p.consLock;
       $('#nOn').checked = !!n.on; $('#nMins').value = String(n.mins); $('#nMed').checked = !!n.medium; $('#nSound').checked = !!n.sound;
       $('#nLock').checked = !!r.newsLock; $('#nAround').value = String(n.around);
+    }
+    function renderConsPlan() {
+      const box = $('#pPlan');
+      if (!box) return;
+      const p = S.prop;
+      if (!(+p.consistency > 0)) { box.innerHTML = '<span class="hint">Set your firm\'s consistency rule above to get a day-by-day plan to your profit target.</span>'; return; }
+      if (!(+p.target > 0)) { box.innerHTML = '<span class="hint">Set a profit target above to plan your days.</span>'; return; }
+      const av = p.on ? acctValues() : null;
+      const ps = av ? propState(av) : null;
+      const cp = consPlan(ps);
+      if (!cp) { box.innerHTML = '<span class="hint">Consistency must be between 1% and 99%.</span>'; return; }
+      const hide = S.extras.streamer;
+      const usd = v => hide ? '•••••' : '$' + Math.round(v).toLocaleString();
+      const pc = v => Math.round(v * 100) + '%';
+      const rows = [];
+      if (ps && ps.eq !== null) {
+        rows.push(meter('Profit (closed)', usd(cp.profit), cp.need ? Math.max(0, cp.profit) / cp.need : 0, cp.ok ? '' : 'warn'));
+        rows.push(`<div class="kv"><span>Best day</span><b>${cp.best > 0 || cp.todayP > 0 ? usd(Math.max(cp.best, cp.todayP)) : 'none yet'}${cp.pct !== null ? ` · ${pc(cp.pct)} of profit (rule ${pc(cp.C)})` : ''}</b></div>`);
+        rows.push(`<div class="kv"><span>Profit you need</span><b>${usd(cp.need)}${cp.need > cp.T + 0.5 ? ` <span class="hint">(raised from ${usd(cp.T)} by your best day)</span>` : ''}</b></div>`);
+        rows.push(meter(`Today vs. cap (${usd(cp.cap)})`, usd(cp.todayP), cp.cap ? Math.max(0, cp.todayP) / cp.cap : 0, cp.todayP >= cp.cap ? 'bad' : cp.todayP >= cp.cap * .8 ? 'warn' : ''));
+      } else {
+        rows.push(`<div class="kv"><span>Most you can make in one day</span><b>${usd(cp.cap)}</b></div>`);
+      }
+      if (cp.ok && cp.left <= 0) rows.push(`<div class="plan-ok">✓ Target reached and within the ${pc(cp.C)} consistency rule.</div>`);
+      else {
+        rows.push(`<div class="kv"><span>Fastest possible</span><b>${cp.fastest} day${cp.fastest === 1 ? '' : 's'} <span class="hint">(right at the ${usd(cp.dayMax)} cap)</span></b></div>`);
+        if (cp.tooFew || cp.over) rows.push(`<div class="plan-warn">${cp.n} day${cp.n === 1 ? ' isn\'t' : 's aren\'t'} enough to stay under ${usd(cp.dayMax)} a day. The goals below would break the ${pc(cp.C)} rule. Plan at least ${Math.max(cp.fastest, 1)} day${cp.fastest === 1 ? '' : 's'}.</div>`);
+        const list = cp.plan.slice(0, 20).map(d => `<tr><td>${d.label}</td><td>${usd(d.goal)}</td><td>${usd(d.total)}</td></tr>`);
+        rows.push(`<div class="kv"><span>Your plan</span><b>${cp.n} day${cp.n === 1 ? '' : 's'}${cp.n > 1 ? `, about ${usd(cp.per)} a day` : ''}</b></div>`);
+        rows.push(`<table class="plan"><tr><th></th><th>Goal</th><th>Total profit</th></tr>${list.join('')}${cp.n > 20 ? `<tr><td colspan="3" class="hint">…and ${cp.n - 20} more days</td></tr>` : ''}</table>`);
+        rows.push(`<div class="hint">Stop around your goal each day. A day over ${usd(cp.dayMax)} raises the profit you need. Goals keep a 10% cushion under the cap, since some firms count a day right at the limit as a break.</div>`);
+      }
+      box.innerHTML = rows.join('');
     }
     function meter(label, value, frac, cls) {
       const pct = Math.max(0, Math.min(100, Math.round((frac || 0) * 100)));
@@ -4035,6 +4154,7 @@
           ].join('');
         }
       }
+      renderConsPlan();
       renderNews();
       const rb = root.querySelector('[data-badge="risk"]');
       rb.hidden = !L; rb.textContent = 'locked';
