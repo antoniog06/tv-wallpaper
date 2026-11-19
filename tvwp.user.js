@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.10.0
+// @version      3.10.1
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.10.0';
+  const VERSION = '3.10.1';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2419,31 +2419,43 @@
       box.appendChild(d);
     }
   }
-  /* ---- trade counter on the chart: "Trades ●●○ 2 / 3" (amber on your last trade, red when you're done) ---- */
+  /* ---- trade counter on the chart. Calm while you have room, then it gets louder:
+     2 left = amber, 1 left = red, last trade = pulsing red with a red edge around the screen, done = locked. ---- */
   let counterKey = '';
+  const CI = {
+    warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 2 20h20L12 3z"/><path d="M12 10v4M12 17h.01"/></svg>',
+    lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>'
+  };
   function renderCounter() {
-    const el = buildUI.counterEl;
+    const el = buildUI.counterEl, edge = buildUI.edgeEl;
     if (!el) return;
     const r = S.risk, max = +r.maxTrades || 0;
     const show = r.counter !== false && max > 0 && (!S.extras.allOff || r.lockOn);
-    if (!show) { if (!el.hidden) el.hidden = true; counterKey = ''; return; }
+    if (!show) { el.hidden = true; if (edge) edge.className = 'edge'; counterKey = ''; return; }
     let open = 0;
     try { open = Object.keys(recLoad().open || {}).length; } catch (e) {}
     const closed = day.day === tradingDay(Date.now()) ? day.trades : 0;
     const inTrade = open > 0 && openPositionQty() > 0;
-    const used = closed + (inTrade ? 1 : 0);
+    const left = max - closed;                                   // trades you can still start (counting the one you're in)
     const early = unlockedToday();
-    const state = !recActive() ? 'off' : closed >= max ? 'done' : inTrade && used >= max ? 'last' : closed === max - 1 && !inTrade ? 'onelft' : 'ok';
-    const note = state === 'off' ? 'turn on Journal recording to count'
-      : state === 'done' ? (early ? 'unlocked early' : (r.lockOn ? 'done for today' : 'max reached'))
-      : state === 'last' ? 'last trade' : state === 'onelft' ? '1 left' : '';
-    const key = [closed, inTrade, max, state, note].join('|');
-    if (key === counterKey && !el.hidden) return;
-    counterKey = key; el.hidden = false;
-    el.className = 'counter ' + state;
-    const dots = max <= 10 ? Array.from({ length: max }, (_, i) => `<i class="${i < closed ? 'f' : i === closed && inTrade ? 'o' : ''}"></i>`).join('') : '';
-    el.innerHTML = `<b>Trades</b>${dots ? `<span class="dots">${dots}</span>` : ''}<span class="n">${Math.min(closed, 999)} / ${max}</span>${note ? `<span class="note">${note}</span>` : ''}`;
-    el.title = `${closed} closed today${inTrade ? ', 1 open' : ''}, max ${max}. Drag to move. Change in Limits.`;
+    const lvl = !recActive() ? 'off'
+      : left <= 0 ? (early ? 'over' : 'done')
+      : left === 1 ? (inTrade ? 'last' : 'one')
+      : left === 2 && max >= 3 ? 'two'
+      : 'calm';
+    const tag = { off: 'Recording off', over: 'Over limit', done: 'Done', last: 'Last trade', one: '1 left', two: '2 left', calm: '' }[lvl];
+    const icon = lvl === 'done' ? CI.lock : (lvl === 'last' || lvl === 'one' || lvl === 'over') ? CI.warn : '';
+    const key = [closed, inTrade, max, lvl].join('|');
+    if (key !== counterKey || el.hidden) {
+      counterKey = key; el.hidden = false;
+      el.className = 'counter ' + lvl;
+      const segs = max <= 12 ? Array.from({ length: max }, (_, i) => `<i class="${i < closed ? 'f' : i === closed && inTrade ? 'o' : ''}"></i>`).join('') : '';
+      el.innerHTML = `${icon ? `<span class="tc-ic">${icon}</span>` : ''}<span class="tc-lb">Trades</span>` +
+        `<span class="tc-n"><b>${Math.min(closed, 999)}</b><span>/${max}</span></span>` +
+        (segs ? `<span class="tc-bar">${segs}</span>` : '') + (tag ? `<span class="tc-tag">${tag}</span>` : '');
+      el.title = `${closed} of ${max} trades used today${inTrade ? ' (1 open)' : ''}. Drag to move. Turn off in Limits.`;
+    }
+    if (edge) edge.className = 'edge' + (lvl === 'last' ? ' on' : '');
   }
   function flashBanner() {
     const box = buildUI.bannerBox;
@@ -2862,21 +2874,56 @@
   #kPhraseBox[hidden], #kUnlock[hidden], #kFrozen[hidden] { display: none !important; }
   .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
-  .counter { position: fixed; z-index: 2147482998; display: flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px; cursor: grab; user-select: none; touch-action: none;
-    font: 600 12px/1 Inter, -apple-system, system-ui, sans-serif; color: #e6e8ee; background: rgba(24,27,36,.88); border: 1px solid #343949; box-shadow: 0 4px 14px rgba(0,0,0,.35); backdrop-filter: blur(6px); }
+  .counter { position: fixed; z-index: 2147482998; display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; border-radius: 10px;
+    cursor: grab; user-select: none; touch-action: none; font: 600 12px/1 Inter, -apple-system, system-ui, sans-serif; color: #e8eaf0;
+    background: rgba(18,20,27,.82); border: 1px solid rgba(255,255,255,.08); box-shadow: 0 6px 18px rgba(0,0,0,.28); backdrop-filter: blur(8px);
+    transition: background .4s, border-color .4s, box-shadow .4s, color .4s; }
   .counter[hidden] { display: none; }
   .counter:active { cursor: grabbing; }
-  .counter b { font-weight: 600; color: #9aa1b2; letter-spacing: .02em; }
-  .counter .dots { display: flex; gap: 4px; }
-  .counter .dots i { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #5b6274; box-sizing: border-box; }
-  .counter .dots i.f { background: #8b93a7; border-color: #8b93a7; }
-  .counter .dots i.o { border-color: #22c39a; background: #22c39a; animation: blink 1.2s infinite; }
-  .counter .n { font-variant-numeric: tabular-nums; }
-  .counter .note { font-size: 11px; padding: 2px 7px; border-radius: 999px; background: rgba(255,255,255,.08); }
-  .counter.onelft .note { background: rgba(245,165,36,.18); color: #f5c35e; }
-  .counter.last { border-color: #f5a524; } .counter.last .note { background: #f5a524; color: #1a1300; } .counter.last .dots i.o { border-color: #f5a524; background: #f5a524; }
-  .counter.done { border-color: #f2495c; } .counter.done .dots i.f { background: #f2495c; border-color: #f2495c; } .counter.done .note { background: #f2495c; color: #fff; }
-  .counter.off { opacity: .7; }
+  .counter .tc-lb { font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: #7d8496; }
+  .counter .tc-n { font-variant-numeric: tabular-nums; display: flex; align-items: baseline; gap: 1px; }
+  .counter .tc-n b { font-size: 15px; font-weight: 700; }
+  .counter .tc-n span { color: #7d8496; font-size: 12px; }
+  .counter .tc-bar { display: flex; gap: 3px; }
+  .counter .tc-bar i { width: 12px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.12); transition: background .4s; }
+  .counter .tc-bar i.f { background: #b8bfcf; }
+  .counter .tc-bar i.o { background: #22c39a; animation: segblink 1.1s ease-in-out infinite; }
+  .counter .tc-tag { font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; padding: 4px 7px; border-radius: 6px; }
+  .counter .tc-ic { display: grid; place-items: center; width: 15px; height: 15px; }
+  .counter .tc-ic svg { width: 15px; height: 15px; }
+  @keyframes segblink { 50% { opacity: .35; } }
+  /* 2 left: amber */
+  .counter.two { border-color: rgba(245,165,36,.45); }
+  .counter.two .tc-bar i.f { background: #f5a524; }
+  .counter.two .tc-tag { color: #f5b544; background: rgba(245,165,36,.14); }
+  /* 1 left: red, slow breathing */
+  .counter.one { color: #ffd9de; background: rgba(46,12,18,.88); border-color: rgba(242,73,92,.7); animation: breathe 2.6s ease-in-out infinite; }
+  .counter.one .tc-bar i.f { background: #f2495c; }
+  .counter.one .tc-ic, .counter.one .tc-lb, .counter.one .tc-n span { color: #ff7a8a; }
+  .counter.one .tc-tag { color: #fff; background: rgba(242,73,92,.85); }
+  /* last trade: hot red, heartbeat */
+  .counter.last { color: #fff; background: linear-gradient(180deg, rgba(120,14,28,.95), rgba(70,6,16,.95)); border-color: #ff3b52; animation: heartbeat 1.1s ease-in-out infinite; }
+  .counter.last .tc-bar i.f { background: #ff8a97; }
+  .counter.last .tc-bar i.o { background: #fff; }
+  .counter.last .tc-lb, .counter.last .tc-n span { color: #ffb3bc; }
+  .counter.last .tc-tag { color: #3a0009; background: #fff; }
+  /* done: solid, still, locked */
+  .counter.done { color: #fff; background: #b3122a; border-color: #ff3b52; box-shadow: 0 0 0 3px rgba(242,73,92,.25), 0 8px 24px rgba(120,0,20,.5); }
+  .counter.done .tc-bar i, .counter.done .tc-bar i.f { background: rgba(255,255,255,.85); }
+  .counter.done .tc-lb, .counter.done .tc-n span { color: #ffc2c9; }
+  .counter.done .tc-tag { color: #b3122a; background: #fff; }
+  .counter.over { border-color: rgba(245,165,36,.6); } .counter.over .tc-tag { color: #1a1300; background: #f5a524; } .counter.over .tc-ic { color: #f5a524; }
+  .counter.off { opacity: .6; } .counter.off .tc-tag { color: #9aa1b2; background: rgba(255,255,255,.08); }
+  @keyframes breathe { 50% { box-shadow: 0 0 0 4px rgba(242,73,92,.18), 0 6px 18px rgba(0,0,0,.28); } }
+  @keyframes heartbeat { 0%, 100% { box-shadow: 0 0 0 0 rgba(255,59,82,.55), 0 6px 18px rgba(0,0,0,.3); transform: scale(1); }
+    15% { box-shadow: 0 0 0 6px rgba(255,59,82,.25), 0 0 26px rgba(255,59,82,.55); transform: scale(1.04); } 30% { transform: scale(1); }
+    45% { box-shadow: 0 0 0 4px rgba(255,59,82,.2), 0 0 18px rgba(255,59,82,.4); transform: scale(1.02); } }
+  /* red edge around the screen during your last trade (never blocks clicks) */
+  .edge { position: fixed; inset: 0; z-index: 2147482990; pointer-events: none; opacity: 0; transition: opacity .6s;
+    box-shadow: inset 0 0 0 2px rgba(255,59,82,.55), inset 0 0 70px rgba(255,30,60,.28); }
+  .edge.on { opacity: 1; animation: edgepulse 2.2s ease-in-out infinite; }
+  @keyframes edgepulse { 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .counter, .edge.on, .counter .tc-bar i.o { animation: none !important; } }
   .banners { position: fixed; top: 46px; left: 50%; transform: translateX(-50%); z-index: 2147482999; display: grid; gap: 6px; justify-items: center; pointer-events: none; max-width: 92vw; }
   .bn { pointer-events: auto; display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 10px; font: 600 12.5px/1.3 Inter, -apple-system, system-ui, sans-serif;
     color: #fff; background: rgba(28,31,40,.94); border: 1px solid #343949; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
@@ -2976,6 +3023,7 @@
   const HTML = `
   <button class="fab" title="Wick (Alt+Shift+W)">${ICON.logo}</button>
   <div class="banners" id="banners"></div>
+  <div class="edge" id="tradeEdge"></div>
   <div class="counter" id="tradeCounter" hidden></div>
   <div class="panel">
     <aside>
@@ -3097,7 +3145,7 @@
         ${item('Daily lockout', 'When a limit is hit, TradingView turns down every new order (buttons, order panel, price ladder, right-click menus, hotkeys) until the next session at 6 PM ET.', '<input type="checkbox" id="kOn">')}
         ${item('Max daily loss ($)', 'Counts closed trades today plus your open P&L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
         ${item('Max trades per day', 'Once your last trade closes (win or loss), you\'re locked until 6 PM ET. During that last trade you can manage it, but not open another market. 0 = no limit.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
-        ${item('Trade counter on chart', 'Shows how many of your max trades you\'ve used today. Amber on your last trade, red when you\'re done. Drag it anywhere.', '<input type="checkbox" id="kCounter">')}
+        ${item('Trade counter on chart', 'Shows how many of your max trades you\'ve used today. It turns amber with 2 left, red with 1 left, pulses (with a red screen edge) on your last trade, and locks when you\'re done. Drag it anywhere.', '<input type="checkbox" id="kCounter">')}
         ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}
         ${item('Warn me at (% of the loss limit)', 'A yellow warning shows on the chart first.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}
       </div>
@@ -3754,6 +3802,7 @@
     /* ---- risk pages ---- */
     buildUI.bannerBox = $('#banners');
     buildUI.counterEl = $('#tradeCounter');
+    buildUI.edgeEl = $('#tradeEdge');
     {
       const el = buildUI.counterEl;
       const place = () => {
