@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.13.0
+// @version      3.14.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.13.0';
+  const VERSION = '3.14.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2909,18 +2909,39 @@
   .x { width: 28px; height: 28px; border-radius: 8px; border: none; background: none; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; }
   .x:hover { background: var(--card2); color: var(--text); }
   .content { flex: 1; overflow: auto; padding: 14px 18px 20px; }
-  section { display: none; gap: 12px; }
+  section { display: none; gap: 14px; }
   section.on { display: grid; }
 
   /* cards & rows */
   .card, .sgroup, .side { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
-  .card > .item + .item, .card > .item + .sub { border-top: 1px solid var(--line); }
+  .card .item, .card .sub { border-top: 1px solid var(--line); }
+  .card > .item:first-child, .card > .sub:first-child, .card > .dep:first-child > .item:first-child, .card > .dep:first-child > .sub:first-child { border-top: 0; }
+  .dep { display: contents; }
+  [data-when][hidden], .dep[hidden] { display: none !important; }
   .item { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 14px; min-height: 48px; }
   .item .txt { min-width: 0; }
   .item .txt b { display: block; font-weight: 600; font-size: 13px; }
-  .item .txt small { display: block; color: var(--muted); font-size: 12px; margin-top: 1px; }
+  .item .txt small { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; line-height: 1.35; }
+  .item .txt small b, .item .txt b b { display: inline; font-size: inherit; }
+  .item .txt > b { display: flex !important; align-items: center; gap: 6px; }
+  .info { all: unset; flex: none; display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; cursor: help;
+    font: 700 9.5px/1 Georgia, serif; font-style: italic; color: var(--muted); border: 1px solid var(--line); background: transparent; }
+  .info:hover, .info:focus-visible { color: var(--text, #e6e8ee); border-color: var(--accent, #6c7cff); }
+  .tip { position: fixed; z-index: 2147483647; max-width: 280px; padding: 9px 11px; border-radius: 9px; font: 12px/1.45 Inter, -apple-system, system-ui, sans-serif;
+    color: #e8eaf0; background: #232733; border: 1px solid #3a3f4e; box-shadow: 0 10px 28px rgba(0,0,0,.45); pointer-events: none; }
+  .tip[hidden] { display: none; }
+  .pg { display: grid; gap: 6px; }
+  .pg-h { font-size: 10.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); padding: 6px 4px 0; }
+  details.how { padding: 0 4px; }
+  details.how summary { cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; display: flex; align-items: center; gap: 6px; }
+  details.how summary::-webkit-details-marker { display: none; }
+  details.how summary::before { content: '›'; display: inline-block; transition: transform .15s; font-size: 14px; }
+  details.how[open] summary::before { transform: rotate(90deg); }
+  details.how .hint { margin-top: 6px; line-height: 1.5; }
   .item select, .item input[type=range] { width: 190px; flex: none; }
-  .item input[type=number] { width: 90px; }
+  .item input[type=number], .item input[inputmode=decimal], .item > input[type=text] { width: 104px; flex: none; }
+  .item select { width: 170px; }
+  .item #rQualHint { font-size: 11.5px; }
   .sub { padding: 12px 14px; display: grid; gap: 10px; }
   .card-h { padding: 11px 14px 0; font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
   .card-h small { color: var(--muted); font-weight: 400; }
@@ -3170,7 +3191,12 @@
     news: ['News', 'High-impact US economic events, with warnings before they hit.'],
     extras: ['General', 'Ads, appearance, shortcuts and info.']
   };
-  const item = (title, desc, control) => `<div class="item"><div class="txt"><b>${title}</b>${desc ? `<small>${desc}</small>` : ''}</div>${control}</div>`;
+  // A setting row: title, a one-line summary, the control, and optional details behind an (i).
+  const item = (title, desc, control, more) => `<div class="item"><div class="txt"><b>${title}${more ? `<button class="info" type="button" tabindex="0" data-tip="${String(more).replace(/"/g, '&quot;')}" aria-label="More about this">i</button>` : ''}</b>${desc ? `<small>${desc}</small>` : ''}</div>${control}</div>`;
+  // A titled group of settings. when = '#id' shows it only while that switch is on (or that number is above 0).
+  const grp = (title, inner, when) => `<div class="pg"${when ? ` data-when="${when}"` : ''}>${title ? `<div class="pg-h">${title}</div>` : ''}<div class="card">${inner}</div></div>`;
+  const dep = (when, inner) => `<div class="dep" data-when="${when}">${inner}</div>`;
+  const how = (title, inner) => `<details class="how"><summary>${title}</summary><div class="hint">${inner}</div></details>`;
   const NAV = (tab, label) => `<button data-tab="${tab}">${ICON[tab]}<span>${label}</span><span class="badge" data-badge="${tab}" hidden></span></button>`;
 
   const HTML = `
@@ -3253,56 +3279,57 @@
 
     <section data-tab="sounds">
       <div class="card">
-        ${item('Order sounds', 'Plays when your orders fill. Works with any broker in TradingView.', '<input type="checkbox" id="sEnabled">')}
-        ${item('Volume <span class="hint" id="sVolVal"></span>', '', '<input type="range" id="sVol" min="0.05" max="1" step="0.05">')}
-        ${item('One sound for all fills', 'Use the same sound for every order type.', '<input type="checkbox" id="sOne">')}
-        ${item("Mute TradingView's own fill sound", 'So you only hear yours.', '<input type="checkbox" id="sMuteTV">')}
+        ${item('Order sounds', 'Plays when your orders fill.', '<input type="checkbox" id="sEnabled">', 'Works with any broker connected in TradingView, including Tradovate and NinjaTrader.')}
+        ${dep('#sEnabled', `
+          ${item('Volume <span class="hint" id="sVolVal"></span>', '', '<input type="range" id="sVol" min="0.05" max="1" step="0.05">')}
+          ${item('One sound for all fills', 'Same sound for every order type.', '<input type="checkbox" id="sOne">')}
+          ${item("Mute TradingView's own fill sound", 'So you only hear yours.', '<input type="checkbox" id="sMuteTV">')}`)}
       </div>
-      <div class="sgroup" id="sFills"><h3>Fills</h3></div>
-      <div class="sgroup" id="sOther"><h3>Other order events</h3></div>
-      <div class="sgroup"><h3>Your sounds</h3>
+      <div class="dep" data-when="#sEnabled"><div class="sgroup" id="sFills"><h3>Fills</h3></div></div>
+      <div class="dep" data-when="#sEnabled"><div class="sgroup" id="sOther"><h3>Other order events</h3></div></div>
+      <div class="sgroup" data-when="#sEnabled"><h3>Your sounds</h3>
         <div class="chips" id="sChips"></div>
         <label class="btn">＋ Upload sounds (MP3, WAV…)<input type="file" id="sFile" accept="audio/*" multiple hidden></label>
         <div class="msg" id="sMsg"></div>
       </div>
       <div class="last" id="sLast"></div>
-      <div class="hint">Click anywhere on the chart once after opening it, so the browser allows sound.</div>
+      <div class="hint" data-when="#sEnabled">Click the chart once after opening it, so the browser allows sound.</div>
     </section>
 
     <section data-tab="journal">
-      <div class="card">
-        ${item('Record my trades', 'Logs every trade from your broker: entry, exit, size, P&amp;L, time held.', '<input type="checkbox" id="rOn">')}
-        ${item('Record chart video', 'Records the chart from entry until a few seconds after exit. No permission pop-ups.', '<input type="checkbox" id="rVideo">')}
-        ${item('Video quality', '', '<select id="rQuality"><option value="540">Small (fits Notion free: ~2 min)</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">4K</option><option value="native">Native (your chart\'s real pixels)</option></select>')}
-        <div class="hint" id="rQualHint"></div>
-        ${item('Keep videos', 'Older videos are deleted automatically. Trades are always kept.', '<select id="rKeep"><option value="10">Last 10</option><option value="25">Last 25</option><option value="50">Last 50</option><option value="100">Last 100</option></select>')}
-      </div>
+      ${grp('Recording', `
+        ${item('Record my trades', 'Entry, exit, size, P&amp;L and time held.', '<input type="checkbox" id="rOn">')}
+        ${dep('#rOn', `
+          ${item('Record chart video', 'Films the chart for each trade.', '<input type="checkbox" id="rVideo">', 'From entry until a few seconds after exit. Keeps recording in a background tab. No permission pop-ups.')}
+          ${dep('#rVideo', `
+            ${item('Video quality', '<span id="rQualHint"></span>', '<select id="rQuality"><option value="540">Small (fits Notion free)</option><option value="720">720p</option><option value="1080">1080p</option><option value="1440">1440p</option><option value="2160">4K</option><option value="native">Native</option></select>', 'Small fits Notion\'s free plan (about 2 minutes). Native records at your chart\'s real screen pixels, the sharpest your screen can give. 1440p and up record as MP4 on your graphics card when it supports that.')}
+            ${item('Keep videos', 'Older videos are deleted. Trades are kept.', '<select id="rKeep"><option value="10">Last 10</option><option value="25">Last 25</option><option value="50">Last 50</option><option value="100">Last 100</option></select>')}`)}`)}`)}
       <div class="status" id="rStats"></div>
       <div class="sgroup" id="rList"><h3>Recent trades</h3></div>
-      <div class="card">
-        ${item('Save to a folder', 'Copies your trades (trades.csv + a backup file) and every video into a folder you pick, as normal files.', '<input type="checkbox" id="fOn">')}
-        <div class="sub">
+      ${grp('Save to a folder', `
+        ${item('Save to a folder', 'Trades and videos as normal files.', '<input type="checkbox" id="fOn">', 'Copies trades.csv, a backup file and every video into a folder you pick. Needed for Notion sync, and for the lockout to stay in step between Chrome and the desktop app.')}
+        ${dep('#fOn', `<div class="sub">
           <div class="row"><span class="hint" id="fStatus" style="flex:1"></span><button class="btn slim" id="fPick">Choose folder…</button><button class="btn slim" id="fReconnect" hidden>Allow access again</button></div>
           <div class="row"><button class="btn slim" id="fRestore">Restore trades from folder</button><span class="hint" id="fStore" style="flex:1;text-align:right"></span></div>
           <div class="msg" id="fMsg"></div>
-        </div>
-      </div>
+        </div>`)}`)}
       <div class="row"><button class="btn" id="rCsv">⬇ Export CSV (Excel)</button><button class="btn" id="rClear">Clear journal</button></div>
-      <div class="hint">Keeps recording when TradingView is in a background tab or minimized, and catches up on trades made while it was closed, including trades placed on your broker's own app. In Chrome, add tradingview.com to Settings → Performance → Memory Saver → "Always keep these sites active".</div>
+      ${how('How recording works', `Keeps recording when TradingView is in a background tab or minimized, and catches up on trades made while it was closed, including trades placed on your broker's own app. In Chrome, add tradingview.com to Settings → Performance → Memory Saver → "Always keep these sites active".`)}
       <div class="player" id="rPlayer" hidden><div class="pbox"><div class="row between"><b id="rPTitle"></b><button class="x" id="rPClose">×</button></div><video id="rVideoEl" controls playsinline></video><div class="row"><a class="btn" id="rPDown" download>⬇ Download video</a></div></div></div>
     </section>
 
     <section data-tab="risk">
       <div class="status" id="kStatus"></div>
-      <div class="card">
-        ${item('Daily lockout', 'When a limit is hit, TradingView turns down every new order (buttons, order panel, price ladder, right-click menus, hotkeys) until the next session at 6 PM ET.', '<input type="checkbox" id="kOn">')}
-        ${item('Max daily loss ($)', 'Counts closed trades today plus your open P&L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
-        ${item('Max trades per day', 'Once your last trade closes (win or loss), you\'re locked until 6 PM ET. During that last trade you can manage it, but not open another market. 0 = no limit.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
-        ${item('Trading symbols', 'Only these markets can be traded, e.g. <b>MNQ, MGC</b>. Orders on anything else (like NQ while you chart it) are turned down, with a one-click switch to your micro. Closing a position always works. Leave empty to allow all.', '<input type="text" id="kSyms" placeholder="All" autocomplete="off" spellcheck="false" style="width:120px;text-transform:uppercase">')}
-        ${item('Trade counter on chart', 'Shows how many of your max trades you\'ve used today. It turns amber with 2 left, red with 1 left, pulses (with a red screen edge) on your last trade, and locks when you\'re done. Drag it anywhere.', '<input type="checkbox" id="kCounter">')}
-        ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}
-        ${item('Warn me at (% of the loss limit)', 'A yellow warning shows on the chart first.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}
-      </div>
+      ${grp('Daily limits', `
+        ${item('Daily lockout', 'Stop trading for the day when a limit is hit.', '<input type="checkbox" id="kOn">', 'TradingView turns down every new order (buttons, order panel, price ladder, right-click menus, hotkeys) until the next session at 6 PM ET. You can always close a trade you\'re in.')}
+        ${item('Max daily loss ($)', 'Closed trades today plus open P&amp;L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
+        ${item('Max trades per day', '0 = no limit.', '<input type="number" id="kTrades" min="0" max="100" step="1">', 'Once your last trade closes (win or loss), you\'re locked until 6 PM ET. During that last trade you can manage it, but not open another market.')}
+        ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}`)}
+      ${grp('Markets', `
+        ${item('Trading symbols', 'e.g. MNQ, MGC. Empty = all.', '<input type="text" id="kSyms" placeholder="All" autocomplete="off" spellcheck="false" style="text-transform:uppercase">', 'Only these markets can be traded. Orders on anything else (like NQ while you chart it) are turned down, with a one-click switch to your micro. Closing a position always works.')}`)}
+      ${grp('On the chart', `
+        ${item('Trade counter', 'Trades used of your max.', '<input type="checkbox" id="kCounter">', 'Turns amber with 2 left, red with 1 left, pulses with a red screen edge on your last trade, and locks when you\'re done. Drag it anywhere.')}
+        ${item('Warn me at', 'Share of the loss limit.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}`)}
       <div class="hint" id="kFrozen" hidden>🔒 Your limits can't be changed until the lock ends at 6 PM ET.</div>
       <div class="card" id="kLockCard" hidden>
         <div class="sub"><b id="kLockReason"></b><div class="hint">Unlocking early means breaking your own rule. You have to wait 5 minutes, then type a sentence.</div>
@@ -3311,12 +3338,12 @@
             <div class="row"><input type="text" id="kPhrase" autocomplete="off" spellcheck="false" style="flex:1"></div>
             <div class="row"><button class="btn" id="kConfirm" disabled>Unlock for the rest of today</button><button class="btn slim" id="kCancel">Stay locked</button></div></div></div>
       </div>
-      <div class="hint">If you hit a limit while in a trade, you can still close or shrink it, but not add to it. New orders lock as soon as you're flat. With <b>Journal → Save to a folder</b> set to the same folder in Chrome and the desktop app, a lock in one locks the other. "Turn everything off" doesn't stop the lockout. It covers TradingView only, not your broker's own app.</div>
+      ${how('How the lockout works', `If you hit a limit while in a trade, you can still close or shrink it, but not add to it. New orders lock as soon as you're flat. With <b>Journal → Save to a folder</b> set to the same folder in Chrome and the desktop app, a lock in one locks the other. "Turn everything off" doesn't stop the lockout. It covers TradingView only, not your broker's own app.`)}
     </section>
 
     <section data-tab="size">
       <div class="card">
-        ${item('Calculator style', 'Simple: just your risk. Classic: symbol, risk and stop, like before.', '<div class="seg" id="zView"><button data-v="simple">Simple</button><button data-v="classic">Classic</button></div>')}
+        ${item('Calculator style', '',  '<div class="seg" id="zView"><button data-v="simple">Simple</button><button data-v="classic">Classic</button></div>')}
       </div>
       <div class="card">
         ${item('<span id="zRiskLbl">How much do you want to risk?</span>', '<span id="zRiskSub">Per trade, in dollars.</span>', '<div class="money"><span id="zUnitSym">$</span><input type="number" id="zRisk" min="0" max="1000000" step="any"></div>')}
@@ -3328,52 +3355,54 @@
         <summary>Options: symbol, your own stop, % of account</summary>
         ${item('Symbol', 'Uses your chart by default.', '<select id="zSym"></select>')}
         ${item('Risk as', '', '<select id="zMode"><option value="usd">Dollars</option><option value="pct">% of account</option></select>')}
-        ${item('Stop', 'Automatic uses the average candle size on your chart right now.', '<select id="zStopMode"><option value="auto">Automatic</option><option value="manual">I\'ll set it</option></select>')}
+        ${item('Stop', 'Automatic uses your chart\'s average candle.', '<select id="zStopMode"><option value="auto">Automatic</option><option value="manual">I\'ll set it</option></select>')}
         ${item('Automatic stop size', 'How many average candles away your stop usually is.', '<select id="zAtr"><option value="0.5">½ candle</option><option value="1">1 candle</option><option value="1.5">1½ candles</option><option value="2">2 candles</option><option value="3">3 candles</option></select>')}
         ${item('My stop', '', '<div class="row" style="flex:none"><input type="number" id="zStop" min="0" max="100000" step="any"><select id="zUnit" style="width:100px"><option value="ticks">Ticks</option><option value="points">Points</option></select></div>')}
       </details>
     </section>
 
     <section data-tab="prop">
-      <div class="card">
-        ${item('Track a prop account', 'Uses the account connected in TradingView.', '<input type="checkbox" id="pOn">')}
-        ${item('Starting balance ($)', '', '<input type="number" id="pStart" min="0" max="10000000" step="1000">')}
-        ${item('Max loss limit ($)', 'Your firm\'s max loss (drawdown) for the account.', '<input type="number" id="pDd" min="0" max="1000000" step="100">')}
-        ${item('Max loss type', 'Check your firm\'s rules for which one applies.', '<select id="pType"><option value="eod">Trailing, end of day</option><option value="intraday">Trailing, intraday (incl. open P&amp;L)</option><option value="static">Static</option></select>')}
-        ${item('Trailing stops at starting balance', 'Most firms stop trailing once the limit reaches your start.', '<input type="checkbox" id="pStop">')}
-        ${item('Daily loss limit ($)', 'Your firm\'s daily loss limit. 0 = none.', '<input type="number" id="pDaily" min="0" max="1000000" step="50">')}
+      <div class="card">${item('Track a prop account', 'Uses the account connected in TradingView.', '<input type="checkbox" id="pOn">')}</div>
+      ${dep('#pOn', `
+        <div class="card"><div class="sub" id="pLive"></div></div>
+        ${grp('Account', `
+          ${item('Starting balance ($)', '', '<input type="number" id="pStart" min="0" max="10000000" step="1000">')}
+          ${item('Max loss limit ($)', 'Your firm\'s max loss (drawdown).', '<input type="number" id="pDd" min="0" max="1000000" step="100">')}
+          ${item('Max loss type', 'Check your firm\'s rules.', '<select id="pType"><option value="eod">Trailing, end of day</option><option value="intraday">Trailing, intraday</option><option value="static">Static</option></select>', 'End of day trails your highest closing balance. Intraday trails your highest equity, including open P&amp;L. Static never moves.')}
+          ${item('Trailing stops at starting balance', 'Most firms do.', '<input type="checkbox" id="pStop">', 'Most firms stop trailing once the limit reaches your starting balance.')}
+          ${item('Daily loss limit ($)', 'Your firm\'s. 0 = none.', '<input type="number" id="pDaily" min="0" max="1000000" step="50">')}
+          ${item('Max contracts', '0 = no limit.', '<input type="number" id="pMax" min="0" max="1000" step="1">')}`)}
+        ${grp('Locks', `
+          ${item('Lock trading at these limits', 'Max loss or daily loss locks until 6 PM ET.', '<input type="checkbox" id="pEnforce">', 'Hitting the max loss or daily loss limit locks new orders until 6 PM ET, even with the Limits lockout off. You can always close a trade you\'re in.')}
+          ${dep('#pEnforce', item('Stop early, with this much left ($)', '0 = lock right at the limit.', '<input type="number" id="pLock" min="0" max="1000000" step="50">', 'Locks before the max loss limit. 200 = lock when $200 is left.'))}`)}`)}
+      ${grp('Target &amp; consistency', `
         ${item('Profit target ($)', '', '<input type="number" id="pTarget" min="0" max="10000000" step="100">')}
-        ${item('Max contracts', '0 = no limit.', '<input type="number" id="pMax" min="0" max="1000" step="1">')}
-        ${item('Lock trading at these limits', 'Hitting the max loss or daily loss limit locks new orders until 6 PM ET, even with the Limits lockout off. You can always close a trade you\'re in.', '<input type="checkbox" id="pEnforce">')}
-        ${item('Stop early, with this much left ($)', 'Locks before the max loss limit. 200 = lock when $200 is left. 0 = lock right at the limit.', '<input type="number" id="pLock" min="0" max="1000000" step="50">')}
-      </div>
-      <div class="card"><div class="sub" id="pLive"></div></div>
-      <div class="card">
-        ${item('Consistency rule (%)', 'Your best day can be at most this % of your total profit. Common: 30% to 50%. 0 = off.', '<input type="number" id="pCons" min="0" max="99" step="5">')}
-        ${item('Days to plan for', 'How many more trading days you want to take to reach the target. 0 = suggest a comfortable number.', '<input type="number" id="pDays" min="0" max="60" step="1">')}
-        ${item('Best day before Wick tracked ($)', 'If you started this account before Wick was tracking it, enter your best day so far.', '<input type="number" id="pBest" min="0" max="1000000" step="50">')}
-        ${item('Stop for the day at the cap', 'Once today\'s closed profit reaches the cap, new orders lock until 6 PM ET.', '<input type="checkbox" id="pConsLock">')}
-      </div>
-      <div class="card"><div class="sub" id="pPlan"></div></div>
-      <div class="row"><button class="btn" id="pReset">Reset high-water mark to current equity</button></div>
+        ${item('Consistency rule (%)', 'Best day ≤ this % of profit. 0 = off.', '<input type="number" id="pCons" min="0" max="99" step="5">', 'Your best day can be at most this % of your total profit. Common: 30% to 50%. Check how your firm counts it.')}
+        ${dep('#pCons', `
+          ${item('Days to plan for', '0 = suggest.', '<input type="number" id="pDays" min="0" max="60" step="1">', 'How many more trading days you want to take to reach the target. 0 suggests a comfortable number.')}
+          ${item('Best day before Wick tracked ($)', 'Only if you started earlier.', '<input type="number" id="pBest" min="0" max="1000000" step="50">', 'If you started this account before Wick was tracking it, enter your best day so far.')}
+          ${item('Stop for the day at the cap', 'Locks once today reaches the cap.', '<input type="checkbox" id="pConsLock">', 'Once today\'s closed profit reaches the consistency cap, new orders lock until 6 PM ET.')}`)}
+        <div class="sub" id="pPlan"></div>`)}
+      ${dep('#pOn', '<div class="row"><button class="btn slim" id="pReset">Reset high-water mark to current equity</button></div>')}
     </section>
 
     <section data-tab="news">
       <div class="card">
-        ${item('News warnings', 'A countdown on the chart before high-impact events.', '<input type="checkbox" id="nOn">')}
-        ${item('Warn me', '', '<select id="nMins"><option value="5">5 min before</option><option value="10">10 min before</option><option value="15">15 min before</option><option value="30">30 min before</option><option value="60">1 hour before</option></select>')}
-        ${item('Include medium impact', '', '<input type="checkbox" id="nMed">')}
-        ${item('Beep 1 minute before', '', '<input type="checkbox" id="nSound">')}
-        ${item('Pause new entries around high-impact news', 'Covers the Buy/Sell buttons for a few minutes either side. Never blocks closing a trade.', '<input type="checkbox" id="nLock">')}
-        ${item('Pause window', '', '<select id="nAround"><option value="1">± 1 min</option><option value="2">± 2 min</option><option value="5">± 5 min</option><option value="10">± 10 min</option></select>')}
+        ${item('News warnings', 'A countdown before high-impact events.', '<input type="checkbox" id="nOn">')}
+        ${dep('#nOn', `
+          ${item('Warn me', '', '<select id="nMins"><option value="5">5 min before</option><option value="10">10 min before</option><option value="15">15 min before</option><option value="30">30 min before</option><option value="60">1 hour before</option></select>')}
+          ${item('Include medium impact', '', '<input type="checkbox" id="nMed">')}
+          ${item('Beep 1 minute before', '', '<input type="checkbox" id="nSound">')}
+          ${item('Pause new entries', 'Around high-impact news.', '<input type="checkbox" id="nLock">', 'Covers the Buy/Sell buttons for a few minutes either side of high-impact news. Never blocks closing a trade.')}
+          ${dep('#nLock', item('Pause window', '', '<select id="nAround"><option value="1">± 1 min</option><option value="2">± 2 min</option><option value="5">± 5 min</option><option value="10">± 10 min</option></select>'))}`)}
       </div>
-      <div class="sgroup" id="nList"><h3>Upcoming (New York time)</h3></div>
-      <div class="hint">From TradingView's economic calendar, US events. Refreshes every 30 minutes.</div>
+      ${dep('#nOn', `<div class="sgroup" id="nList"><h3>Upcoming (New York time)</h3></div>
+      <div class="hint">US events from TradingView's economic calendar. Refreshes every 30 minutes.</div>`)}
     </section>
 
     <section data-tab="trading">
       <div class="card">
-        ${item('Show win / lose on TP & SL orders', 'For brokers like Tradovate that turn brackets into plain limit/stop orders.', '<input type="checkbox" id="xBrk">')}
+        ${item('Show win / lose on TP & SL orders', 'For Tradovate-style brackets.', '<input type="checkbox" id="xBrk">')}
         ${item('Show as', '', '<select id="xBrkMode"><option value="ticks">Ticks</option><option value="money">Money</option><option value="both">Ticks + money</option></select>')}
         ${item('Distance from right edge', 'Slide labels so they sit next to your order labels.', '<input type="number" id="xBrkRight" min="0" max="800" step="10">')}
       </div>
@@ -3391,10 +3420,10 @@
 
     <section data-tab="extras">
       <div class="card">
-        ${item('Turn everything off', 'Stops every feature at once (except the daily lockout, if it\'s on). Your settings stay saved. Shortcut: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd>', '<input type="checkbox" id="gAllOff">')}
+        ${item('Turn everything off', 'Your settings stay saved.', '<input type="checkbox" id="gAllOff">', 'Stops every feature at once, except the daily lockout if it\'s on. Shortcut: Alt+Shift+X.')}
         ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
         ${item('Theme', 'Auto follows your TradingView theme.', '<div class="seg" id="gTheme"><button data-v="auto">Auto</button><button data-v="dark">Dark</button><button data-v="light">Light</button></div>')}
-        ${item('Button position', 'Drag the floating button anywhere, or put it back here.', '<button class="btn slim" id="gResetPos">Reset</button>')}
+        ${item('Button position', 'Drag the button anywhere.', '<button class="btn slim" id="gResetPos">Reset</button>')}
       </div>
       <div class="card">
         ${item('Open / close this window', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></span>')}
@@ -3512,6 +3541,34 @@
     placeFab();
 
     /* ---- tabs ---- */
+    // (i) details: one floating tip for the whole panel
+    const tip = document.createElement('div');
+    tip.className = 'tip'; tip.hidden = true; root.appendChild(tip);
+    const showTip = el => {
+      tip.textContent = el.dataset.tip; tip.hidden = false;
+      const r = el.getBoundingClientRect(), w = tip.offsetWidth, h = tip.offsetHeight;
+      let x = Math.min(Math.max(8, r.left + r.width / 2 - w / 2), innerWidth - w - 8);
+      let y = r.bottom + 8; if (y + h > innerHeight - 8) y = r.top - h - 8;
+      tip.style.left = x + 'px'; tip.style.top = y + 'px';
+    };
+    root.addEventListener('pointerover', e => { const el = e.target.closest && e.target.closest('.info'); if (el) showTip(el); });
+    root.addEventListener('pointerout', e => { if (e.target.closest && e.target.closest('.info')) tip.hidden = true; });
+    root.addEventListener('focusin', e => { if (e.target.classList && e.target.classList.contains('info')) showTip(e.target); });
+    root.addEventListener('focusout', e => { if (e.target.classList && e.target.classList.contains('info')) tip.hidden = true; });
+    root.addEventListener('click', e => { const el = e.target.closest && e.target.closest('.info'); if (el) { e.preventDefault(); e.stopPropagation(); tip.hidden ? showTip(el) : (tip.hidden = true); } }, true);
+    $('.content').addEventListener('scroll', () => { tip.hidden = true; });
+    // show settings only when the switch they depend on is on
+    function syncDeps() {
+      root.querySelectorAll('[data-when]').forEach(el => {
+        const c = root.querySelector(el.dataset.when);
+        const on = !c ? true : c.type === 'checkbox' ? c.checked : +String(c.value).replace(/[^\d.]/g, '') > 0;
+        if (el.hidden === on) el.hidden = !on;
+      });
+    }
+    buildUI.syncDeps = syncDeps;
+    root.addEventListener('change', () => requestAnimationFrame(syncDeps));
+    root.addEventListener('input', () => requestAnimationFrame(syncDeps));
+    setInterval(() => { if (panel.classList.contains('open')) syncDeps(); }, 600);
     function showTab(t) {
       if (!PAGES[t]) t = 'wall';
       root.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
@@ -3519,6 +3576,7 @@
       $('#pgTitle').textContent = PAGES[t][0];
       $('#pgSub').textContent = PAGES[t][1];
       $('.content').scrollTop = 0;
+      syncDeps();
     }
     root.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
       S.ui.tab = b.dataset.tab; save(null); showTab(b.dataset.tab); placePanel();
