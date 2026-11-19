@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.11.0
+// @version      3.12.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.11.0';
+  const VERSION = '3.12.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -78,7 +78,7 @@
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
     risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false, counter: true, counterPos: null, symOnly: '',
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
-    prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
+    prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
@@ -2394,6 +2394,23 @@
         else pendingLock = reason;
       } else pendingLock = '';
     }
+    // prop account: reaching the firm's max loss limit or daily loss limit locks you until 6 PM ET,
+    // even with the Limits lockout off. In a trade you can still close it; the lock starts once you're flat.
+    if (S.prop.on && S.prop.enforce !== false) {
+      const ps0 = propState(acctValues()), p = S.prop;
+      if (ps0.eq !== null) {
+        const buf = Math.max(0, +p.lockNear || 0);
+        const atMax = +p.dd > 0 && ps0.toFloor !== null && ps0.toFloor <= buf;
+        const dailyHit = ps0.daily > 0 && ps0.dailyUsed >= ps0.daily;
+        const preason = atMax ? (ps0.toFloor <= 0 ? `Prop max loss limit reached (${money(ps0.floor)})` : `Only ${money(ps0.toFloor).replace(/^\+/, '')} left before your prop max loss limit`)
+          : dailyHit ? `Prop daily loss limit hit (${money(-ps0.dailyUsed)} of ${money(-ps0.daily)})` : '';
+        if (preason && !lockedNow() && !unlockedToday()) {
+          if (flat && Date.now() - posCache.at > 300) { await pollPositions(); flat = openPositionQty() === 0; }
+          if (flat) setLock(preason);
+          else if (!pendingLock) pendingLock = preason;
+        }
+      }
+    }
     const L = lockedNow();
     if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
     else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. You can't add to it, and new orders lock once you're flat.` });
@@ -2412,13 +2429,13 @@
       if (ps.eq === null) out.push({ kind: 'info', text: 'Prop tracker: connect your account in TradingView to track it.' });
       else {
         const p = S.prop;
-        if (ps.toFloor !== null && ps.toFloor <= 0) out.push({ kind: 'bad', text: `Prop: below the drawdown limit (${money(ps.floor)}).` });
-        else if (ps.ddLeftPct !== null && ps.ddLeftPct < 0.25) out.push({ kind: ps.ddLeftPct < 0.1 ? 'bad' : 'warn', text: `Prop: only ${money(ps.toFloor)} left before the drawdown limit.` });
-        if (ps.daily && ps.dailyUsed >= ps.daily * 0.8) out.push({ kind: ps.dailyUsed >= ps.daily ? 'bad' : 'warn', text: `Prop: daily loss ${money(-ps.dailyUsed)} of ${money(-ps.daily)}.` });
+        const quiet = !!(lockedNow() || pendingLock);   // the lock banner already says it
+        if (quiet) {}
+        else if (ps.toFloor !== null && ps.toFloor <= 0) out.push({ kind: 'bad', text: `Prop: at the max loss limit (${money(ps.floor)}).` });
+        else if (ps.ddLeftPct !== null && ps.ddLeftPct < 0.25) out.push({ kind: ps.ddLeftPct < 0.1 ? 'bad' : 'warn', text: `Prop: only ${money(ps.toFloor).replace(/^\+/, '')} left before the max loss limit.` });
+        if (!quiet && ps.daily && ps.dailyUsed >= ps.daily * 0.8) out.push({ kind: ps.dailyUsed >= ps.daily ? 'bad' : 'warn', text: `Prop: daily loss ${money(-ps.dailyUsed)} of ${money(-ps.daily)}.` });
         if (ps.maxQty && ps.qty > ps.maxQty) out.push({ kind: 'bad', text: `Prop: ${ps.qty} contracts open, max allowed is ${ps.maxQty}.` });
         if (ps.target && ps.profit >= ps.target) out.push({ kind: 'good', text: `Prop: profit target reached (${money(ps.profit)}).` });
-        if (+p.lockNear > 0 && r.lockOn && ps.toFloor !== null && ps.toFloor <= +p.lockNear && !lockedNow() && !unlockedToday() && flat)
-          setLock(`Within ${money(+p.lockNear)} of your prop drawdown limit`);
       }
     }
     // news
@@ -3244,13 +3261,14 @@
       <div class="card">
         ${item('Track a prop account', 'Uses the account connected in TradingView.', '<input type="checkbox" id="pOn">')}
         ${item('Starting balance ($)', '', '<input type="number" id="pStart" min="0" max="10000000" step="1000">')}
-        ${item('Max drawdown ($)', '', '<input type="number" id="pDd" min="0" max="1000000" step="100">')}
-        ${item('Drawdown type', 'Check your firm\'s rules for which one applies.', '<select id="pType"><option value="eod">Trailing, end of day</option><option value="intraday">Trailing, intraday (incl. open P&amp;L)</option><option value="static">Static</option></select>')}
+        ${item('Max loss limit ($)', 'Your firm\'s max loss (drawdown) for the account.', '<input type="number" id="pDd" min="0" max="1000000" step="100">')}
+        ${item('Max loss type', 'Check your firm\'s rules for which one applies.', '<select id="pType"><option value="eod">Trailing, end of day</option><option value="intraday">Trailing, intraday (incl. open P&amp;L)</option><option value="static">Static</option></select>')}
         ${item('Trailing stops at starting balance', 'Most firms stop trailing once the limit reaches your start.', '<input type="checkbox" id="pStop">')}
-        ${item('Daily loss limit ($)', '0 = none.', '<input type="number" id="pDaily" min="0" max="1000000" step="50">')}
+        ${item('Daily loss limit ($)', 'Your firm\'s daily loss limit. 0 = none.', '<input type="number" id="pDaily" min="0" max="1000000" step="50">')}
         ${item('Profit target ($)', '', '<input type="number" id="pTarget" min="0" max="10000000" step="100">')}
         ${item('Max contracts', '0 = no limit.', '<input type="number" id="pMax" min="0" max="1000" step="1">')}
-        ${item('Lock trading this close to drawdown ($)', 'Uses the daily lockout. 0 = off.', '<input type="number" id="pLock" min="0" max="1000000" step="50">')}
+        ${item('Lock trading at these limits', 'Hitting the max loss or daily loss limit locks new orders until 6 PM ET, even with the Limits lockout off. You can always close a trade you\'re in.', '<input type="checkbox" id="pEnforce">')}
+        ${item('Stop early, with this much left ($)', 'Locks before the max loss limit. 200 = lock when $200 is left. 0 = lock right at the limit.', '<input type="number" id="pLock" min="0" max="1000000" step="50">')}
       </div>
       <div class="card"><div class="sub" id="pLive"></div></div>
       <div class="row"><button class="btn" id="pReset">Reset high-water mark to current equity</button></div>
@@ -3891,10 +3909,10 @@
     }
     buildUI.open = tab => { toggle(true); S.ui.tab = tab; showTab(tab); };
     // sec is the settings section name; always read S[sec] at the time of the change (S is replaced when another tab saves)
-    const FROZEN = new Set(['#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock', '#kSyms']);
+    const FROZEN = new Set(['#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock', '#kSyms', '#pOn', '#pDd', '#pDaily', '#pEnforce', '#pType', '#pStart', '#pStop']);
     const frozenNo = id => { if (!FROZEN.has(id) || !rulesFrozen()) return false; renderRiskInputs(); renderRiskPages(); flashBanner(); return true; };
     const bindNum = (id, sec, key) => { $(id).onchange = e => { if (frozenNo(id)) return; const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
-    const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
+    const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { if (frozenNo(id)) return; S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
     const bindChk = (id, sec, key, after) => { $(id).onchange = e => { if (frozenNo(id)) return; S[sec][key] = e.target.checked; if (after) after(); save(sec); riskTick(); renderRiskPages(); }; };
     bindChk('#kCounter', 'risk', 'counter', () => renderCounter());
     bindChk('#kOn', 'risk', 'lockOn', () => { if (S.risk.lockOn && !S.rec.on) { S.rec.on = true; recStartFresh(); save('journal'); } });
@@ -3925,7 +3943,7 @@
     $('#zStop').oninput = e => { const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S.risk.sizeStop = v; save('risk'); renderSize(); } };
     bindChk('#pOn', 'prop', 'on'); bindNum('#pStart', 'prop', 'start'); bindNum('#pDd', 'prop', 'dd');
     bindSel('#pType', 'prop', 'ddType'); bindChk('#pStop', 'prop', 'stopAtStart'); bindNum('#pDaily', 'prop', 'daily');
-    bindNum('#pTarget', 'prop', 'target'); bindNum('#pMax', 'prop', 'maxQty'); bindNum('#pLock', 'prop', 'lockNear');
+    bindNum('#pTarget', 'prop', 'target'); bindNum('#pMax', 'prop', 'maxQty'); bindNum('#pLock', 'prop', 'lockNear'); bindChk('#pEnforce', 'prop', 'enforce');
     $('#pReset').onclick = () => {
       const av = acctValues(); const st = riskLoad(); const acct = (av && av.account) || 'default';
       if (st.prop && st.prop[acct] && av && isFinite(av.equity)) { st.prop[acct].peak = av.equity; st.prop[acct].eodPeak = av.balance ?? av.equity; riskSave(st); }
@@ -3981,7 +3999,7 @@
       $('#zAtr').closest('.item').style.display = classic || r.sizeStopMode === 'manual' ? 'none' : '';
       $('#zStop').closest('.item').querySelector('.txt b').textContent = classic ? 'Stop distance' : 'My stop';
       $('#pOn').checked = !!p.on; $('#pStart').value = p.start; $('#pDd').value = p.dd; $('#pType').value = p.ddType; $('#pStop').checked = !!p.stopAtStart;
-      $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear;
+      $('#pDaily').value = p.daily; $('#pTarget').value = p.target; $('#pMax').value = p.maxQty; $('#pLock').value = p.lockNear; $('#pEnforce').checked = p.enforce !== false;
       $('#nOn').checked = !!n.on; $('#nMins').value = String(n.mins); $('#nMed').checked = !!n.medium; $('#nSound').checked = !!n.sound;
       $('#nLock').checked = !!r.newsLock; $('#nAround').value = String(n.around);
     }
@@ -4010,7 +4028,7 @@
           const left = ps.ddLeftPct ?? 0;
           pl.innerHTML = [
             meter('Equity', m(ps.eq).replace(/^\+/, ''), 1, ''),
-            meter(`Room before drawdown limit (${m(ps.floor).replace(/^\+/, '')})`, m(ps.toFloor), left, left < 0.1 ? 'bad' : left < 0.25 ? 'warn' : ''),
+            meter(`Room before max loss limit (${m(ps.floor).replace(/^\+/, '')})`, m(ps.toFloor), left, left < 0.1 ? 'bad' : left < 0.25 ? 'warn' : ''),
             ps.target ? meter(`Profit toward target (${m(ps.target)})`, m(ps.profit), ps.profit / ps.target, ps.profit >= ps.target ? '' : 'warn') : '',
             ps.daily ? meter(`Daily loss used (limit ${m(-ps.daily)})`, m(-ps.dailyUsed), ps.dailyUsed / ps.daily, ps.dailyUsed >= ps.daily ? 'bad' : ps.dailyUsed >= ps.daily * .8 ? 'warn' : '') : '',
             ps.maxQty ? meter('Contracts open', `${ps.qty} / ${ps.maxQty}`, ps.qty / ps.maxQty, ps.qty > ps.maxQty ? 'bad' : '') : ''
