@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.15.0
+// @version      3.16.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.15.0';
+  const VERSION = '3.16.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2350,12 +2350,38 @@
   }
 
   /* ---- firm presets: one pick fills in the account's rules (still editable after) ---- */
-  const PROP_PRESETS = {
-    'lucidflex-25': { name: 'Lucid Flex 25K (evaluation)', start: 25000, dd: 1000, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 1250, maxQty: 20, consistency: 50 },
-    'lucidflex-50': { name: 'Lucid Flex 50K (evaluation)', start: 50000, dd: 2000, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 3000, maxQty: 40, consistency: 50 },
-    'lucidflex-100': { name: 'Lucid Flex 100K (evaluation)', start: 100000, dd: 3000, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 6000, maxQty: 60, consistency: 50 },
-    'lucidflex-150': { name: 'Lucid Flex 150K (evaluation)', start: 150000, dd: 4500, ddType: 'eod', stopAtStart: true, stopOffset: 100, daily: 0, target: 9000, maxQty: 100, consistency: 50 }
-  };
+  // Evaluation-phase rules, from public sources (Nov 2026). maxQty is in micros (1 mini = 10 micros).
+  // [size, target, max loss, daily loss, max micros]
+  const PRESET_FIRMS = [
+    { firm: 'Lucid Trading', plans: [
+      { id: 'lucidflex', plan: 'Lucid Flex', ddType: 'eod', off: 100, cons: 50, sizes: [[25, 1250, 1000, 0, 20], [50, 3000, 2000, 0, 40], [100, 6000, 3000, 0, 60], [150, 9000, 4500, 0, 100]] },
+      { id: 'lucidpro', plan: 'Lucid Pro', ddType: 'eod', off: 100, cons: 0, sizes: [[25, 1250, 1000, 0, 20], [50, 3000, 2000, 1200, 40], [100, 6000, 3000, 1800, 60], [150, 9000, 4500, 2700, 100]] },
+      { id: 'luciddirect', plan: 'Lucid Direct (funded)', ddType: 'eod', off: 100, cons: 20, sizes: [[25, 0, 1000, 600, 0], [50, 0, 2000, 1200, 0], [100, 0, 3500, 1800, 0], [150, 0, 4500, 2700, 0]] }
+    ] },
+    { firm: 'Topstep', plans: [
+      { id: 'topstep', plan: 'Topstep Combine', ddType: 'eod', off: 0, cons: 50, sizes: [[50, 3000, 2000, 0, 50], [100, 6000, 3000, 0, 100], [150, 9000, 4500, 0, 150]] }
+    ] },
+    { firm: 'Take Profit Trader', plans: [
+      { id: 'tpt', plan: 'TPT Test', ddType: 'eod', off: 0, cons: 50, sizes: [[25, 1500, 1500, 0, 30], [50, 3000, 2000, 0, 60], [75, 4500, 2500, 0, 90], [100, 6000, 3000, 0, 120], [150, 9000, 4500, 0, 150]] }
+    ] },
+    { firm: 'MyFundedFutures', plans: [
+      { id: 'mffurapid', plan: 'MFFU Rapid', ddType: 'eod', off: 100, cons: 50, sizes: [[25, 1500, 1000, 0, 30], [50, 3000, 2000, 0, 50], [100, 6000, 3000, 0, 100], [150, 9000, 4500, 0, 150]] },
+      { id: 'mffupro', plan: 'MFFU Pro', ddType: 'eod', off: 100, cons: 50, sizes: [[50, 3000, 2000, 0, 50], [100, 6000, 3000, 0, 100], [150, 9000, 4500, 0, 150]] }
+    ] },
+    { firm: 'Tradeify', plans: [
+      { id: 'tradeifyselect', plan: 'Tradeify Select', ddType: 'eod', off: 100, cons: 40, sizes: [[25, 1500, 1000, 0, 10], [50, 3000, 2000, 0, 40], [100, 6000, 3000, 0, 80], [150, 9000, 4500, 0, 120]] },
+      { id: 'tradeifygrowth', plan: 'Tradeify Growth', ddType: 'eod', off: 100, cons: 0, sizes: [[25, 1500, 1000, 600, 10], [50, 3000, 2000, 1250, 40], [100, 6000, 3500, 2500, 80], [150, 9000, 5000, 3750, 120]] }
+    ] },
+    { firm: 'FundedNext Futures', plans: [
+      { id: 'fnlegacy', plan: 'FundedNext Legacy', ddType: 'eod', off: 0, cons: 40, sizes: [[25, 1250, 1000, 0, 0], [50, 3000, 2000, 0, 0], [100, 6000, 3000, 0, 0]] },
+      { id: 'fnrapid', plan: 'FundedNext Rapid', ddType: 'eod', off: 0, cons: 0, sizes: [[25, 1500, 1000, 0, 0], [50, 3000, 2000, 0, 0], [100, 5000, 2500, 0, 0]] }
+    ] }
+  ];
+  const PROP_PRESETS = {};
+  for (const f of PRESET_FIRMS) for (const pl of f.plans) for (const [k, target, dd, daily, maxQty] of pl.sizes)
+    PROP_PRESETS[`${pl.id}-${k}`] = { firm: f.firm, name: `${pl.plan} ${k}K`, start: k * 1000, dd, ddType: pl.ddType, stopAtStart: true, stopOffset: pl.off, daily, target, maxQty, consistency: pl.cons };
+  const presetOptions = () => '<option value="">Custom</option>' + PRESET_FIRMS.map(f =>
+    `<optgroup label="${f.firm}">${Object.entries(PROP_PRESETS).filter(([, v]) => v.firm === f.firm).map(([key, v]) => `<option value="${key}">${v.name}</option>`).join('')}</optgroup>`).join('');
   function applyPreset(key) {
     const pr = PROP_PRESETS[key];
     S.prop.preset = pr ? key : '';
@@ -3379,7 +3405,7 @@
     <section data-tab="prop">
       <div class="card">
         ${item('Track a prop account', 'Uses the account connected in TradingView.', '<input type="checkbox" id="pOn">')}
-        ${item('Firm preset', 'Fills in your account\'s rules.', '<select id="pPreset"><option value="">Custom</option><optgroup label="Lucid Trading"><option value="lucidflex-25">Lucid Flex 25K</option><option value="lucidflex-50">Lucid Flex 50K</option><option value="lucidflex-100">Lucid Flex 100K</option><option value="lucidflex-150">Lucid Flex 150K</option></optgroup></select>', 'Evaluation rules: profit target, max loss limit (end of day, stops trailing at your start + $100), no daily loss limit, 50% consistency, max contracts in micros (4 minis = 40 micros on the 50K). You can still change any field after. Firms change rules, so check your dashboard.')}
+        ${item('Firm preset', 'Fills in your account\'s rules.', `<select id="pPreset">${presetOptions()}</select>`, 'Evaluation rules for Lucid, Topstep, Take Profit Trader, MyFundedFutures, Tradeify and FundedNext: profit target, max loss limit and how it trails, daily loss limit, consistency and max contracts (in micros). Every field stays editable. Firms change rules often, so check your dashboard.')}
       </div>
       ${dep('#pOn', `
         <div class="card"><div class="sub" id="pLive"></div></div>
@@ -4192,6 +4218,8 @@
       const usd = v => hide ? '•••••' : '$' + Math.round(v).toLocaleString();
       const pc = v => Math.round(v * 100) + '%';
       const rows = [];
+      if (ps && ps.bal !== null && ps.bal !== undefined && +p.start > 0 && Math.abs(ps.bal - +p.start) > Math.max(+p.dd || 0, +p.start * 0.1) * 1.5)
+        rows.push(`<div class="plan-warn">Your connected account (${usd(ps.bal)}) doesn't look like a ${usd(+p.start)} account. Pick the right size above, or select the matching account in TradingView's trading panel.</div>`);
       if (ps && ps.eq !== null) {
         rows.push(meter('Profit (closed)', usd(cp.profit), cp.need ? Math.max(0, cp.profit) / cp.need : 0, cp.ok ? '' : 'warn'));
         rows.push(`<div class="kv"><span>Best day</span><b>${cp.best > 0 || cp.todayP > 0 ? usd(Math.max(cp.best, cp.todayP)) : 'none yet'}${cp.pct !== null ? ` · ${pc(cp.pct)} of profit (rule ${pc(cp.C)})` : ''}</b></div>`);
