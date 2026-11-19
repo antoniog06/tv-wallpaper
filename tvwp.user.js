@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.9.0
+// @version      3.10.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.9.0';
+  const VERSION = '3.10.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -76,7 +76,7 @@
       volume: true
     },
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
-    risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false,
+    risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false, counter: true, counterPos: null,
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
@@ -2104,6 +2104,7 @@
       document.documentElement.appendChild(st);
     } else if (!on && st) st.remove();
     renderBanners();
+    renderCounter();
   }
   // Backup for anything the CSS doesn't cover: Buy/Sell items in menus and order dialogs.
   function blockClick(e) {
@@ -2417,6 +2418,32 @@
       }
       box.appendChild(d);
     }
+  }
+  /* ---- trade counter on the chart: "Trades ●●○ 2 / 3" (amber on your last trade, red when you're done) ---- */
+  let counterKey = '';
+  function renderCounter() {
+    const el = buildUI.counterEl;
+    if (!el) return;
+    const r = S.risk, max = +r.maxTrades || 0;
+    const show = r.counter !== false && max > 0 && (!S.extras.allOff || r.lockOn);
+    if (!show) { if (!el.hidden) el.hidden = true; counterKey = ''; return; }
+    let open = 0;
+    try { open = Object.keys(recLoad().open || {}).length; } catch (e) {}
+    const closed = day.day === tradingDay(Date.now()) ? day.trades : 0;
+    const inTrade = open > 0 && openPositionQty() > 0;
+    const used = closed + (inTrade ? 1 : 0);
+    const early = unlockedToday();
+    const state = !recActive() ? 'off' : closed >= max ? 'done' : inTrade && used >= max ? 'last' : closed === max - 1 && !inTrade ? 'onelft' : 'ok';
+    const note = state === 'off' ? 'turn on Journal recording to count'
+      : state === 'done' ? (early ? 'unlocked early' : (r.lockOn ? 'done for today' : 'max reached'))
+      : state === 'last' ? 'last trade' : state === 'onelft' ? '1 left' : '';
+    const key = [closed, inTrade, max, state, note].join('|');
+    if (key === counterKey && !el.hidden) return;
+    counterKey = key; el.hidden = false;
+    el.className = 'counter ' + state;
+    const dots = max <= 10 ? Array.from({ length: max }, (_, i) => `<i class="${i < closed ? 'f' : i === closed && inTrade ? 'o' : ''}"></i>`).join('') : '';
+    el.innerHTML = `<b>Trades</b>${dots ? `<span class="dots">${dots}</span>` : ''}<span class="n">${Math.min(closed, 999)} / ${max}</span>${note ? `<span class="note">${note}</span>` : ''}`;
+    el.title = `${closed} closed today${inTrade ? ', 1 open' : ''}, max ${max}. Drag to move. Change in Limits.`;
   }
   function flashBanner() {
     const box = buildUI.bannerBox;
@@ -2835,6 +2862,21 @@
   #kPhraseBox[hidden], #kUnlock[hidden], #kFrozen[hidden] { display: none !important; }
   .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
+  .counter { position: fixed; z-index: 2147482998; display: flex; align-items: center; gap: 8px; padding: 5px 11px; border-radius: 999px; cursor: grab; user-select: none; touch-action: none;
+    font: 600 12px/1 Inter, -apple-system, system-ui, sans-serif; color: #e6e8ee; background: rgba(24,27,36,.88); border: 1px solid #343949; box-shadow: 0 4px 14px rgba(0,0,0,.35); backdrop-filter: blur(6px); }
+  .counter[hidden] { display: none; }
+  .counter:active { cursor: grabbing; }
+  .counter b { font-weight: 600; color: #9aa1b2; letter-spacing: .02em; }
+  .counter .dots { display: flex; gap: 4px; }
+  .counter .dots i { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid #5b6274; box-sizing: border-box; }
+  .counter .dots i.f { background: #8b93a7; border-color: #8b93a7; }
+  .counter .dots i.o { border-color: #22c39a; background: #22c39a; animation: blink 1.2s infinite; }
+  .counter .n { font-variant-numeric: tabular-nums; }
+  .counter .note { font-size: 11px; padding: 2px 7px; border-radius: 999px; background: rgba(255,255,255,.08); }
+  .counter.onelft .note { background: rgba(245,165,36,.18); color: #f5c35e; }
+  .counter.last { border-color: #f5a524; } .counter.last .note { background: #f5a524; color: #1a1300; } .counter.last .dots i.o { border-color: #f5a524; background: #f5a524; }
+  .counter.done { border-color: #f2495c; } .counter.done .dots i.f { background: #f2495c; border-color: #f2495c; } .counter.done .note { background: #f2495c; color: #fff; }
+  .counter.off { opacity: .7; }
   .banners { position: fixed; top: 46px; left: 50%; transform: translateX(-50%); z-index: 2147482999; display: grid; gap: 6px; justify-items: center; pointer-events: none; max-width: 92vw; }
   .bn { pointer-events: auto; display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 10px; font: 600 12.5px/1.3 Inter, -apple-system, system-ui, sans-serif;
     color: #fff; background: rgba(28,31,40,.94); border: 1px solid #343949; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
@@ -2934,6 +2976,7 @@
   const HTML = `
   <button class="fab" title="Wick (Alt+Shift+W)">${ICON.logo}</button>
   <div class="banners" id="banners"></div>
+  <div class="counter" id="tradeCounter" hidden></div>
   <div class="panel">
     <aside>
       <div class="brand"><span class="logo">${ICON.logo}</span><span style="flex:1">Wick</span>
@@ -3054,6 +3097,7 @@
         ${item('Daily lockout', 'When a limit is hit, TradingView turns down every new order (buttons, order panel, price ladder, right-click menus, hotkeys) until the next session at 6 PM ET.', '<input type="checkbox" id="kOn">')}
         ${item('Max daily loss ($)', 'Counts closed trades today plus your open P&L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
         ${item('Max trades per day', 'Once your last trade closes (win or loss), you\'re locked until 6 PM ET. During that last trade you can manage it, but not open another market. 0 = no limit.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
+        ${item('Trade counter on chart', 'Shows how many of your max trades you\'ve used today. Amber on your last trade, red when you\'re done. Drag it anywhere.', '<input type="checkbox" id="kCounter">')}
         ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}
         ${item('Warn me at (% of the loss limit)', 'A yellow warning shows on the chart first.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}
       </div>
@@ -3709,6 +3753,33 @@
     renderStreamUI();
     /* ---- risk pages ---- */
     buildUI.bannerBox = $('#banners');
+    buildUI.counterEl = $('#tradeCounter');
+    {
+      const el = buildUI.counterEl;
+      const place = () => {
+        const p = S.risk.counterPos;
+        if (p && isFinite(p.x) && isFinite(p.y)) {
+          el.style.left = Math.round(Math.min(Math.max(0, p.x), 1) * (innerWidth - el.offsetWidth)) + 'px';
+          el.style.top = Math.round(Math.min(Math.max(0, p.y), 1) * (innerHeight - el.offsetHeight)) + 'px';
+          el.style.right = 'auto';
+        } else { el.style.left = 'auto'; el.style.right = '90px'; el.style.top = '50px'; }
+      };
+      place(); addEventListener('resize', place);
+      let drag = null;
+      el.addEventListener('pointerdown', e => { const b = el.getBoundingClientRect(); drag = { dx: e.clientX - b.left, dy: e.clientY - b.top }; el.setPointerCapture(e.pointerId); e.preventDefault(); });
+      el.addEventListener('pointermove', e => {
+        if (!drag) return;
+        const x = Math.min(Math.max(0, e.clientX - drag.dx), innerWidth - el.offsetWidth), y = Math.min(Math.max(0, e.clientY - drag.dy), innerHeight - el.offsetHeight);
+        el.style.left = x + 'px'; el.style.top = y + 'px'; el.style.right = 'auto';
+      });
+      el.addEventListener('pointerup', () => {
+        if (!drag) return; drag = null;
+        const b = el.getBoundingClientRect();
+        S.risk.counterPos = { x: b.left / Math.max(1, innerWidth - b.width), y: b.top / Math.max(1, innerHeight - b.height) };
+        save('risk');
+      });
+      new ResizeObserver(() => { if (S.risk.counterPos) place(); }).observe(el);
+    }
     buildUI.open = tab => { toggle(true); S.ui.tab = tab; showTab(tab); };
     // sec is the settings section name; always read S[sec] at the time of the change (S is replaced when another tab saves)
     const FROZEN = new Set(['#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock']);
@@ -3716,6 +3787,7 @@
     const bindNum = (id, sec, key) => { $(id).onchange = e => { if (frozenNo(id)) return; const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
     const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
     const bindChk = (id, sec, key, after) => { $(id).onchange = e => { if (frozenNo(id)) return; S[sec][key] = e.target.checked; if (after) after(); save(sec); riskTick(); renderRiskPages(); }; };
+    bindChk('#kCounter', 'risk', 'counter', () => renderCounter());
     bindChk('#kOn', 'risk', 'lockOn', () => { if (S.risk.lockOn && !S.rec.on) { S.rec.on = true; recStartFresh(); save('journal'); } });
     bindNum('#kLoss', 'risk', 'maxLoss'); bindNum('#kTrades', 'risk', 'maxTrades'); bindNum('#kProfit', 'risk', 'profitLock');
     bindSel('#kWarn', 'risk', 'warnPct', true);
@@ -3774,7 +3846,7 @@
     $('#kCancel').onclick = unlockReset;
     function renderRiskInputs() {
       const r = S.risk, p = S.prop, n = S.news;
-      $('#kOn').checked = !!r.lockOn; $('#kLoss').value = r.maxLoss; $('#kTrades').value = r.maxTrades; $('#kProfit').value = r.profitLock; $('#kWarn').value = String(r.warnPct);
+      $('#kOn').checked = !!r.lockOn; $('#kLoss').value = r.maxLoss; $('#kTrades').value = r.maxTrades; $('#kCounter').checked = r.counter !== false; $('#kProfit').value = r.profitLock; $('#kWarn').value = String(r.warnPct);
       $('#zSym').value = r.sizeSym || ''; $('#zMode').value = r.sizeMode; $('#zRisk').value = r.sizeMode === 'pct' ? r.sizePct : r.sizeRisk; $('#zStop').value = r.sizeStop; $('#zUnit').value = r.sizeUnit;
       $('#zStopMode').value = r.sizeStopMode || 'auto'; $('#zAtr').value = String(r.sizeAtr || 1);
       $('#zUnitSym').textContent = r.sizeMode === 'pct' ? '%' : '$';
