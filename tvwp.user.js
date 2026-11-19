@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.10.1
+// @version      3.11.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.10.1';
+  const VERSION = '3.11.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -76,7 +76,7 @@
       volume: true
     },
     rec: { on: false, video: false, quality: '720', keep: 25, folderOn: false, folderName: '' },
-    risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false, counter: true, counterPos: null,
+    risk: { lockOn: false, maxLoss: 500, maxTrades: 0, profitLock: 0, warnPct: 80, newsLock: false, counter: true, counterPos: null, symOnly: '',
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0 },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
@@ -2094,8 +2094,33 @@
     [data-name="buy-order-button"], [data-name="sell-order-button"], [data-name="order-panel"], [class*="tv-dom-panel"],
     [class*="sellBuyButtonsContainer-"] { pointer-events: none !important; opacity: .28 !important; filter: grayscale(1) !important; }`;
   function blocking() { return (!!lockedNow() || (!!newsBlock && !S.extras.allOff)) && openPositionQty() === 0; }
+
+  /* ---- trading symbols: only the markets you list can be traded (e.g. MNQ while you chart NQ). Closing always works. ---- */
+  function symList() {
+    return String(S.risk.symOnly || '').split(/[\s,;]+/).map(x => symRoot(x.replace(/[^A-Za-z0-9:!]/g, ''))).filter(Boolean);
+  }
+  function symAllowed(sym) { const l = symList(); return !l.length || !sym || l.includes(symRoot(sym)); }
+  function chartSymbol() { try { return window.TradingViewApi.activeChart().symbol() || ''; } catch (e) { return ''; } }
+  function posList() { const fresh = posCache.ok && Date.now() - posCache.at < 6000; return fresh ? posCache.list : (brk.positions || []); }
+  function chartSymBlocked() {
+    const cs = chartSymbol();
+    if (!cs || symAllowed(cs)) return false;
+    return !posList().some(p => p && symRoot(p.symbol) === symRoot(cs) && Math.abs(+p.qty || 0) > 0);   // in that market? keep the panel so you can exit
+  }
+  // The micro you'd trade instead of the chart's market (NQ -> MNQ), if it's on your list.
+  function symSwap(cs) {
+    const root = symRoot(cs), l = symList();
+    const alt = MICRO_OF[root] && l.includes(MICRO_OF[root]) ? MICRO_OF[root] : l.length === 1 ? l[0] : '';
+    if (!alt) return '';
+    const [ex, tk] = cs.includes(':') ? cs.split(':') : ['', cs];
+    const nt = tk.toUpperCase().startsWith(root) ? alt + tk.slice(root.length) : alt + '1!';
+    const nex = ex && (MICRO_OF[root] === alt || MINI_OF[alt] === root) ? ex : '';
+    return (nex ? nex + ':' : '') + nt;
+  }
+  let symNotice = 0;
+  function noteBlockedSymbol() { symNotice = Date.now() + 9000; flashBanner(); riskTick(); }
   function applyLock() {
-    const on = blocking();
+    const on = blocking() || chartSymBlocked();
     let st = document.getElementById('tvwp-lock');
     if (on && !st && document.documentElement) {
       st = document.createElement('style');
@@ -2108,14 +2133,15 @@
   }
   // Backup for anything the CSS doesn't cover: Buy/Sell items in menus and order dialogs.
   function blockClick(e) {
-    if (!blocking()) return;
+    const symBlock = !blocking() && chartSymBlocked();
+    if (!blocking() && !symBlock) return;
     const el = e.target && e.target.closest && e.target.closest('[role="menuitem"], button, [role="button"], [data-name]');
     if (!el || el.closest('#tvwp-host')) return;
     const txt = (el.textContent || '').trim();
     const dn = el.getAttribute('data-name') || '';
     if (/^(buy|sell)\b/i.test(txt) || /^(place|submit)\s+(order|buy|sell)/i.test(txt) || /order-button|order-panel|place-order/i.test(dn)) {
       e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
-      flashBanner();
+      if (symBlock) noteBlockedSymbol(); else flashBanner();
     }
   }
   for (const ev of ['pointerdown', 'mousedown', 'click']) window.addEventListener(ev, blockClick, true);
@@ -2152,6 +2178,23 @@
     const dir = p.side === -1 || +p.qty < 0 ? -1 : 1;
     return +o.side !== dir;                                               // same side = adding to the trade
   }
+  function symbolOk(method, o) {
+    if (!symList().length) return true;
+    if (method === 'reversePosition') {
+      const p = posList().find(x => x && (x.id === o || x.id === (o && o.id)));
+      return !p || symAllowed(p.symbol);
+    }
+    o = o || {};
+    if (symAllowed(o.symbol)) return true;
+    // another market: only orders that shrink or close a position you already have in it
+    const p = posList().find(x => x && symRoot(x.symbol) === symRoot(o.symbol) && Math.abs(+x.qty || 0) > 0);
+    if (!p) return false;
+    const dir = p.side === -1 || +p.qty < 0 ? -1 : 1;
+    return +o.side === -dir && Math.abs(+o.qty || 0) <= Math.abs(+p.qty || 0);
+  }
+  function symMsg(o) {
+    return `Wick: you only trade ${symList().join(', ')}. ${symRoot((o && o.symbol) || chartSymbol()) || 'This market'} orders are turned down (closing a position always works).`;
+  }
   function guardMsg() {
     const L = lockedNow();
     if (!L && !pendingLock && !newsBlock && lastTradeUsed()) return `Wick: that would go past your max of ${S.risk.maxTrades} trades for today. You can still manage or close the trade you're in.`;
@@ -2165,10 +2208,16 @@
         const orig = b[m];
         if (typeof orig !== 'function') continue;
         b[m] = function (...args) {
-          if (!S.risk.lockOn && !entryBlocked()) return orig.apply(this, args);
-          // limits are on: re-check them right now (positions from the broker, today's trades from the journal), then decide
+          const symRule = symList().length > 0;
+          if (!S.risk.lockOn && !entryBlocked() && !(symRule && !(m === 'placeOrder' && symAllowed((args[0] || {}).symbol)))) return orig.apply(this, args);
+          // a rule applies: re-check it right now (positions from the broker, today's trades from the journal), then decide
           journalDirty = true; posCache.at = 0;
-          return riskTick().catch(() => {}).then(() => {
+          return (S.risk.lockOn ? riskTick() : pollPositions()).catch(() => {}).then(() => {
+            if (!symbolOk(m, args[0])) {
+              noteBlockedSymbol();
+              console.warn('[Wick] order turned down: not one of your trading symbols');
+              throw new Error(symMsg(args[0]));
+            }
             if (!orderAllowed(m, args[0])) {
               flashBanner();
               console.warn('[Wick] order turned down by the lockout');
@@ -2348,6 +2397,10 @@
     const L = lockedNow();
     if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
     else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. You can't add to it, and new orders lock once you're flat.` });
+    if (symNotice > Date.now() && chartSymBlocked()) {
+      const cs = chartSymbol(), sw = symSwap(cs);
+      out.push({ kind: 'warn', act: sw ? 'swap' : '', swap: sw, text: `You're on ${symRoot(cs)}. You only trade ${symList().join(', ')}.` });
+    }
     if (r.lockOn && S.rec.folderOn && folder.status === 'needs') out.push({ kind: 'info', act: 'folder', text: 'Allow access to your Journal folder so the lockout stays in step with the desktop app.' });
     if (r.lockOn && !L && !pendingLock) {
       if (+r.maxLoss > 0 && day.pnl <= -Math.abs(+r.maxLoss) * (+r.warnPct || 80) / 100)
@@ -2408,6 +2461,12 @@
         const u = document.createElement('button');
         u.textContent = 'Unlock early';
         u.onclick = () => { S.ui.tab = 'risk'; buildUI.open && buildUI.open('risk'); };
+        d.appendChild(u);
+      }
+      if (b.act === 'swap' && b.swap) {
+        const u = document.createElement('button');
+        u.textContent = `Switch to ${symRoot(b.swap)}`;
+        u.onclick = () => { try { window.TradingViewApi.activeChart().setSymbol(b.swap); } catch (e) {} symNotice = 0; setTimeout(riskTick, 600); };
         d.appendChild(u);
       }
       if (b.act === 'folder') {
@@ -3145,6 +3204,7 @@
         ${item('Daily lockout', 'When a limit is hit, TradingView turns down every new order (buttons, order panel, price ladder, right-click menus, hotkeys) until the next session at 6 PM ET.', '<input type="checkbox" id="kOn">')}
         ${item('Max daily loss ($)', 'Counts closed trades today plus your open P&L.', '<input type="number" id="kLoss" min="0" max="1000000" step="50">')}
         ${item('Max trades per day', 'Once your last trade closes (win or loss), you\'re locked until 6 PM ET. During that last trade you can manage it, but not open another market. 0 = no limit.', '<input type="number" id="kTrades" min="0" max="100" step="1">')}
+        ${item('Trading symbols', 'Only these markets can be traded, e.g. <b>MNQ, MGC</b>. Orders on anything else (like NQ while you chart it) are turned down, with a one-click switch to your micro. Closing a position always works. Leave empty to allow all.', '<input type="text" id="kSyms" placeholder="All" autocomplete="off" spellcheck="false" style="width:120px;text-transform:uppercase">')}
         ${item('Trade counter on chart', 'Shows how many of your max trades you\'ve used today. It turns amber with 2 left, red with 1 left, pulses (with a red screen edge) on your last trade, and locks when you\'re done. Drag it anywhere.', '<input type="checkbox" id="kCounter">')}
         ${item('Stop after a profit of ($)', 'Lock in a good day. 0 = off.', '<input type="number" id="kProfit" min="0" max="1000000" step="50">')}
         ${item('Warn me at (% of the loss limit)', 'A yellow warning shows on the chart first.', '<select id="kWarn"><option value="50">50%</option><option value="70">70%</option><option value="80">80%</option><option value="90">90%</option></select>')}
@@ -3831,13 +3891,18 @@
     }
     buildUI.open = tab => { toggle(true); S.ui.tab = tab; showTab(tab); };
     // sec is the settings section name; always read S[sec] at the time of the change (S is replaced when another tab saves)
-    const FROZEN = new Set(['#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock']);
+    const FROZEN = new Set(['#kOn', '#kLoss', '#kTrades', '#kProfit', '#pLock', '#kSyms']);
     const frozenNo = id => { if (!FROZEN.has(id) || !rulesFrozen()) return false; renderRiskInputs(); renderRiskPages(); flashBanner(); return true; };
     const bindNum = (id, sec, key) => { $(id).onchange = e => { if (frozenNo(id)) return; const v = parseFloat(e.target.value); if (isFinite(v) && v >= 0) { S[sec][key] = v; save(sec); } else e.target.value = S[sec][key]; riskTick(); renderRiskPages(); }; };
     const bindSel = (id, sec, key, numeric) => { $(id).onchange = e => { S[sec][key] = numeric ? +e.target.value : e.target.value; save(sec); riskTick(); renderRiskPages(); if (sec === 'risk') renderRiskInputs(); }; };
     const bindChk = (id, sec, key, after) => { $(id).onchange = e => { if (frozenNo(id)) return; S[sec][key] = e.target.checked; if (after) after(); save(sec); riskTick(); renderRiskPages(); }; };
     bindChk('#kCounter', 'risk', 'counter', () => renderCounter());
     bindChk('#kOn', 'risk', 'lockOn', () => { if (S.risk.lockOn && !S.rec.on) { S.rec.on = true; recStartFresh(); save('journal'); } });
+    $('#kSyms').onchange = e => {
+      if (frozenNo('#kSyms')) return;
+      S.risk.symOnly = [...new Set(String(e.target.value).split(/[\s,;]+/).map(x => symRoot(x.replace(/[^A-Za-z0-9:!]/g, ''))).filter(Boolean))].join(', ');
+      e.target.value = S.risk.symOnly; save('risk'); riskTick();
+    };
     bindNum('#kLoss', 'risk', 'maxLoss'); bindNum('#kTrades', 'risk', 'maxTrades'); bindNum('#kProfit', 'risk', 'profitLock');
     bindSel('#kWarn', 'risk', 'warnPct', true);
     $('#zSym').innerHTML = '<option value="">Chart symbol (auto)</option>' + Object.keys(FUTURES).map(k => `<option value="${k}">${k}</option>`).join('');
@@ -3895,7 +3960,7 @@
     $('#kCancel').onclick = unlockReset;
     function renderRiskInputs() {
       const r = S.risk, p = S.prop, n = S.news;
-      $('#kOn').checked = !!r.lockOn; $('#kLoss').value = r.maxLoss; $('#kTrades').value = r.maxTrades; $('#kCounter').checked = r.counter !== false; $('#kProfit').value = r.profitLock; $('#kWarn').value = String(r.warnPct);
+      $('#kOn').checked = !!r.lockOn; $('#kLoss').value = r.maxLoss; $('#kTrades').value = r.maxTrades; $('#kCounter').checked = r.counter !== false; if ($('#kSyms').getRootNode().activeElement !== $('#kSyms')) $('#kSyms').value = r.symOnly || ''; $('#kProfit').value = r.profitLock; $('#kWarn').value = String(r.warnPct);
       $('#zSym').value = r.sizeSym || ''; $('#zMode').value = r.sizeMode; $('#zRisk').value = r.sizeMode === 'pct' ? r.sizePct : r.sizeRisk; $('#zStop').value = r.sizeStop; $('#zUnit').value = r.sizeUnit;
       $('#zStopMode').value = r.sizeStopMode || 'auto'; $('#zAtr').value = String(r.sizeAtr || 1);
       $('#zUnitSym').textContent = r.sizeMode === 'pct' ? '%' : '$';
