@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.16.0
+// @version      3.16.1
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.16.0';
+  const VERSION = '3.16.1';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2528,7 +2528,7 @@
     // prop rules
     if (S.prop.on && !S.extras.allOff) {
       const ps = propState(acctValues());
-      if (ps.eq === null) out.push({ kind: 'info', text: 'Prop tracker: connect your account in TradingView to track it.' });
+      if (ps.eq === null) { /* not connected: shown on the Prop tracker page only, not on the chart */ }
       else {
         const p = S.prop;
         const quiet = !!(lockedNow() || pendingLock);   // the lock banner already says it
@@ -3139,8 +3139,8 @@
   .edge.on { opacity: 1; animation: edgepulse 2.2s ease-in-out infinite; }
   @keyframes edgepulse { 50% { opacity: .45; } }
   @media (prefers-reduced-motion: reduce) { .counter, .edge.on, .counter .tc-bar i.o { animation: none !important; } }
-  .banners { position: fixed; top: 46px; left: 50%; transform: translateX(-50%); z-index: 2147482999; display: grid; gap: 6px; justify-items: center; pointer-events: none; max-width: 92vw; }
-  .bn { pointer-events: auto; display: flex; align-items: center; gap: 10px; padding: 8px 14px; border-radius: 10px; font: 600 12.5px/1.3 Inter, -apple-system, system-ui, sans-serif;
+  .banners { position: fixed; top: 46px; left: 0; right: 0; margin: 0 auto; width: max-content; max-width: min(640px, calc(100vw - 24px)); z-index: 2147482999; display: grid; gap: 6px; justify-items: center; pointer-events: none; }
+  .bn { pointer-events: auto; display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; box-sizing: border-box; text-wrap: pretty; padding: 8px 14px; border-radius: 10px; font: 600 12.5px/1.3 Inter, -apple-system, system-ui, sans-serif;
     color: #fff; background: rgba(28,31,40,.94); border: 1px solid #343949; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
   .bn.warn { background: rgba(245,165,36,.95); border-color: #f5a524; color: #1a1300; }
   .bn.bad { background: rgba(242,73,92,.95); border-color: #f2495c; }
