@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.16.1
+// @version      3.17.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.16.1';
+  const VERSION = '3.17.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -80,7 +80,7 @@
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false, stopOffset: 0, preset: '' },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
-    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
+    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
@@ -151,6 +151,19 @@
   // Money amounts: "+125.00 USD", "-$40", "1,250.50 €" (prices on the axis have no currency, so they stay)
   const MONEY_RE = /[+−\-]?\s?(?:[$€£¥]\s?[\d.,]*\d[KMB]?|[\d.,]*\d[KMB]?\s?(?:USD|EUR|GBP|JPY|AUD|CAD|CHF|USDT|USDC|[$€£¥]|ticks?\b|pips?\b|points?\b|pts\b))/;
   const MONEY_RE_G = new RegExp(MONEY_RE.source, 'g');
+  // Cash only (no ticks/points): what the chart hides in Streamer mode unless "hide ticks too" is on
+  const CASH_RE = /[+−\-]?\s?(?:[$€£¥]\s?[\d.,]*\d[KMB]?|[\d.,]*\d[KMB]?\s?(?:USD|EUR|GBP|JPY|AUD|CAD|CHF|USDT|USDC|[$€£¥]))/;
+  const CASH_RE_G = new RegExp(CASH_RE.source, 'g');
+  // Contract counts of your open positions and working orders, so the chart can hide them on position/order lines
+  let QTY_SET = new Set();
+  const paneCache = new WeakMap();
+  function onPane(ctx) {           // the chart area, not the price or time axis
+    const c = ctx && ctx.canvas;
+    if (!c || typeof c.closest !== 'function') return false;
+    let v = paneCache.get(c);
+    if (v === undefined) { v = !c.closest('[class*="price-axis"], [class*="time-axis"], [class*="priceAxis"], [class*="timeAxis"]'); paneCache.set(c, v); }
+    return v;
+  }
   const DEFAULT_UP = ['#089981', '#26a69a', '#22ab94'];
   const DEFAULT_DOWN = ['#f23645', '#ef5350', '#f7525f'];
   let lookup = null;           // Map "r,g,b" -> { t: [r,g,b,a], srcA }
@@ -219,8 +232,17 @@
       const rawSet = setters[prop];
       if (!draw || !rawSet) continue;
       C.prototype[fn] = function (...args) {
-        if (!S.extras.allOff && S.extras.streamer && S.extras.streamerChart && typeof args[0] === 'string' && MONEY_RE.test(args[0])) {
-          args[0] = args[0].replace(MONEY_RE_G, '•••••');
+        if (!S.extras.allOff && typeof args[0] === 'string') {
+          const sc = S.extras.streamer && S.extras.streamerChart;
+          if (sc) {
+            const ticks = !!S.extras.streamerTicks;
+            if ((ticks ? MONEY_RE : CASH_RE).test(args[0])) args[0] = args[0].replace(ticks ? MONEY_RE_G : CASH_RE_G, '•••••');
+          }
+          // contract count on position / order lines (a bare number equal to one of your open sizes)
+          if ((sc || S.extras.hideQty) && QTY_SET.size && args[0].length <= 8) {
+            const n = args[0].replace(/[\s+\-−,]/g, '');
+            if (/^\d+(?:\.\d+)?$/.test(n) && QTY_SET.has(String(+n)) && onPane(this)) args[0] = '•';
+          }
         }
         const o = lookup && original[prop].get(this);
         if (typeof o !== 'string' || translate(o) === o) return draw.apply(this, args);
@@ -953,8 +975,17 @@
       if (ok) list = ((await b.positions()) || []).filter(p => p && +p.qty);
     } catch (e) { ok = false; }
     posCache = { at: Date.now(), list, ok };
+    if (S.extras.hideQty || (S.extras.streamer && S.extras.streamerChart)) {
+      const q = new Set(list.map(p => String(Math.abs(+p.qty))));
+      try {
+        if (ok && typeof b.orders === 'function')
+          for (const o of (await b.orders()) || []) if (o && [3, 4, 6].includes(+o.status) && +o.qty) q.add(String(Math.abs(+o.qty)));
+      } catch (e) {}
+      QTY_SET = q;
+    } else if (QTY_SET.size) QTY_SET = new Set();
     return posCache;
   }
+  setInterval(() => { if (!S.extras.allOff && (S.extras.hideQty || (S.extras.streamer && S.extras.streamerChart)) && Date.now() - posCache.at > 1200) pollPositions(); }, 1500);
   async function recReconcile() {
     if (!recActive() || pageClosing) return;
     const pc = await pollPositions();
@@ -3457,10 +3488,12 @@
     <section data-tab="stream">
       <div class="card">
         ${item('Streamer mode', 'Hide P&L, balance, equity and margin. Shortcut: <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd>', '<input type="checkbox" id="xStream">')}
-        ${item('Also on the chart', 'Mask P&L on position lines and brackets.', '<input type="checkbox" id="xStreamChart">')}
+        ${item('Also on the chart', 'Mask P&amp;L and contract counts on your lines.', '<input type="checkbox" id="xStreamChart">')}
+        ${dep('#xStreamChart', item('Hide ticks and points too', 'Off = ticks stay visible.', '<input type="checkbox" id="xStreamTicks">'))}
+        ${item('Hide contract count', 'On position and order lines. Ticks stay.', '<input type="checkbox" id="xHideQty">', 'Hides how many contracts you have open on the chart\'s position and order lines, even with Streamer mode off. P&amp;L in ticks or money stays as it is.')}
         ${item('Style', '', '<select id="xStreamStyle"><option value="blur">Blur</option><option value="hide">Cover completely</option></select>')}
       </div>
-      <div class="hint">Covers the account panel, money columns in your history tables, and any amount with a currency, ticks, pips or points. Prices and symbols stay visible.</div>
+      <div class="hint">Covers the account panel, money columns in your history tables, and amounts on the chart. Prices and symbols stay visible.</div>
     </section>
 
     <section data-tab="extras">
@@ -4045,7 +4078,9 @@
     };
 
     $('#xStream').onchange = e => { S.extras.streamer = e.target.checked; save('extras'); applyStreamer(); };
-    $('#xStreamChart').onchange = e => { S.extras.streamerChart = e.target.checked; save('extras'); applyStreamer(); };
+    $('#xStreamChart').onchange = e => { S.extras.streamerChart = e.target.checked; save('extras'); applyStreamer(); pollPositions(); };
+    $('#xStreamTicks').onchange = e => { S.extras.streamerTicks = e.target.checked; save('extras'); applyStreamer(); };
+    $('#xHideQty').onchange = e => { S.extras.hideQty = e.target.checked; save('extras'); pollPositions().then(applyStreamer); };
     $('#xStreamStyle').onchange = e => { S.extras.streamerStyle = e.target.value; save('extras'); applyStreamer(); };
     $('#xBrk').onchange = e => { S.extras.brk = e.target.checked; save('extras'); brkPoll(); brkKick(); };
     $('#xBrkMode').onchange = e => { S.extras.brkMode = e.target.value; save('extras'); brkKick(); };
@@ -4059,6 +4094,7 @@
       $('#xBrkRight').value = S.extras.brkRight ?? 300;
       $('#xStream').checked = !!S.extras.streamer;
       $('#xStreamChart').checked = S.extras.streamerChart !== false;
+      $('#xStreamTicks').checked = !!S.extras.streamerTicks; $('#xHideQty').checked = !!S.extras.hideQty;
       $('#xStreamStyle').value = S.extras.streamerStyle || 'blur';
       fab.classList.toggle('live', !!S.extras.streamer);
     }
