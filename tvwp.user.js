@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.19.0
+// @version      3.20.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.19.0';
+  const VERSION = '3.20.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -69,7 +69,7 @@
    * Settings (localStorage, synced across tabs)
    * ======================================================= */
   const DEFAULTS = {
-    wall: { enabled: true, opacity: 0.55, blend: 'lighten', fit: 'cover', currentId: null },
+    wall: { enabled: true, opacity: 0.55, blend: 'lighten', fit: 'cover', currentId: null, zoom: 1, posX: 0.5, posY: 0.5, dim: 0, blur: 0, perPanel: {}, used: {} },
     candles: {
       enabled: false, up: '#00ff9c', upA: 1, down: '#ff2e88', downA: 1,
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
@@ -2748,21 +2748,23 @@
       const src = await decode(wp.blob);
       if (token !== loadToken) { dispose(src); return; }
       setSource(src, id);
+      S.wall.used = S.wall.used || {}; S.wall.used[id] = Date.now();
+      syncPanelSources();
     } catch (e) {
       console.warn('[Wick] could not load wallpaper', e);
       setSource(null, null);
     }
   }
 
-  async function runAnimation(src, token) {
+  async function runAnimation(src, token, live = () => animToken) {
     let i = 0;
-    while (token === animToken) {
+    while (token === live()) {
       if (document.hidden || !S.wall.enabled || !document.querySelector('canvas.' + LAYER)) { await sleep(300); continue; }
       const t0 = performance.now();
       let image;
       try { ({ image } = await src.decoder.decode({ frameIndex: i })); }
       catch (e) { i = 0; await sleep(100); continue; }
-      if (token !== animToken) { image.close(); return; }
+      if (token !== live()) { image.close(); return; }
       if (src.frame) src.frame.close();
       src.frame = image;
       document.querySelectorAll('canvas.' + LAYER).forEach(cv => drawInto(cv, true));
@@ -2800,40 +2802,74 @@
     return cv;
   }
 
+  // Other wallpapers used by individual charts in a multi-chart layout: id -> decoded source
+  const panelSrc = new Map();
+  let panelToken = 0;
+  async function syncPanelSources() {
+    const want = new Set(Object.values(S.wall.perPanel || {}).filter(id => id && id !== sourceId));
+    for (const [id, e] of panelSrc) if (!want.has(id)) { e.tok = -1; dispose(e.src); panelSrc.delete(id); }
+    for (const id of want) {
+      if (panelSrc.has(id)) continue;
+      const e = { src: null, tok: ++panelToken };
+      panelSrc.set(id, e);
+      try {
+        const wp = await DB.get(id);
+        if (!wp || panelSrc.get(id) !== e) continue;
+        e.src = await decode(wp.blob);
+        if (e.src.kind === 'anim') runAnimation(e.src, e.tok, () => (panelSrc.get(id) === e ? e.tok : -1));
+      } catch (err) { panelSrc.delete(id); }
+    }
+    refreshWall();
+  }
+  function sourceFor(cv) {
+    const pid = (S.wall.perPanel || {})[cv.dataset.panel];
+    if (!pid || pid === sourceId) return { src: source, id: sourceId };
+    const e = panelSrc.get(pid);
+    return { src: e && e.src, id: pid };
+  }
   function drawInto(cv, force) {
     const parent = cv.parentElement;
     if (!parent) return;
-    cv.style.opacity = String(S.wall.opacity);
-    cv.style.mixBlendMode = S.wall.blend;
-    const img = source && (source.kind === 'static' ? source.image : source.frame);
-    if (!img) return;
+    const w = S.wall;
+    cv.style.opacity = String(w.opacity);
+    cv.style.mixBlendMode = w.blend;
+    const { src, id } = sourceFor(cv);
+    const img = src && (src.kind === 'static' ? src.image : src.frame);
+    if (!img) { if (cv.width) { cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); delete cv.dataset.key; } return; }
     const dpr = window.devicePixelRatio || 1;
     const W = Math.max(1, Math.round(parent.clientWidth * dpr));
     const H = Math.max(1, Math.round(parent.clientHeight * dpr));
-    const key = `${sourceId}|${W}x${H}|${S.wall.fit}`;
+    const zoom = Math.max(1, Math.min(4, +w.zoom || 1)), px = Math.max(0, Math.min(1, w.posX ?? .5)), py = Math.max(0, Math.min(1, w.posY ?? .5));
+    const dim = Math.max(0, Math.min(.9, +w.dim || 0)), blur = Math.max(0, Math.min(30, +w.blur || 0));
+    const key = `${id}|${W}x${H}|${w.fit}|${zoom}|${px}|${py}|${dim}|${blur}`;
     if (!force && cv.dataset.key === key) return;
     cv.dataset.key = key;
     if (cv.width !== W) cv.width = W;
     if (cv.height !== H) cv.height = H;
     const iw = img.displayWidth || img.width, ih = img.displayHeight || img.height;
-    let dw = W, dh = H, dx = 0, dy = 0;
-    if (S.wall.fit !== 'stretch') {
-      const sc = S.wall.fit === 'contain' ? Math.min(W / iw, H / ih) : Math.max(W / iw, H / ih);
-      dw = iw * sc; dh = ih * sc; dx = (W - dw) / 2; dy = (H - dh) / 2;
+    let dw = W, dh = H;
+    if (w.fit !== 'stretch') {
+      const sc = w.fit === 'contain' ? Math.min(W / iw, H / ih) : Math.max(W / iw, H / ih);
+      dw = iw * sc; dh = ih * sc;
     }
+    dw *= zoom; dh *= zoom;
+    const dx = (W - dw) * px, dy = (H - dh) * py;        // the focus point decides which part stays in view
     const ctx = cv.getContext('2d');
     ctx.clearRect(0, 0, W, H);
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(img, dx, dy, dw, dh);
+    if (blur) { const pad = blur * dpr * 2; ctx.filter = `blur(${blur * dpr}px)`; ctx.drawImage(img, dx - pad, dy - pad, dw + pad * 2, dh + pad * 2); ctx.filter = 'none'; }
+    else ctx.drawImage(img, dx, dy, dw, dh);
+    if (dim) { ctx.globalCompositeOperation = 'source-atop'; ctx.fillStyle = `rgba(0,0,0,${dim})`; ctx.fillRect(0, 0, W, H); ctx.globalCompositeOperation = 'source-over'; }
   }
 
   function renderAll() {
     scheduled = false;
-    if (!S.wall.enabled || !source || S.extras.allOff) {
+    const anyPanel = Object.values(S.wall.perPanel || {}).some(Boolean);
+    if (!S.wall.enabled || (!source && !anyPanel) || S.extras.allOff) {
       document.querySelectorAll('canvas.' + LAYER).forEach(c => c.remove());
       return;
     }
-    for (const c of containers()) drawInto(ensureLayer(c), false);
+    containers().forEach((c, i) => { const cv = ensureLayer(c); cv.dataset.panel = String(i + 1); drawInto(cv, false); });
   }
   function schedule() {
     if (scheduled) return;
@@ -2875,6 +2911,7 @@
     for (const f of files) {
       try {
         const bmp = await createImageBitmap(f);
+        const bmpW = bmp.width, bmpH = bmp.height;
         const thumb = toCanvas(bmp, THUMB).toDataURL('image/jpeg', 0.8);
         const animated = (await frameCount(f)) > 1;
         let blob;
@@ -2886,7 +2923,7 @@
         }
         bmp.close();
         const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-        await DB.put({ id, blob, thumb, animated, added: Date.now() });
+        await DB.put({ id, blob, thumb, animated, added: Date.now(), name: f.name || '', w: bmpW || 0, h: bmpH || 0 });
         lastId = id;
       } catch (e) {
         problems.push(`Couldn't add ${f.name}`);
@@ -3083,6 +3120,19 @@
 
   /* wallpaper */
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; }
+  .wp-now { display: grid; grid-template-columns: 260px 1fr; gap: 16px; padding: 14px; align-items: center; }
+  .wp-prev { position: relative; aspect-ratio: 16/9; border-radius: 10px; overflow: hidden; background: var(--card2); cursor: crosshair; touch-action: none; }
+  .wp-prev img { width: 100%; height: 100%; object-fit: cover; display: block; pointer-events: none; user-select: none; }
+  .wp-prev img[src=""] { display: none; }
+  .wp-prev i { position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 2px rgba(0,0,0,.45); pointer-events: none; }
+  .wp-prev span { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; }
+  .wp-prev span[hidden], .wp-prev i[hidden] { display: none; }
+  .wp-meta { display: grid; gap: 6px; min-width: 0; }
+  .wp-meta b { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .wp-meta small { color: var(--muted); }
+  #wPanels { flex-wrap: wrap; }
+  .pnl { width: 64px; height: 40px; border-radius: 8px; border: 1.5px solid var(--line2); background: var(--card2) center/cover; color: var(--text); font: 600 12px Inter, system-ui, sans-serif; cursor: pointer; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
+  .pnl.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentBg); }
   .thumb { position: relative; aspect-ratio: 16/10; border-radius: 9px; overflow: hidden; border: 2px solid transparent; cursor: pointer; background: var(--card2); }
   .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .thumb.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentBg); }
@@ -3368,25 +3418,31 @@
 
     <section data-tab="wall">
       <div class="card">${item('Show wallpaper', 'Images, GIFs and animated WebP behind your candles.', '<input type="checkbox" id="wEnabled">')}</div>
-      <div class="card">
-        <div class="card-h">Your wallpapers <small>Click one to use it</small></div>
-        <div class="sub">
-          <div class="grid" id="grid"></div>
+      <div class="card wp-now">
+        <div class="wp-prev" id="wPrev" title="Click or drag to choose what stays in view"><img id="wPrevImg" alt=""><i id="wDot"></i><span id="wPrevEmpty">No wallpaper yet</span></div>
+        <div class="wp-meta">
+          <b id="wName">—</b><small id="wSize"></small>
+          <div class="row"><label class="btn slim">＋ Add images / GIFs<input type="file" id="file" accept="image/*" multiple hidden></label><button class="btn slim" id="next">Next →</button></div>
+          <small class="hint">Click or drag the picture to choose what stays in view.</small>
           <div class="msg" id="wMsg"></div>
-          <div class="row">
-            <label class="btn">＋ Add images / GIFs<input type="file" id="file" accept="image/*" multiple hidden></label>
-            <button class="btn primary" id="next">Next wallpaper →</button>
-          </div>
         </div>
       </div>
-      <div class="card">
+      ${grp('Look', `
+        ${item('Fit', '', '<div class="seg" id="wFit"><button data-v="cover">Fill</button><button data-v="contain">Fit</button><button data-v="stretch">Stretch</button></div>')}
+        ${item('Zoom <span class="hint" id="wZoomVal"></span>', '', '<input type="range" id="wZoom" min="1" max="3" step="0.05">')}
+        ${item('Dim <span class="hint" id="wDimVal"></span>', 'Darkens the picture so candles stand out.', '<input type="range" id="wDim" min="0" max="0.8" step="0.02">')}
+        ${item('Blur <span class="hint" id="wBlurVal"></span>', '', '<input type="range" id="wBlur" min="0" max="20" step="1">')}
         ${item('Strength <span class="hint" id="opVal"></span>', 'How strongly the image shows through.', '<input type="range" id="opacity" min="0.05" max="1" step="0.05">')}
         ${item('Blend', 'Match this to your chart theme.', `<select id="blend">
           <option value="lighten">Dark chart – subtle</option><option value="screen">Dark chart – vivid</option>
           <option value="darken">Light chart – subtle</option><option value="multiply">Light chart – vivid</option></select>`)}
-        ${item('Fit', 'How the image fills the chart.', `<select id="fit">
-          <option value="cover">Fill (crop)</option><option value="contain">Fit (letterbox)</option><option value="stretch">Stretch</option></select>`)}
-      </div>
+        <div class="row" style="padding:4px 14px 12px"><button class="btn slim" id="wReset">Reset look</button></div>`)}
+      ${grp('Your wallpapers <small class="hint" style="display:inline;font-weight:400">· recently used first · click one to use it</small>', '<div class="sub"><div class="grid" id="grid"></div></div>')}
+      ${grp('Per-chart wallpaper', `<div class="sub">
+        <div class="hint" id="wPanelHint">For layouts with more than one chart: pick a chart, then its wallpaper.</div>
+        <div class="row" id="wPanels"></div>
+        <div class="row"><span class="hint" id="wPanelLbl" style="flex:1"></span><select id="wPanelPick"></select></div>
+      </div>`)}
     </section>
 
     <section data-tab="candles">
@@ -3769,6 +3825,7 @@
       $('#pgSub').textContent = PAGES[t][1];
       placeMaster(t);
       if (t === 'home') renderHome();
+      if (t === 'wall' && typeof renderWallUI === 'function') renderWallUI();
       $('.content').scrollTop = 0;
       syncDeps();
     }
@@ -3783,12 +3840,16 @@
     });
 
     /* ---- wallpaper tab ---- */
+    let wallList = [];
     async function renderGrid() {
       const grid = $('#grid');
       let list = [];
-      try { list = (await DB.all()).sort((a, b) => a.added - b.added); } catch (e) {}
+      try { list = await DB.all(); } catch (e) {}
+      const used = S.wall.used || {};
+      list.sort((a, b) => (used[b.id] || b.added || 0) - (used[a.id] || a.added || 0));   // recently used first
+      wallList = list;
       grid.innerHTML = '';
-      if (!list.length) { grid.innerHTML = '<div class="empty">No wallpapers yet — add some images or GIFs</div>'; return; }
+      if (!list.length) { grid.innerHTML = '<div class="empty">No wallpapers yet — add some images or GIFs</div>'; renderPanels(); return; }
       for (const w of list) {
         const d = document.createElement('div');
         d.className = 'thumb' + (w.id === S.wall.currentId ? ' active' : '');
@@ -3799,28 +3860,67 @@
         const del = document.createElement('button');
         del.className = 'del'; del.title = 'Remove'; del.textContent = '×';
         d.appendChild(del);
-        d.onclick = () => { S.wall.currentId = w.id; S.wall.enabled = true; save('wall'); loadWallpaper(); renderWallUI(); };
+        d.onclick = () => { S.wall.currentId = w.id; S.wall.enabled = true; save('wall'); loadWallpaper().then(renderWallUI); renderWallUI(); };
         del.onclick = async e => {
           e.stopPropagation();
           await DB.del(w.id);
+          for (const k of Object.keys(S.wall.perPanel || {})) if (S.wall.perPanel[k] === w.id) delete S.wall.perPanel[k];
           if (S.wall.currentId === w.id) {
             const rest = list.filter(x => x.id !== w.id);
             S.wall.currentId = rest.length ? rest[0].id : null;
-            save('wall'); loadWallpaper();
+            loadWallpaper();
           }
+          save('wall'); syncPanelSources();
           bc && bc.postMessage({ type: 'list' });
           renderWallUI();
         };
         grid.appendChild(d);
       }
+      renderPanels();
     }
+    function renderPreview() {
+      const w = S.wall, cur = wallList.find(x => x.id === w.currentId);
+      $('#wPrevImg').src = backdropUrl || (cur && cur.thumb) || '';
+      $('#wPrevImg').style.objectFit = w.fit === 'contain' ? 'contain' : w.fit === 'stretch' ? 'fill' : 'cover';
+      $('#wPrevImg').style.objectPosition = `${(w.posX ?? .5) * 100}% ${(w.posY ?? .5) * 100}%`;
+      $('#wPrevEmpty').hidden = !!(backdropUrl || cur);
+      $('#wDot').hidden = !(backdropUrl || cur);
+      $('#wDot').style.left = (w.posX ?? .5) * 100 + '%'; $('#wDot').style.top = (w.posY ?? .5) * 100 + '%';
+      $('#wName').textContent = cur ? (cur.name || (cur.animated ? 'Animated wallpaper' : 'Wallpaper')) : 'No wallpaper';
+      $('#wSize').textContent = cur ? [cur.animated ? 'GIF' : 'Image', cur.w && cur.h ? `${cur.w} × ${cur.h}` : ''].filter(Boolean).join(' · ') : 'Add an image or GIF to start.';
+    }
+    function renderPanels() {
+      const n = Math.max(1, containers().length), pp = S.wall.perPanel || {};
+      if (renderPanels.sel == null || renderPanels.sel > n) renderPanels.sel = 1;
+      const thumbOf = id => (wallList.find(x => x.id === id) || {}).thumb;
+      $('#wPanels').innerHTML = Array.from({ length: n }, (_, i) => {
+        const k = i + 1, t = thumbOf(pp[k] || S.wall.currentId);
+        return `<button class="pnl${k === renderPanels.sel ? ' on' : ''}" data-k="${k}" style="${t ? `background-image:url('${t}')` : ''}">${k}</button>`;
+      }).join('');
+      $('#wPanelHint').hidden = n > 1;
+      const k = renderPanels.sel;
+      $('#wPanelLbl').textContent = n > 1 ? `Chart ${k}` : 'Chart 1 (only chart on screen)';
+      $('#wPanelPick').innerHTML = '<option value="">Same as main wallpaper</option>' +
+        wallList.map((w, i) => `<option value="${w.id}">${(w.name || (w.animated ? 'GIF' : 'Image') + ' ' + (i + 1)).replace(/</g, '&lt;')}</option>`).join('');
+      $('#wPanelPick').value = pp[k] || '';
+      root.querySelectorAll('#wPanels .pnl').forEach(b => b.onclick = () => { renderPanels.sel = +b.dataset.k; renderPanels(); });
+    }
+    $('#wPanelPick').onchange = e => {
+      S.wall.perPanel = S.wall.perPanel || {};
+      if (e.target.value) S.wall.perPanel[renderPanels.sel] = e.target.value; else delete S.wall.perPanel[renderPanels.sel];
+      save('wall'); syncPanelSources(); renderPanels();
+    };
     function renderWallUI() {
-      $('#wEnabled').checked = S.wall.enabled;
-      $('#opacity').value = S.wall.opacity;
-      $('#opVal').textContent = Math.round(S.wall.opacity * 100) + '%';
-      $('#blend').value = S.wall.blend;
-      $('#fit').value = S.wall.fit;
-      renderGrid();
+      const w = S.wall;
+      $('#wEnabled').checked = w.enabled;
+      $('#opacity').value = w.opacity; $('#opVal').textContent = Math.round(w.opacity * 100) + '%';
+      $('#blend').value = w.blend;
+      root.querySelectorAll('#wFit button').forEach(b => b.classList.toggle('on', b.dataset.v === (w.fit || 'cover')));
+      $('#wZoom').value = w.zoom || 1; $('#wZoomVal').textContent = Math.round((w.zoom || 1) * 100) + '%';
+      $('#wDim').value = w.dim || 0; $('#wDimVal').textContent = Math.round((w.dim || 0) * 100) + '%';
+      $('#wBlur').value = w.blur || 0; $('#wBlurVal').textContent = (w.blur || 0) + ' px';
+      renderGrid().then(renderPreview);
+      renderPreview();
     }
     $('#file').onchange = async e => {
       const files = [...e.target.files];
@@ -3837,16 +3937,31 @@
       const i = list.findIndex(w => w.id === S.wall.currentId);
       S.wall.currentId = list[(i + 1) % list.length].id;
       S.wall.enabled = true;
-      save('wall'); loadWallpaper(); renderWallUI();
+      save('wall'); loadWallpaper().then(renderWallUI); renderWallUI();
     };
     $('#wEnabled').onchange = e => { S.wall.enabled = e.target.checked; save('wall'); refreshWall(); };
-    $('#opacity').oninput = e => {
-      S.wall.opacity = parseFloat(e.target.value);
-      $('#opVal').textContent = Math.round(S.wall.opacity * 100) + '%';
-      save('wall'); refreshWall();
-    };
+    let wallSaveT = null;
+    const wallLive = (fn) => e => { fn(e); refreshWall(); renderPreview(); clearTimeout(wallSaveT); wallSaveT = setTimeout(() => save('wall'), 250); };
+    $('#opacity').oninput = wallLive(e => { S.wall.opacity = parseFloat(e.target.value); $('#opVal').textContent = Math.round(S.wall.opacity * 100) + '%'; });
+    $('#wZoom').oninput = wallLive(e => { S.wall.zoom = +e.target.value; $('#wZoomVal').textContent = Math.round(S.wall.zoom * 100) + '%'; });
+    $('#wDim').oninput = wallLive(e => { S.wall.dim = +e.target.value; $('#wDimVal').textContent = Math.round(S.wall.dim * 100) + '%'; });
+    $('#wBlur').oninput = wallLive(e => { S.wall.blur = +e.target.value; $('#wBlurVal').textContent = S.wall.blur + ' px'; });
     $('#blend').onchange = e => { S.wall.blend = e.target.value; save('wall'); refreshWall(); };
-    $('#fit').onchange = e => { S.wall.fit = e.target.value; save('wall'); refreshWall(); };
+    root.querySelectorAll('#wFit button').forEach(b => b.onclick = () => { S.wall.fit = b.dataset.v; save('wall'); refreshWall(); renderWallUI(); });
+    $('#wReset').onclick = () => { Object.assign(S.wall, { zoom: 1, posX: .5, posY: .5, dim: 0, blur: 0, fit: 'cover' }); save('wall'); refreshWall(); renderWallUI(); };
+    // focus point: click or drag on the preview
+    {
+      const pv = $('#wPrev'); let drag = false;
+      const setPos = e => {
+        const r = pv.getBoundingClientRect();
+        S.wall.posX = Math.round(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * 100) / 100;
+        S.wall.posY = Math.round(Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)) * 100) / 100;
+        renderPreview(); refreshWall();
+      };
+      pv.addEventListener('pointerdown', e => { drag = true; pv.setPointerCapture(e.pointerId); setPos(e); e.preventDefault(); });
+      pv.addEventListener('pointermove', e => { if (drag) setPos(e); });
+      pv.addEventListener('pointerup', () => { if (drag) { drag = false; save('wall'); } });
+    }
 
     /* ---- candles tab ---- */
     const toHex = rgb => '#' + rgb.map(v => Math.max(0, Math.min(255, v | 0)).toString(16).padStart(2, '0')).join('');
