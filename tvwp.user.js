@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.25.0
+// @version      3.25.1
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.25.0';
+  const VERSION = '3.25.1';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -543,7 +543,11 @@
     videoGet(id) { return this.run('readonly', s => s.get(id), 'videos'); },
     videoPut(x) { return this.run('readwrite', s => s.put(x), 'videos'); },
     videoDel(id) { return this.run('readwrite', s => s.delete(id), 'videos'); },
-    videoKeys() { return this.run('readonly', s => s.getAllKeys(), 'videos'); },
+    videoKeys() { return this.run('readonly', s => s.getAllKeys(), 'videos').then(k => (k || []).filter(x => String(x).startsWith('v_'))); },
+    // A recording is saved in pieces (p_<trade>_<n>) while it runs, then joined into one video (v_<trade>).
+    partKeys() { return this.run('readonly', s => s.getAllKeys(IDBKeyRange.bound('p_', 'p_\uffff')), 'videos'); },
+    partsFor(tid) { return this.run('readonly', s => s.getAll(IDBKeyRange.bound('p_' + tid + '_', 'p_' + tid + '_\uffff')), 'videos'); },
+    partsDel(tid) { return this.run('readwrite', s => s.delete(IDBKeyRange.bound('p_' + tid + '_', 'p_' + tid + '_\uffff')), 'videos'); },
     videosClear() { return this.run('readwrite', s => s.clear(), 'videos'); },
     kvGet(k) { return this.run('readonly', s => s.get(k), 'kv'); },
     kvPut(x) { return this.run('readwrite', s => s.put(x), 'kv'); },
@@ -1224,27 +1228,29 @@
       const sw = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
       const mime = (H >= 1440 ? hw.concat(sw) : sw).find(m => { try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; } }) || '';
       const mr = new MediaRecorder(stream, { mimeType: mime || undefined, videoBitsPerSecond: recBitrate(W, H) });
-      const chunks = [];
-      mr.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+      // Pieces go to disk every ~10 s, so a long trade never sits in memory, and a reload or crash keeps what was filmed.
+      let pend = [], seq = 0, flushing = Promise.resolve();
+      const started = Date.now(), type = mr.mimeType || mime || 'video/webm';
+      const flush = () => {
+        if (!pend.length) return flushing;
+        const b = new Blob(pend, { type }); pend = [];
+        const n = seq++;
+        flushing = flushing.then(() => DB.videoPut({ id: 'p_' + t.id + '_' + String(n).padStart(5, '0'), tradeId: t.id, part: n, blob: b, mime: type, started }))
+          .catch(e => { videoErr[t.id] = (e && (e.name === 'QuotaExceededError' ? 'the browser ran out of storage space' : e.message)) || String(e); console.warn('[Wick] video piece not saved', e); });
+        return flushing;
+      };
+      mr.ondataavailable = e => { if (e.data && e.data.size) { pend.push(e.data); if (pend.length >= 10) flush(); } };
       const stopTick = videoTicker(30, () => drawChartFrame(g, cv, t));
-      vid = { tradeId: t.id, mr, stopTick, started: Date.now(), stopTimer: null, maxTimer: null };
+      vid = { tradeId: t.id, mr, stopTick, started, stopTimer: null, maxTimer: null };
       vid.maxTimer = setTimeout(() => videoStop(t.id, 0), 30 * 60000);      // 30-minute cap per trade
       mr.onstop = async () => {
         stopTick();
-        const blob = new Blob(chunks, { type: mr.mimeType || 'video/webm' });
-        const v = vid; vid = null;
+        vid = null;
         try {
-          if (blob.size) {
-            await DB.videoPut({ id: 'v_' + t.id, tradeId: t.id, blob, size: blob.size, mime: blob.type, started: v.started, ended: Date.now() });
-            const rec = await DB.tradeGet(t.id);
-            if (rec && (!rec.videoId || rec.videoExt !== videoExt(blob.type))) { rec.videoId = rec.videoId || 'v_' + t.id; rec.videoExt = videoExt(blob.type); await DB.tradePut(rec); }
-            await videoCleanup();
-          } else {
-            // nothing was filmed (the trade lasted only a moment): don't leave a play button that plays nothing
-            const rec = await DB.tradeGet(t.id);
-            if (rec && rec.videoId) { rec.videoId = null; await DB.tradePut(rec); }
-            pendingNoVideo.add(t.id);
-          }
+          flush(); await flushing;
+          const ok = await joinVideo(t.id, Date.now());
+          if (!ok) pendingNoVideo.add(t.id);
+          else await videoCleanup();
         } catch (e) { console.warn('[Wick] video save failed', e); }
         if (buildUI.onJournal) buildUI.onJournal();
         folderSync();
@@ -1260,6 +1266,37 @@
       vid = null; done();
     }
   }
+  const videoErr = {};
+  // Joins a trade's saved pieces into one video and links it to the trade. Returns false if nothing was filmed.
+  async function joinVideo(tid, ended) {
+    const parts = ((await DB.partsFor(tid)) || []).filter(p => p && p.blob && p.blob.size).sort((a, b) => a.part - b.part);
+    const rec = await DB.tradeGet(tid);
+    if (!parts.length) {
+      if (rec && rec.videoId && !(await DB.videoGet(rec.videoId))) { rec.videoId = null; rec.videoNote = videoErr[tid] || ''; await DB.tradePut(rec); }
+      await DB.partsDel(tid);
+      return false;
+    }
+    const type = parts[0].mime || parts[0].blob.type || 'video/webm';
+    const blob = new Blob(parts.map(p => p.blob), { type });
+    await DB.videoPut({ id: 'v_' + tid, tradeId: tid, blob, size: blob.size, mime: type, started: parts[0].started, ended: ended || Date.now(), partial: !!videoErr[tid] });
+    await DB.partsDel(tid);
+    if (rec && (rec.videoId !== 'v_' + tid || rec.videoExt !== videoExt(type))) { rec.videoId = 'v_' + tid; rec.videoExt = videoExt(type); await DB.tradePut(rec); }
+    return true;
+  }
+  // After a reload or crash: pieces nobody is recording any more are joined into a video.
+  async function recoverVideos() {
+    const run = async () => {
+      const keys = ((await DB.partKeys()) || []).map(String);
+      const tids = [...new Set(keys.map(k => k.slice(2, k.lastIndexOf('_'))))];
+      for (const tid of tids) { if (vid && vid.tradeId === tid) continue; try { await joinVideo(tid); } catch (e) {} }
+      if (tids.length && buildUI.onJournal) buildUI.onJournal();
+    };
+    try {
+      if (navigator.locks && navigator.locks.request) await navigator.locks.request('tvwp-video', { ifAvailable: true }, lock => lock ? run() : null);
+      else await run();
+    } catch (e) {}
+  }
+  setTimeout(recoverVideos, 4000);
   function videoStop(tradeId, delay = 8000) {
     if (!vid || vid.tradeId !== tradeId) return;
     if (vid.stopTimer && delay) return;            // already finishing
@@ -3474,6 +3511,7 @@
   .srow select { padding: 5px 6px; font-size: 12px; width: 100%; }
   .play { width: 30px; height: 28px; border-radius: 8px; border: 1px solid var(--line2); background: var(--card2); color: var(--text); cursor: pointer; padding: 0; }
   .play:hover { border-color: var(--accent); }
+  .pmsg { padding: 14px; border-radius: 10px; background: var(--card2); color: var(--text); font-size: 12.5px; line-height: 1.5; margin: 8px 0; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; }
   .chip { display: flex; align-items: center; gap: 4px; padding: 3px 4px 3px 10px; border: 1px solid var(--line2); border-radius: 16px; font-size: 12px; max-width: 100%; background: var(--card2); }
   .chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 200px; }
@@ -3833,7 +3871,7 @@
         </div>`)}`)}
       <div class="row"><button class="btn" id="rCsv">⬇ Export CSV (Excel)</button><button class="btn" id="rClear">Clear journal</button></div>
       ${how('How recording works', `Keeps recording when TradingView is in a background tab or minimized, and catches up on trades made while it was closed, including trades placed on your broker's own app. In Chrome, add tradingview.com to Settings → Performance → Memory Saver → "Always keep these sites active".`)}
-      <div class="player" id="rPlayer" hidden><div class="pbox"><div class="row between"><b id="rPTitle"></b><button class="x" id="rPClose">×</button></div><video id="rVideoEl" controls playsinline></video><div class="row"><a class="btn" id="rPDown" download>⬇ Download video</a></div></div></div>
+      <div class="player" id="rPlayer" hidden><div class="pbox"><div class="row between"><b id="rPTitle"></b><button class="x" id="rPClose">×</button></div><div class="hint pmsg" id="rPMsg" hidden></div><video id="rVideoEl" controls playsinline></video><div class="row"><a class="btn" id="rPDown" download>⬇ Download video</a></div></div></div>
     </section>
 
     <section data-tab="risk">
@@ -5229,8 +5267,19 @@
     }
     let playerUrl = null;
     async function openVideo(t) {
-      const v = await DB.videoGet(t.videoId);
-      if (!v) { t.videoId = null; renderJournal(); return; }
+      let v = await DB.videoGet(t.videoId);
+      if (!v) { try { if (await joinVideo(t.id)) v = await DB.videoGet('v_' + t.id); } catch (e) {} }   // pieces left from a reload
+      $('#rPMsg').hidden = true; $('#rVideoEl').hidden = false; $('#rPDown').hidden = false;
+      if (!v) {
+        const why = t.videoNote || videoErr[t.id];
+        $('#rPTitle').textContent = `${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSym(t.symbol)} · ${new Date(t.openTime).toLocaleString()}`;
+        $('#rPMsg').textContent = 'The video for this trade wasn\'t saved' + (why ? ` (${why}).` : '. This happens when TradingView was closed or reloaded during the trade, or when a very long video couldn\'t be saved in one piece (Wick before v3.25.1).') + ' Videos are now saved every few seconds while they record, so this won\'t happen again.';
+        $('#rPMsg').hidden = false; $('#rVideoEl').hidden = true; $('#rPDown').hidden = true; $('#rVideoEl').removeAttribute('src');
+        $('#rPlayer').hidden = false;
+        t.videoId = null; try { const rec = await DB.tradeGet(t.id); if (rec) { rec.videoId = null; await DB.tradePut(rec); } } catch (e) {}
+        journalDirty = true; renderJournal();
+        return;
+      }
       if (playerUrl) URL.revokeObjectURL(playerUrl);
       playerUrl = URL.createObjectURL(v.blob);
       $('#rVideoEl').src = playerUrl;
@@ -5240,6 +5289,7 @@
       $('#rPlayer').hidden = false;
     }
     $('#rPClose').onclick = () => { $('#rPlayer').hidden = true; $('#rVideoEl').pause(); };
+    $('#rVideoEl').onerror = () => { if (!$('#rVideoEl').getAttribute('src')) return; $('#rPMsg').textContent = 'This video can\'t play inside TradingView here. Use Download video and open it with your video player.'; $('#rPMsg').hidden = false; };
     $('#rOn').onchange = e => {
       if (!e.target.checked && S.risk.lockOn) { e.target.checked = true; $('#fMsg').textContent = 'The daily lockout counts your trades from the journal, so recording stays on. Turn off Limits → Daily lockout first (not possible while locked).'; return; }
       S.rec.on = e.target.checked; if (S.rec.on) recStartFresh(); save('journal'); renderJournal();
