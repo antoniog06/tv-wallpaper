@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.17.0
+// @version      3.18.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.17.0';
+  const VERSION = '3.18.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -93,7 +93,7 @@
         cancelled: { on: false, s: 'tone:click' }, rejected: { on: true, s: 'tone:buzz' }
       }
     },
-    ui: { x: null, y: null, tab: 'wall', theme: 'auto', px: null, py: null }
+    ui: { x: null, y: null, tab: 'wall', theme: 'auto', px: null, py: null, glass: true, glassDim: 62, closed: {} }
   };
   function readSettings() {
     try {
@@ -2726,14 +2726,24 @@
     schedule();
   }
 
+  // The settings panel shows your current wallpaper softly behind it.
+  let backdropBlob = null, backdropUrl = null;
+  function setBackdrop(blob) {
+    if (blob === backdropBlob && backdropUrl) return;
+    backdropBlob = blob || null;
+    if (backdropUrl) { URL.revokeObjectURL(backdropUrl); backdropUrl = null; }
+    if (blob) backdropUrl = URL.createObjectURL(blob);
+    if (buildUI.applyBackdrop) buildUI.applyBackdrop();
+  }
   async function loadWallpaper() {
     const token = ++loadToken;
     const id = S.wall.currentId;
-    if (!id) { setSource(null, null); return; }
+    if (!id) { setBackdrop(null); setSource(null, null); return; }
     if (id === sourceId) return;
     try {
       const wp = await DB.get(id);
       if (token !== loadToken) return;
+      setBackdrop(wp && wp.blob);
       if (!wp) { setSource(null, null); return; }
       const src = await decode(wp.blob);
       if (token !== loadToken) { dispose(src); return; }
@@ -2925,14 +2935,18 @@
   .fab svg { width: 20px; height: 20px; pointer-events: none; }
 
   /* window */
-  .panel { position: fixed; z-index: 2147483001; isolation: isolate; display: none; grid-template-columns: 196px 1fr;
-    width: min(820px, calc(100vw - 24px)); height: min(720px, calc(100vh - 24px));
+  .panel { position: fixed; z-index: 2147483001; isolation: isolate; display: none; grid-template-columns: 204px 1fr;
+    width: min(880px, calc(100vw - 24px)); height: min(720px, calc(100vh - 24px));
     background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 16px; overflow: hidden;
     box-shadow: var(--shadow); font-size: 13px; line-height: 1.4; }
   .panel.open { display: grid; }
 
   /* sidebar */
   aside { background: var(--nav); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+  aside, aside * { box-sizing: border-box; }
+  aside { overflow: hidden; }
+  aside > * { max-width: 100%; }
+  .tabs { scrollbar-width: thin; }
   .brand { display: flex; align-items: center; gap: 9px; padding: 14px 14px 10px; font-weight: 700; font-size: 14px; }
   .logo { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: #fff;
     background: linear-gradient(135deg, #5b6cff 0%, #22c3e6 100%); }
@@ -2944,12 +2958,18 @@
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.on { background: var(--good); box-shadow: 0 0 0 3px rgba(34,195,154,.18); }
   .tabs { flex: 1; overflow: auto; padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 1px; }
-  .grp { font-size: 10.5px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 8px 8px 3px; }
-  .tabs button { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 8px; border: none; border-radius: 8px;
+  .grp { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 4px; width: 100%; cursor: pointer; font-size: 10.5px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); padding: 10px 8px 4px; }
+  .grp i { font-style: normal; font-size: 12px; transform: rotate(90deg); transition: transform .15s; opacity: .7; }
+  .grp:hover { color: var(--text); }
+  .ng.shut .grp i { transform: rotate(0deg); }
+  .ng.shut .ng-b { display: none; }
+  .ng-b { display: flex; flex-direction: column; gap: 1px; }
+  .tabs button[data-tab] { display: flex; align-items: center; gap: 9px; width: 100%; padding: 6px 9px; border: none; border-radius: 8px;
     background: none; color: var(--text); font: inherit; font-size: 13px; cursor: pointer; text-align: left; opacity: .82; }
   .tabs button svg { width: 16px; height: 16px; flex: none; color: var(--muted); }
-  .tabs button:hover { background: var(--card); opacity: 1; }
-  .tabs button.on { background: var(--accent); color: #fff; opacity: 1; font-weight: 600; }
+  .tabs button[data-tab]:hover { background: var(--card); opacity: 1; }
+  .tabs button[data-tab].on { background: var(--accent); color: #fff; opacity: 1; font-weight: 600; box-shadow: 0 4px 14px rgba(91,108,255,.3); }
+  .tabs-bottom { flex: none; padding: 4px 8px; border-top: 1px solid var(--line); }
   .tabs button.on svg { color: #fff; }
   .tabs button .badge { margin-left: auto; font-size: 10.5px; padding: 1px 6px; border-radius: 10px; background: var(--card2); color: var(--muted); }
   .tabs button.on .badge { background: rgba(255,255,255,.22); color: #fff; }
@@ -2962,16 +2982,24 @@
   .panel.alloff .offbar { display: flex; }
   .panel.alloff .content, .panel.alloff .quick { opacity: .45; pointer-events: none; }
   .fab.alloff { filter: grayscale(1); opacity: .55; }
-  .quick { border-top: 1px solid var(--line); padding: 6px 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+  .quick { border-top: 1px solid var(--line); padding: 6px 12px; display: grid; gap: 0; }
+  .quick kbd { font-size: 9.5px; padding: 0 4px; margin-left: 4px; color: var(--muted); border: 0; background: none; }
   .quick input[type=checkbox] { width: 26px; height: 15px; }
   .quick input[type=checkbox]::before { width: 11px; height: 11px; }
   .quick input[type=checkbox]:checked::before { transform: translateX(11px); }
   .quick label { display: flex; align-items: center; justify-content: space-between; padding: 4px 2px; font-size: 12px !important; gap: 4px; min-width: 0; font-size: 12.5px; cursor: pointer; }
-  .foot { padding: 8px 14px 12px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
+  .foot { display: flex; align-items: center; gap: 9px; padding: 9px 12px 11px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
+  .foot .me { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 12px; color: #fff; background: linear-gradient(135deg, #5b6cff, #22c3e6); flex: none; }
+  .foot b { display: block; color: var(--text); font-size: 12px; }
+  .foot small { display: block; font-size: 10.5px; }
 
   /* main */
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-  header { display: flex; align-items: flex-start; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); cursor: move; user-select: none; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line); cursor: move; user-select: none; position: relative; z-index: 1; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(10px); }
+  header p { display: none; }
+  .hdr-ctl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+  .hdr-ctl[hidden] { display: none; }
+  .item.moved, .card.moved-card { display: none !important; }
   header .t { flex: 1; min-width: 0; }
   h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
   header p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
@@ -2980,7 +3008,13 @@
   .pill.ok { background: rgba(34,195,154,.13); color: var(--good); }
   .x { width: 28px; height: 28px; border-radius: 8px; border: none; background: none; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; }
   .x:hover { background: var(--card2); color: var(--text); }
-  .content { flex: 1; overflow: auto; padding: 14px 18px 20px; }
+  main { position: relative; isolation: isolate; }
+  .backdrop { position: absolute; inset: 0; z-index: -1; background-size: cover; background-position: center; opacity: 0; transition: opacity .4s; pointer-events: none;
+    filter: blur(var(--bdBlur, 2px)) saturate(.9); transform: scale(1.04); }
+  .backdrop::after { content: ''; position: absolute; inset: 0; background: color-mix(in srgb, var(--bg) var(--bdDim, 62%), transparent); }
+  .panel.glass .backdrop.has { opacity: 1; }
+  .panel.glass .card, .panel.glass .sgroup, .panel.glass .status { background: color-mix(in srgb, var(--card) 80%, transparent); backdrop-filter: blur(12px); }
+  .content { flex: 1; overflow: auto; padding: 16px 20px 22px; }
   section { display: none; gap: 14px; }
   section.on { display: grid; }
 
@@ -3002,8 +3036,8 @@
   .tip { position: fixed; z-index: 2147483647; max-width: 280px; padding: 9px 11px; border-radius: 9px; font: 12px/1.45 Inter, -apple-system, system-ui, sans-serif;
     color: #e8eaf0; background: #232733; border: 1px solid #3a3f4e; box-shadow: 0 10px 28px rgba(0,0,0,.45); pointer-events: none; }
   .tip[hidden] { display: none; }
-  .pg { display: grid; gap: 6px; }
-  .pg-h { font-size: 10.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); padding: 6px 4px 0; }
+  .pg-h { padding: 12px 14px 8px !important; font-size: 12.5px !important; font-weight: 600; letter-spacing: 0 !important; text-transform: none !important; color: var(--text) !important; }
+  .pg-h-old { font-size: 10.5px; font-weight: 600; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); padding: 6px 4px 0; }
   details.how { padding: 0 4px; }
   details.how summary { cursor: pointer; font-size: 12px; color: var(--muted); list-style: none; display: flex; align-items: center; gap: 6px; }
   details.how summary::-webkit-details-marker { display: none; }
@@ -3257,16 +3291,16 @@
     trading: ['Brackets', 'Win / lose amounts on your take-profit and stop orders.'],
     stream: ['Streamer', 'Hide your P&L and balances while streaming.'],
     journal: ['Journal', 'Every trade recorded automatically, with an optional chart video.'],
-    risk: ['Limits', 'Daily loss limit and lockout. Never stops you closing a trade.'],
+    risk: ['Discipline', 'Daily limits and lockout. Never stops you closing a trade.'],
     size: ['Position size', 'How many contracts to trade for the risk you choose.'],
     prop: ['Prop tracker', 'Your funded-account rules, tracked live.'],
     news: ['News', 'High-impact US economic events, with warnings before they hit.'],
-    extras: ['General', 'Ads, appearance, shortcuts and info.']
+    extras: ['Settings', 'Ads, appearance, shortcuts and info.']
   };
   // A setting row: title, a one-line summary, the control, and optional details behind an (i).
   const item = (title, desc, control, more) => `<div class="item"><div class="txt"><b>${title}${more ? `<button class="info" type="button" tabindex="0" data-tip="${String(more).replace(/"/g, '&quot;')}" aria-label="More about this">i</button>` : ''}</b>${desc ? `<small>${desc}</small>` : ''}</div>${control}</div>`;
   // A titled group of settings. when = '#id' shows it only while that switch is on (or that number is above 0).
-  const grp = (title, inner, when) => `<div class="pg"${when ? ` data-when="${when}"` : ''}>${title ? `<div class="pg-h">${title}</div>` : ''}<div class="card">${inner}</div></div>`;
+  const grp = (title, inner, when) => `<div class="card pg"${when ? ` data-when="${when}"` : ''}>${title ? `<div class="pg-h">${title}</div>` : ''}${inner}</div>`;
   const dep = (when, inner) => `<div class="dep" data-when="${when}">${inner}</div>`;
   const how = (title, inner) => `<details class="how"><summary>${title}</summary><div class="hint">${inner}</div></details>`;
   const NAV = (tab, label) => `<button data-tab="${tab}">${ICON[tab]}<span>${label}</span><span class="badge" data-badge="${tab}" hidden></span></button>`;
@@ -3282,25 +3316,24 @@
         <button class="power" id="power" title="Turn everything off (Alt+Shift+X)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1011.4 0"/></svg></button></div>
       <div class="conn"><span class="dot" id="connDot"></span><div><b>TradingView</b><small id="connText">Checking…</small></div></div>
       <nav class="tabs">
-        <div class="grp">Chart</div>
-        ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}
-        <div class="grp">Trading</div>
-        ${NAV('journal', 'Journal')}${NAV('sounds', 'Sounds')}${NAV('trading', 'Brackets')}${NAV('stream', 'Streamer')}
-        <div class="grp">Risk</div>
-        ${NAV('risk', 'Limits')}${NAV('size', 'Position size')}${NAV('prop', 'Prop tracker')}${NAV('news', 'News')}
-        <div class="grp">App</div>
-        ${NAV('extras', 'General')}
+        <div class="ng" data-grp="charts"><button class="grp" type="button">Charts<i>›</i></button><div class="ng-b">
+          ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}</div></div>
+        <div class="ng" data-grp="trading"><button class="grp" type="button">Trading<i>›</i></button><div class="ng-b">
+          ${NAV('risk', 'Discipline')}${NAV('prop', 'Prop tracker')}${NAV('size', 'Position size')}${NAV('trading', 'Brackets')}${NAV('sounds', 'Sounds')}${NAV('news', 'News')}${NAV('stream', 'Streamer')}</div></div>
+        <div class="ng" data-grp="journal"><button class="grp" type="button">Journal<i>›</i></button><div class="ng-b">
+          ${NAV('journal', 'Journal')}</div></div>
       </nav>
       <div class="quick">
-        <label>Wallpaper <input type="checkbox" id="qWall"></label>
-        <label>Candles <input type="checkbox" id="qCandles"></label>
-        <label>Sounds <input type="checkbox" id="qSounds"></label>
-        <label>Streamer <input type="checkbox" id="qStream"></label>
+        <label><span>Wallpaper</span><input type="checkbox" id="qWall"></label>
+        <label><span>Candles</span><input type="checkbox" id="qCandles"></label>
+        <label><span>Sounds</span><input type="checkbox" id="qSounds"></label>
+        <label><span>Streamer <kbd>Alt+Shift+S</kbd></span><input type="checkbox" id="qStream"></label>
       </div>
-      <div class="foot">v${VERSION} · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></div>
+      <div class="tabs tabs-bottom">${NAV('extras', 'Settings')}</div>
+      <div class="foot"><span class="me">W</span><div><b>Wick</b><small>v${VERSION} · Alt+Shift+W</small></div></div>
     </aside>
-    <main>
-      <header><div class="t"><h1 id="pgTitle"></h1><p id="pgSub"></p></div><span class="pill" id="pill"></span><button class="x" title="Close">×</button></header>
+    <main><div class="backdrop" id="backdrop"></div>
+      <header><div class="t"><h1 id="pgTitle"></h1><p id="pgSub"></p></div><span class="pill" id="pill"></span><label class="hdr-ctl" id="hdrCtl" hidden><span id="hdrCtlLbl"></span></label><button class="x" title="Close">×</button></header>
       <div class="offbar" id="offbar">Everything is turned off. Your settings are saved. <button class="btn primary slim" id="powerOn">Turn back on</button></div>
       <div class="content">
 
@@ -3501,6 +3534,8 @@
         ${item('Turn everything off', 'Your settings stay saved.', '<input type="checkbox" id="gAllOff">', 'Stops every feature at once, except the daily lockout if it\'s on. Shortcut: Alt+Shift+X.')}
         ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
         ${item('Theme', 'Auto follows your TradingView theme.', '<div class="seg" id="gTheme"><button data-v="auto">Auto</button><button data-v="dark">Dark</button><button data-v="light">Light</button></div>')}
+        ${item('Glass panel', 'Your wallpaper shows softly behind this window.', '<input type="checkbox" id="gGlass">')}
+        ${dep('#gGlass', item('Backdrop dim <span class="hint" id="gDimVal"></span>', '', '<input type="range" id="gDim" min="30" max="90" step="2">'))}
         ${item('Button position', 'Drag the button anywhere.', '<button class="btn slim" id="gResetPos">Reset</button>')}
       </div>
       <div class="card">
@@ -3644,19 +3679,62 @@
       });
     }
     buildUI.syncDeps = syncDeps;
+    buildUI.applyBackdrop = () => {
+      const bd = $('#backdrop');
+      bd.style.backgroundImage = backdropUrl ? `url("${backdropUrl}")` : '';
+      bd.classList.toggle('has', !!backdropUrl && !S.extras.allOff);
+      panel.classList.toggle('glass', S.ui.glass !== false);
+      panel.style.setProperty('--bdDim', Math.max(20, Math.min(95, +S.ui.glassDim || 62)) + '%');
+    };
+    buildUI.applyBackdrop();
     root.addEventListener('change', () => requestAnimationFrame(syncDeps));
     root.addEventListener('input', () => requestAnimationFrame(syncDeps));
     setInterval(() => { if (panel.classList.contains('open')) syncDeps(); }, 600);
+    // Each page's main on/off switch sits in the title bar, like a window toolbar.
+    const MASTER = { wall: ['wEnabled', 'Show'], candles: ['cEnabled', 'On'], journal: ['rOn', 'Recording'], sounds: ['sEnabled', 'On'], stream: ['xStream', 'On'], risk: ['kOn', 'Lockout'], prop: ['pOn', 'Tracking'], news: ['nOn', 'On'] };
+    const masterHome = {};
+    function placeMaster(t) {
+      const slot = $('#hdrCtl');
+      for (const [tab, [id]] of Object.entries(MASTER)) {           // put every switch back home first
+        const el = root.getElementById ? root.getElementById(id) : $('#' + id);
+        if (!el) continue;
+        if (!masterHome[id]) {
+          const row = el.closest('.item');
+          masterHome[id] = { parent: el.parentNode, next: el.nextSibling, row, card: row && row.parentNode };
+        }
+        const h = masterHome[id];
+        if (el.parentNode !== h.parent) h.parent.insertBefore(el, h.next);
+        if (h.row) h.row.classList.remove('moved');
+        if (h.card && h.card.classList) h.card.classList.remove('moved-card');
+      }
+      const m = MASTER[t];
+      if (!m) { slot.hidden = true; return; }
+      const el = $('#' + m[0]), h = masterHome[m[0]];
+      if (!el || !h) { slot.hidden = true; return; }
+      $('#hdrCtlLbl').textContent = m[1];
+      slot.appendChild(el); slot.hidden = false;
+      if (h.row) h.row.classList.add('moved');
+      // a card that held only that switch disappears
+      if (h.card && h.card.classList && h.card.classList.contains('card') && ![...h.card.children].some(c => c !== h.row && !(c.classList && c.classList.contains('pg-h'))))
+        h.card.classList.add('moved-card');
+    }
     function showTab(t) {
       if (!PAGES[t]) t = 'wall';
       root.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
       root.querySelectorAll('section').forEach(s => s.classList.toggle('on', s.dataset.tab === t));
       $('#pgTitle').textContent = PAGES[t][0];
       $('#pgSub').textContent = PAGES[t][1];
+      placeMaster(t);
       $('.content').scrollTop = 0;
       syncDeps();
     }
-    root.querySelectorAll('.tabs button').forEach(b => b.onclick = () => {
+    S.ui.closed = S.ui.closed || {};
+    root.querySelectorAll('.ng').forEach(g => {
+      const k = g.dataset.grp;
+      g.classList.toggle('shut', !!S.ui.closed[k]);
+      g.querySelector('.grp').onclick = () => { S.ui.closed[k] = !S.ui.closed[k]; g.classList.toggle('shut', S.ui.closed[k]); save(null); };
+    });
+    root.querySelectorAll('.tabs button[data-tab]').forEach(b => b.onclick = () => {
       S.ui.tab = b.dataset.tab; save(null); showTab(b.dataset.tab); placePanel();
     });
 
@@ -4538,6 +4616,9 @@
     buildUI.onJournal = () => { if (panel.classList.contains('open')) renderJournal(); };
 
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
+    $('#gGlass').onchange = e => { S.ui.glass = e.target.checked; save(null); buildUI.applyBackdrop(); };
+    $('#gDim').oninput = e => { S.ui.glassDim = +e.target.value; $('#gDimVal').textContent = e.target.value + '%'; buildUI.applyBackdrop(); };
+    $('#gDim').onchange = () => save(null);
     /* ---- sidebar quick switches, theme, status ---- */
     function setQuick(id, on) {
       if (id === 'qWall') { S.wall.enabled = on; save('wall'); refreshWall(); }
@@ -4548,6 +4629,7 @@
     }
     for (const id of ['qWall', 'qCandles', 'qSounds', 'qStream']) $('#' + id).onchange = e => setQuick(id, e.target.checked);
     function themeIsLight() {
+      $('#gGlass').checked = S.ui.glass !== false; $('#gDim').value = S.ui.glassDim || 62; $('#gDimVal').textContent = (S.ui.glassDim || 62) + '%';
       const t = S.ui.theme || 'auto';
       if (t === 'light') return true;
       if (t === 'dark') return false;
