@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.20.0
+// @version      3.21.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.20.0';
+  const VERSION = '3.21.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -80,7 +80,7 @@
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false, stopOffset: 0, preset: '' },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
-    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
+    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
@@ -761,6 +761,7 @@
   }
   let execTimer = null;
   function onExecution(ex) {
+    if (S.extras.oco) setTimeout(ocoTick, 60);       // a fill: check right away whether an exit needs cancelling
     // Backup for brokers that report a fill only as an execution. One timer, never one per execution.
     if (Date.now() < warmUntil || pageClosing) return;
     clearTimeout(execTimer);
@@ -2149,6 +2150,60 @@
     return (nex ? nex + ':' : '') + nt;
   }
   let symNotice = 0;
+  /* ---- Brackets: cancel the other exit when one fills ----
+     For brokers that turn a bracket into two plain orders (Tradovate in TradingView), so a filled take-profit
+     leaves the stop behind (or the other way round). Rules, so it can't cancel something you meant to keep:
+     - it only remembers exit orders: opposite side to your position, same symbol, no bigger than the position
+     - it only cancels those remembered exits, and only after that position has fully closed (or flipped)
+     - it never touches entry orders, other symbols, or anything while the broker connection is unclear
+     It cancels only. It never places or changes an order. Off until you switch it on. */
+  const ocoState = new Map();          // symbol -> { dir, exits: Map(id -> side) }
+  let ocoBusy = false, ocoLast = '', ocoLog = [];
+  const isWorking = o => o && [3, 6].includes(+o.status);        // 6 = working, 3 = waiting (inactive bracket leg)
+  async function ocoTick() {
+    if (ocoBusy) return;
+    if (!S.extras.oco || S.extras.allOff) { ocoState.clear(); ocoLast = 'off'; return; }
+    const b = currentBroker();
+    if (!b || typeof b.orders !== 'function' || typeof b.cancelOrder !== 'function') { ocoLast = 'nobroker'; return; }
+    ocoBusy = true;
+    try {
+      if (typeof b.isConnected === 'function' && !b.isConnected()) { ocoLast = 'nobroker'; return; }
+      const pc = await pollPositions();
+      if (!pc.ok) { ocoLast = 'nobroker'; return; }                // unsure about positions: do nothing
+      const orders = ((await b.orders()) || []).filter(isWorking);
+      const byId = new Map(orders.map(o => [String(o.id), o]));
+      const toCancel = [];
+      for (const p of pc.list) {
+        const dir = p.side === -1 || +p.qty < 0 ? -1 : 1, size = Math.abs(+p.qty || 0);
+        let st = ocoState.get(p.symbol);
+        if (st && st.dir !== dir) {                                   // flipped: old exits would now add to the new position
+          for (const [id, side] of st.exits) if (byId.has(id) && side === dir) toCancel.push(byId.get(id));
+          st = null;
+        }
+        if (!st) { st = { dir, exits: new Map() }; ocoState.set(p.symbol, st); }
+        for (const o of orders) if (o.symbol === p.symbol && +o.side === -dir && Math.abs(+o.qty || 0) <= size) st.exits.set(String(o.id), +o.side);
+        for (const id of [...st.exits.keys()]) if (!byId.has(id)) st.exits.delete(id);   // filled or cancelled already
+      }
+      for (const [sym, st] of [...ocoState]) {
+        if (pc.list.some(p => p.symbol === sym)) continue;
+        ocoState.delete(sym);                                         // position closed: cancel what's left of its exits
+        for (const id of st.exits.keys()) if (byId.has(id)) toCancel.push(byId.get(id));
+      }
+      for (const o of toCancel) {
+        try {
+          await b.cancelOrder(o.id);
+          ocoLog.unshift({ at: Date.now(), text: `Cancelled ${o.side === 1 ? 'buy' : 'sell'} ${shortSymbol(o.symbol)} ${o.qty} (the other exit)` });
+          console.info('[Wick] cancelled the other exit', o.id);
+        } catch (e) { ocoLog.unshift({ at: Date.now(), text: `Couldn't cancel order ${o.id}: ${e && e.message || e}` }); }
+      }
+      ocoLog = ocoLog.slice(0, 5);
+      const n = [...ocoState.values()].reduce((a, st) => a + st.exits.size, 0);
+      ocoLast = n ? `Watching ${n} exit${n === 1 ? '' : 's'} on ${[...ocoState.keys()].map(shortSymbol).join(', ')}` : 'ready';
+    } catch (e) { ocoLast = 'error'; }
+    finally { ocoBusy = false; }
+  }
+  setInterval(() => { if (S.extras.oco && !S.extras.allOff) ocoTick(); }, 400);
+
   function noteBlockedSymbol() { symNotice = Date.now() + 9000; flashBanner(); riskTick(); }
   function applyLock() {
     const on = blocking() || chartSymBlocked();
@@ -3231,6 +3286,8 @@
   .h-wk { min-height: 46px; border-radius: 8px; border: 1px dashed var(--line2); padding: 5px 6px; font-size: 10.5px; color: var(--muted); display: flex; flex-direction: column; justify-content: center; }
   .h-wk b { font-size: 11px; font-variant-numeric: tabular-nums; }
   .h-chart { padding: 4px 10px 12px; } .h-chart svg { width: 100%; height: 170px; display: block; }
+  .oco-st::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; background: var(--muted); vertical-align: 1px; }
+  .oco-st.ok::before { background: var(--good); } .oco-st.warn::before { background: #f5a524; }
   .counter { position: fixed; z-index: 2147482998; display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; border-radius: 10px;
     cursor: grab; user-select: none; touch-action: none; font: 600 12px/1 Inter, -apple-system, system-ui, sans-serif; color: #e8eaf0;
     background: rgba(18,20,27,.82); border: 1px solid rgba(255,255,255,.08); box-shadow: 0 6px 18px rgba(0,0,0,.28); backdrop-filter: blur(8px);
@@ -3609,12 +3666,16 @@
     </section>
 
     <section data-tab="trading">
+      ${grp('Brackets', `
+        ${item('Cancel the other exit when one fills', 'For Tradovate-style brackets. Cancels only.', '<input type="checkbox" id="xOco">', 'When your take-profit or stop fills and the position is closed, Wick cancels the exit that\'s left. It only cancels exit orders that were sitting there while you were in that position, never entry orders or other symbols, and it never places or changes an order. Try it on a demo account first.')}
+        <div class="item"><div class="txt"><small id="ocoStatus" class="oco-st">Off</small></div></div>
+        <div class="sub" id="ocoLog" hidden></div>`)}
       <div class="card">
         ${item('Show win / lose on TP & SL orders', 'For Tradovate-style brackets.', '<input type="checkbox" id="xBrk">')}
         ${item('Show as', '', '<select id="xBrkMode"><option value="ticks">Ticks</option><option value="money">Money</option><option value="both">Ticks + money</option></select>')}
         ${item('Distance from right edge', 'Slide labels so they sit next to your order labels.', '<input type="number" id="xBrkRight" min="0" max="800" step="10">')}
       </div>
-      <div class="hint">Only reads your orders. It never places or changes anything.</div>
+      <div class="hint">Win / lose labels only read your orders. "Cancel the other exit" can cancel orders, and only exits.</div>
     </section>
 
     <section data-tab="stream">
@@ -4320,13 +4381,24 @@
     $('#xHideQty').onchange = e => { S.extras.hideQty = e.target.checked; save('extras'); pollPositions().then(applyStreamer); };
     $('#xStreamStyle').onchange = e => { S.extras.streamerStyle = e.target.value; save('extras'); applyStreamer(); };
     $('#xBrk').onchange = e => { S.extras.brk = e.target.checked; save('extras'); brkPoll(); brkKick(); };
+    $('#xOco').onchange = e => { S.extras.oco = e.target.checked; save('extras'); ocoTick().then(renderOco); };
+    function renderOco() {
+      const st = $('#ocoStatus'); if (!st) return;
+      const txt = !S.extras.oco ? 'Off' : ocoLast === 'nobroker' ? 'Waiting for your broker in TradingView' : ocoLast === 'error' ? 'Couldn\'t read your orders. Retrying.' : ocoLast === 'ready' || !ocoLast ? 'On · no TP/SL open' : 'On · ' + ocoLast;
+      st.textContent = txt;
+      st.className = 'oco-st ' + (!S.extras.oco ? '' : ocoLast === 'nobroker' || ocoLast === 'error' ? 'warn' : 'ok');
+      const lg = $('#ocoLog');
+      lg.hidden = !ocoLog.length;
+      lg.innerHTML = ocoLog.map(x => `<div class="hint">${new Date(x.at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })} · ${x.text}</div>`).join('');
+    }
+    setInterval(() => { if (panel.classList.contains('open') && S.ui.tab === 'trading') renderOco(); }, 700);
     $('#xBrkMode').onchange = e => { S.extras.brkMode = e.target.value; save('extras'); brkKick(); };
     $('#xBrkRight').onchange = e => {
       const v = Math.min(800, Math.max(0, parseInt(e.target.value, 10) || 0));
       e.target.value = v; S.extras.brkRight = v; save('extras'); brkKick();
     };
     function renderStreamUI() {
-      $('#xBrk').checked = S.extras.brk !== false;
+      $('#xBrk').checked = S.extras.brk !== false; $('#xOco').checked = !!S.extras.oco; renderOco();
       $('#xBrkMode').value = S.extras.brkMode || 'ticks';
       $('#xBrkRight').value = S.extras.brkRight ?? 300;
       $('#xStream').checked = !!S.extras.streamer;
