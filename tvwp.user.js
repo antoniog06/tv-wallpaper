@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.23.0
+// @version      3.24.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.23.0';
+  const VERSION = '3.24.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -80,7 +80,7 @@
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false, stopOffset: 0, preset: '' },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
-    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, fastMs: 0, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
+    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, fastMs: 0, buyColor: '', sellColor: '', eod: 'traded', eodClose: '17:00', streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
@@ -352,6 +352,20 @@
   }
   applyAds();
 
+  // Your own colors for TradingView's Buy / Sell buttons (empty = TradingView's own).
+  function applyButtonColors() {
+    if (!document.documentElement) return;
+    let st = document.getElementById('tvwp-btncolors');
+    const b = S.extras.buyColor, sl = S.extras.sellColor;
+    if ((!b && !sl) || S.extras.allOff) { if (st) st.remove(); return; }
+    if (!st) { st = document.createElement('style'); st.id = 'tvwp-btncolors'; document.documentElement.appendChild(st); }
+    const rule = (name, c) => c ? `[data-name="${name}"] { background-color: ${c} !important; border-color: ${c} !important; }
+      [data-name="${name}"] > div, [data-name="${name}"] [class*="button"] { background-color: ${c} !important; }
+      [data-name="${name}"]:hover { filter: brightness(1.12); }` : '';
+    st.textContent = rule('buy-order-button', b) + rule('sell-order-button', sl);
+  }
+  applyButtonColors();
+
   /* =========================================================
    * Streamer mode: blurs P&L, balances and other account money
    * ======================================================= */
@@ -456,7 +470,7 @@
     try { refreshWall(); } catch (e) {}
     try { rebuildLookup(); redraw(); } catch (e) {}
     try { startInd(); } catch (e) {}
-    try { applyAds(); applyStreamer(); applyMute(); } catch (e) {}
+    try { applyAds(); applyStreamer(); applyMute(); applyButtonColors(); } catch (e) {}
     try { brkKick(); } catch (e) {}
     if (!S.extras.allOff) setTimeout(() => { try { recBackfill(); } catch (e) {} }, 500);
     if (buildUI.refresh) buildUI.refresh();
@@ -2281,6 +2295,34 @@
   }
   setInterval(() => { if (S.extras.fastMs || fastInfo.state === 'fast') fastTick(); }, 500);
 
+  /* ---- End-of-day summary: once a day after the futures close, your P&L and trade count ---- */
+  let eodNotice = null;
+  function nyNow() { const t = Date.now(), w = new Date(t + nyOffset(t)); return { date: w.toISOString().slice(0, 10), mins: w.getUTCHours() * 60 + w.getUTCMinutes(), dow: w.getUTCDay() }; }
+  function eodCheck() {
+    const mode = S.extras.eod || 'traded';
+    if (mode === 'off' || S.extras.allOff) return;
+    const n = nyNow();
+    if (n.dow === 0 || n.dow === 6) return;                       // no session close on weekends
+    const [hh, mm] = String(S.extras.eodClose || '17:00').split(':').map(Number);
+    const close = hh * 60 + (mm || 0);
+    if (n.mins < close || n.mins > close + 55) return;            // only within the hour after the close
+    let last = ''; try { last = localStorage.getItem('tvwp_eod_last') || ''; } catch (e) {}
+    if (last === n.date) return;
+    if (day.day !== tradingDay(Date.now())) return;               // today's numbers not loaded yet
+    if (mode === 'traded' && !day.trades) return;
+    try { localStorage.setItem('tvwp_eod_last', n.date); } catch (e) {}   // one window, one notice
+    const pnl = S.extras.streamer ? '' : `${money(day.closedPnl)} · `;
+    const text = `Day summary: ${pnl}${day.trades} trade${day.trades === 1 ? '' : 's'}${day.trades ? '' : ' today'}.`;
+    eodNotice = { until: Date.now() + 15 * 60000, text };
+    playSound('tone:chime');
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        const nt = new Notification('Wick · day summary', { body: text.replace('Day summary: ', ''), tag: 'wick-eod-' + n.date, silent: true });
+        nt.onclick = () => { window.focus(); nt.close(); buildUI.open && buildUI.open('home'); };
+      }
+    } catch (e) {}
+  }
+
   function noteBlockedSymbol() { symNotice = Date.now() + 9000; flashBanner(); riskTick(); }
   function applyLock() {
     const on = blocking() || chartSymBlocked();
@@ -2678,6 +2720,8 @@
         if (flat) setLock(why); else if (!pendingLock) pendingLock = why;
       }
     }
+    eodCheck();
+    if (eodNotice && eodNotice.until > Date.now()) out.push({ kind: 'info', act: 'share', text: eodNotice.text });
     const L = lockedNow();
     if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
     else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. You can't add to it, and new orders lock once you're flat.` });
@@ -2741,9 +2785,14 @@
   setInterval(riskTick, 1000);
   setTimeout(fetchNews, 3000);
 
+  let bannerSig = '';
   function renderBanners() {
     const box = buildUI.bannerBox;
     if (!box) return;
+    // only rebuild when something changed, so a button isn't swapped out mid-click
+    const sig = JSON.stringify(banners.map(b => [b.kind, hideMoney(b.text), b.act || '', b.swap || '', b.kind === 'lock' && !!lockedNow()]));
+    if (sig === bannerSig && box.childElementCount === banners.length) return;
+    bannerSig = sig;
     box.innerHTML = '';
     for (const b of banners) {
       const d = document.createElement('div');
@@ -2760,6 +2809,16 @@
         u.textContent = `Switch to ${symRoot(b.swap)}`;
         u.onclick = () => { try { window.TradingViewApi.activeChart().setSymbol(b.swap); } catch (e) {} symNotice = 0; setTimeout(riskTick, 600); };
         d.appendChild(u);
+      }
+      if (b.act === 'share') {
+        const u = document.createElement('button');
+        u.textContent = 'Share card';
+        u.onclick = () => { eodNotice = null; buildUI.open && buildUI.open('home'); setTimeout(() => buildUI.shareCard && buildUI.shareCard(), 400); riskTick(); };
+        d.appendChild(u);
+        const x = document.createElement('button');
+        x.textContent = '×'; x.title = 'Dismiss';
+        x.onclick = () => { eodNotice = null; riskTick(); };
+        d.appendChild(x);
       }
       if (b.act === 'folder') {
         const u = document.createElement('button');
@@ -3442,6 +3501,7 @@
   .h-wk { min-height: 46px; border-radius: 8px; border: 1px dashed var(--line2); padding: 5px 6px; font-size: 10.5px; color: var(--muted); display: flex; flex-direction: column; justify-content: center; }
   .h-wk b { font-size: 11px; font-variant-numeric: tabular-nums; }
   .h-chart { padding: 4px 10px 12px; } .h-chart svg { width: 100%; height: 170px; display: block; }
+  #gBuyReset[hidden], #gSellReset[hidden] { display: none; }
   .oco-st::before { content: ''; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 7px; background: var(--muted); vertical-align: 1px; }
   .oco-st.ok::before { background: var(--good); } .oco-st.warn::before { background: #f5a524; }
   .counter { position: fixed; z-index: 2147482998; display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; border-radius: 10px;
@@ -3849,6 +3909,12 @@
     </section>
 
     <section data-tab="extras">
+      ${grp('Chart buttons', `
+        ${item('Buy button', '', '<div class="row"><span class="hint" id="gBuyLbl"></span><input type="color" id="gBuy"><button class="btn slim" id="gBuyReset">Reset</button></div>')}
+        ${item('Sell button', '', '<div class="row"><span class="hint" id="gSellLbl"></span><input type="color" id="gSell"><button class="btn slim" id="gSellReset">Reset</button></div>')}`)}
+      ${grp('Day summary', `
+        ${item('End-of-day notification', 'After the futures close: your P&amp;L and trade count, with a share card.', '<select id="gEod"><option value="traded">When I traded</option><option value="always">Always</option><option value="off">Off</option></select>', 'Shows once a day, on the chart and as a computer notification (if you allow notifications). With Streamer mode on, the amount is left out.')}
+        ${item('Session closes at (New York time)', '', '<select id="gEodClose"><option value="16:00">4:00 PM</option><option value="16:15">4:15 PM</option><option value="17:00">5:00 PM</option></select>')}`)}
       ${grp('Order updates', `
         ${item('Faster order updates', 'Demo and prop accounts only.', '<select id="gFast"><option value="0">Off (TradingView\'s 1 s)</option><option value="500">Every 500 ms</option><option value="250">Every 250 ms</option><option value="150">Every 150 ms</option></select>', 'TradingView checks Tradovate for your orders and positions about once a second, so fills show up late. This checks more often while you\'re in a trade, have working orders, or just placed one, and goes back to normal when you\'re flat. It doesn\'t make fills happen sooner at the exchange; it shows them sooner, so sounds, the journal, brackets and the lockout react sooner. Only on demo-type accounts (that includes prop accounts). If Tradovate pushes back with errors, it slows down for a minute.')}
         <div class="item"><div class="txt"><small id="gFastSt" class="oco-st">Off</small></div></div>`)}
@@ -3986,11 +4052,11 @@
       let y = r.bottom + 8; if (y + h > innerHeight - 8) y = r.top - h - 8;
       tip.style.left = x + 'px'; tip.style.top = y + 'px';
     };
-    root.addEventListener('pointerover', e => { const el = e.target.closest && e.target.closest('.info'); if (el) showTip(el); });
-    root.addEventListener('pointerout', e => { if (e.target.closest && e.target.closest('.info')) tip.hidden = true; });
-    root.addEventListener('focusin', e => { if (e.target.classList && e.target.classList.contains('info')) showTip(e.target); });
-    root.addEventListener('focusout', e => { if (e.target.classList && e.target.classList.contains('info')) tip.hidden = true; });
-    root.addEventListener('click', e => { const el = e.target.closest && e.target.closest('.info'); if (el) { e.preventDefault(); e.stopPropagation(); tip.hidden ? showTip(el) : (tip.hidden = true); } }, true);
+    root.addEventListener('pointerover', e => { const el = e.target.closest && e.target.closest('button.info'); if (el) showTip(el); });
+    root.addEventListener('pointerout', e => { if (e.target.closest && e.target.closest('button.info')) tip.hidden = true; });
+    root.addEventListener('focusin', e => { if (e.target.matches && e.target.matches('button.info')) showTip(e.target); });
+    root.addEventListener('focusout', e => { if (e.target.matches && e.target.matches('button.info')) tip.hidden = true; });
+    root.addEventListener('click', e => { const el = e.target.closest && e.target.closest('button.info'); if (el) { e.preventDefault(); e.stopPropagation(); tip.hidden ? showTip(el) : (tip.hidden = true); } }, true);
     $('.content').addEventListener('scroll', () => { tip.hidden = true; });
     // show settings only when the switch they depend on is on
     function syncDeps() {
@@ -5033,6 +5099,7 @@
     $('#hNext').onclick = () => shiftMonth(1);
     setInterval(() => { if (panel.classList.contains('open') && S.ui.tab === 'home') renderHome(); }, 5000);
     // Share card: a PNG of today's (or this month's) result you can post. Streamer mode leaves the $ amount out.
+    buildUI.shareCard = () => $('#hShare').click();
     $('#hShare').onclick = async () => {
       if (!homeLast) await renderHome();
       const { D, unit } = homeLast;
@@ -5223,6 +5290,21 @@
     buildUI.onJournal = () => { if (panel.classList.contains('open')) renderJournal(); };
 
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
+    const setBtn = (key, v) => { S.extras[key] = v; save('extras'); applyButtonColors(); renderBtnColors(); };
+    $('#gBuy').oninput = e => setBtn('buyColor', e.target.value);
+    $('#gSell').oninput = e => setBtn('sellColor', e.target.value);
+    $('#gBuyReset').onclick = () => setBtn('buyColor', '');
+    $('#gSellReset').onclick = () => setBtn('sellColor', '');
+    function renderBtnColors() {
+      $('#gBuy').value = S.extras.buyColor || '#2962ff'; $('#gBuyLbl').textContent = S.extras.buyColor ? '' : "TradingView's own";
+      $('#gSell').value = S.extras.sellColor || '#f23645'; $('#gSellLbl').textContent = S.extras.sellColor ? '' : "TradingView's own";
+      $('#gBuyReset').hidden = !S.extras.buyColor; $('#gSellReset').hidden = !S.extras.sellColor;
+    }
+    $('#gEod').onchange = e => {
+      S.extras.eod = e.target.value; save('extras');
+      try { if (e.target.value !== 'off' && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission(); } catch (er) {}
+    };
+    $('#gEodClose').onchange = e => { S.extras.eodClose = e.target.value; save('extras'); };
     $('#gFast').onchange = e => { S.extras.fastMs = +e.target.value; save('extras'); fastTick().then(renderFast); };
     function renderFast() {
       const st = $('#gFast') && $('#gFastSt'); if (!st) return;
@@ -5248,6 +5330,7 @@
     for (const id of ['qWall', 'qCandles', 'qSounds', 'qStream']) $('#' + id).onchange = e => setQuick(id, e.target.checked);
     function themeIsLight() {
       $('#gFast').value = String(S.extras.fastMs || 0); renderFast();
+      renderBtnColors(); $('#gEod').value = S.extras.eod || 'traded'; $('#gEodClose').value = S.extras.eodClose || '17:00';
       $('#gGlass').checked = S.ui.glass !== false; $('#gDim').value = S.ui.glassDim || 62; $('#gDimVal').textContent = (S.ui.glassDim || 62) + '%';
       const t = S.ui.theme || 'auto';
       if (t === 'light') return true;
@@ -5319,7 +5402,7 @@
       const t = e.data && e.data.type;
       if (t === 'wall') { loadWallpaper(); refreshWall(); }
       if (t === 'candles') { rebuildLookup(); redraw(); }
-      if (t === 'extras') { applyAds(); applyStreamer(); brkKick(); }
+      if (t === 'extras') { applyAds(); applyStreamer(); brkKick(); applyButtonColors(); }
       if (t === 'alloff') applyAllOff();
       if (t === 'journal' && buildUI.onJournal) buildUI.onJournal();
       if (t === 'risk') applyLock();
