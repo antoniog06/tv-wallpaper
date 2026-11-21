@@ -24,7 +24,24 @@ jobs:
         run: Copy-Item ../tvwp.user.js wick.user.js
       - name: Install
         run: npm ci
-      - name: Build and publish
-        run: npx electron-builder --win --x64 --publish always
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build
+        run: npx electron-builder --win --x64 --publish never
+      - name: Version
+        id: v
+        run: echo "version=$(node -p "require('./package.json').version")" >> $env:GITHUB_OUTPUT
+      - name: Files
+        run: Get-ChildItem dist -File | Format-Table Name, Length
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.v.outputs.version }}
+          name: Wick ${{ steps.v.outputs.version }}
+          body: |
+            Download **Wick-Setup-${{ steps.v.outputs.version }}.exe** below and run it. Windows may say "unknown publisher": click More info → Run anyway.
+            Already installed? Wick updates itself.
+          files: |
+            app/dist/Wick-Setup-*.exe
+            app/dist/Wick-Setup-*.exe.blockmap
+            app/dist/latest.yml
+          fail_on_unmatched_files: true
+          make_latest: true
