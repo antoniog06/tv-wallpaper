@@ -1,0 +1,32 @@
+{
+  "name": "wick",
+  "productName": "Wick",
+  "version": "1.0.0",
+  "description": "Wick for TradingView: wallpapers, journal with chart video, discipline and lockout, prop tracker.",
+  "author": "Tony Garcia",
+  "license": "UNLICENSED",
+  "main": "main.js",
+  "repository": { "type": "git", "url": "https://github.com/antoniog06/tv-wallpaper.git" },
+  "scripts": {
+    "start": "electron .",
+    "build:win": "electron-builder --win --x64 --publish never",
+    "release:win": "electron-builder --win --x64 --publish always"
+  },
+  "dependencies": {
+    "electron-updater": "^6.6.2",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "electron": "45.4.1",
+    "electron-builder": "^26.0.0"
+  },
+  "build": {
+    "appId": "com.antoniog06.wick",
+    "productName": "Wick",
+    "files": ["main.js", "home.html", "src/**", "build/icon.png", "build/tray.png", "wick.user.js", "package.json"],
+    "directories": { "output": "dist", "buildResources": "build" },
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "icon": "build/icon.png", "artifactName": "Wick-Setup-${version}.${ext}" },
+    "nsis": { "oneClick": true, "perMachine": false, "createDesktopShortcut": "always", "createStartMenuShortcut": true, "shortcutName": "Wick", "deleteAppDataOnUninstall": false },
+    "publish": [{ "provider": "github", "owner": "antoniog06", "repo": "tv-wallpaper", "releaseType": "release" }]
+  }
+}

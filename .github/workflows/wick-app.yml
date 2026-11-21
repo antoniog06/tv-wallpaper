@@ -1,0 +1,28 @@
+# Builds the Wick app for Windows and publishes it as a GitHub release.
+# Push a tag like v1.0.1 (matching app/package.json "version") to release it; installed apps update themselves from it.
+name: Wick app
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Bundle the Wick script
+        run: Copy-Item ../tvwp.user.js wick.user.js
+      - name: Install
+        run: npm ci
+      - name: Build and publish
+        run: npx electron-builder --win --x64 --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

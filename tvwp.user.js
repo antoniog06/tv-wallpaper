@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.25.1
+// @version      3.26.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.25.1';
+  const VERSION = '3.26.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -122,11 +122,22 @@
   const bc = 'BroadcastChannel' in window ? new BroadcastChannel('tvwp') : null;
   function save(part) {
     try { localStorage.setItem('tvwp_settings', JSON.stringify(S)); } catch (e) {}
-    if (part) bc && bc.postMessage({ type: part });
+    if (part) {
+      bc && bc.postMessage({ type: part });
+      const at = Date.now();
+      try { localStorage.setItem('tvwp_settings_at', String(at)); } catch (e) {}
+      bridgeSend({ t: 'settings', data: shareable(S), at, part });
+    }
   }
   // Trade recording keeps going while the daily lockout is on, even with "Turn everything off" (the lockout counts trades from it).
   function recActive() { return !!S.rec.on && (!S.extras.allOff || !!S.risk.lockOn); }
-  const IN_APP = /Electron|TradingView\//i.test(navigator.userAgent);
+  const WICK_HOME = !!window.__wickHome;     // the Wick app's own window (no TradingView there)
+  const IN_APP = !WICK_HOME && /Electron|TradingView\//i.test(navigator.userAgent);
+  const BRIDGE_PORT = 47823, BRIDGE_WS = `ws://127.0.0.1:${BRIDGE_PORT}/wick`, BRIDGE_HTTP = `http://127.0.0.1:${BRIDGE_PORT}`;
+  const VIA_CDP = !WICK_HOME && window.__wickHost === 'app';
+  const bridge = { ws: null, up: false, synced: false, tries: 0, timer: 0, videos: new Set(), uploading: new Set(), sending: Promise.resolve(), status: null };
+  // Settings that stay with each window: where the panel sits, the wallpaper picked from this window's library, folder access.
+  const LOCAL_KEYS = { ui: ['x', 'y', 'px', 'py', 'tab', 'appLink'], wall: ['currentId', 'perPanel', 'used'], rec: ['folderOn', 'folderName'] };
 
   /* =========================================================
    * Candle colors: swap colors as the chart draws them
@@ -537,9 +548,9 @@
     soundDel(id) { return this.run('readwrite', s => s.delete(id), 'sounds'); },
     tradesAll() { return this.run('readonly', s => s.getAll(), 'trades'); },
     tradeGet(id) { return this.run('readonly', s => s.get(id), 'trades'); },
-    tradePut(x) { return this.run('readwrite', s => s.put(x), 'trades'); },
-    tradeDel(id) { return this.run('readwrite', s => s.delete(id), 'trades'); },
-    tradesClear() { return this.run('readwrite', s => s.clear(), 'trades'); },
+    tradePut(x, quiet) { if (!quiet) x.upd = Date.now(); return this.run('readwrite', s => s.put(x), 'trades').then(r => { if (!quiet) bridgeSend({ t: 'trades', recs: [x] }); return r; }); },
+    tradeDel(id, quiet) { return this.run('readwrite', s => s.delete(id), 'trades').then(r => { if (!quiet) bridgeSend({ t: 'tdel', ids: [id] }); return r; }); },
+    async tradesClear() { const ids = (await this.run('readonly', s => s.getAllKeys(), 'trades')) || []; const r = await this.run('readwrite', s => s.clear(), 'trades'); if (ids.length) bridgeSend({ t: 'tdel', ids }); return r; },
     videoGet(id) { return this.run('readonly', s => s.get(id), 'videos'); },
     videoPut(x) { return this.run('readwrite', s => s.put(x), 'videos'); },
     videoDel(id) { return this.run('readwrite', s => s.delete(id), 'videos'); },
@@ -935,7 +946,9 @@
   }
   function newTrade(f) {
     const ctx = tradeContext(f.symbol);
-    return { id: 't' + f.time + Math.random().toString(36).slice(2, 6), symbol: f.symbol, dir: f.side, qty: 0, maxQty: 0,
+    // Same id in every window (built from the broker's execution id), so the shared journal never lists a trade twice.
+    const h = f.id != null ? [...String(f.symbol) + '|' + f.id].reduce((a, c) => (Math.imul(a, 31) + c.charCodeAt(0)) >>> 0, 7).toString(36).slice(-4) : Math.random().toString(36).slice(2, 6);
+    return { id: 't' + f.time + h, symbol: f.symbol, dir: f.side, qty: 0, maxQty: 0,
       entryQty: 0, entryValue: 0, exitQty: 0, exitValue: 0, points: 0, commission: 0, pointValue: f.pointValue,
       openTime: f.time, fills: [], video: false, backfilled: false, broker: ctx.broker, tf: ctx.tf };
   }
@@ -1250,7 +1263,7 @@
           flush(); await flushing;
           const ok = await joinVideo(t.id, Date.now());
           if (!ok) pendingNoVideo.add(t.id);
-          else await videoCleanup();
+          else { videoUpload('v_' + t.id); await videoCleanup(); }
         } catch (e) { console.warn('[Wick] video save failed', e); }
         if (buildUI.onJournal) buildUI.onJournal();
         folderSync();
@@ -2183,6 +2196,7 @@
     return h;
   }
   async function lockFileWrite() {
+    bridgeSend({ t: 'risk', data: lockInfo() });   // the Wick app passes it to every other window
     try {
       const h = await lockFolder('readwrite');
       if (!h) return;
@@ -3360,6 +3374,15 @@
   /* collapsed sidebar: icons only */
   .panel { transition: grid-template-columns .18s; }
   .panel.mini { grid-template-columns: 58px 1fr; }
+  /* the Wick app's own window: the panel is the whole window */
+  .panel.home { left: 0 !important; top: 0 !important; width: 100vw; height: 100vh; max-width: none; max-height: none; border-radius: 0; border: none; box-shadow: none; }
+  .panel.home header { cursor: default; }
+  .panel:not(.home) .homeonly { display: none; }
+  .panel.home .linkopt, .panel.home .notapp, .panel.hosted .linkopt { display: none; }
+  .panel.linked .notapp { display: none; }
+  section[data-tab="app"] .item > .btn { flex: none; min-width: 132px; }
+  #aDot { width: 10px; height: 10px; border-radius: 50%; background: var(--line2); flex: none; }
+  #aDot.on { background: var(--good); box-shadow: 0 0 0 4px rgba(34,195,154,.18); }
   .panel.mini .bname, .panel.mini .conn > div, .panel.mini .tabs button[data-tab] > span, .panel.mini .grp, .panel.mini .quick, .panel.mini .foot .who, .panel.mini .power { display: none; }
   .panel.mini .brand { flex-direction: column; padding: 12px 0 8px; gap: 8px; }
   .panel.mini .navmini svg { transform: rotate(180deg); }
@@ -3706,6 +3729,7 @@
     prop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V10l7-5 7 5v11"/><path d="M10 21v-6h4v6"/></svg>',
     news: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14a2 2 0 002 2H6a2 2 0 01-2-2V5z"/><path d="M17 9h3v10a2 2 0 01-2 2"/><path d="M8 9h5M8 13h5M8 17h3"/></svg>',
     journal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11a3 3 0 013 3v13H8a3 3 0 01-3-3V4z"/><path d="M5 17a3 3 0 013-3h11"/><path d="M9 8h6"/></svg>',
+    app: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2.5"/><path d="M8 21h8M12 18v3"/><path d="M8 11l2.5 2.5L16 8"/></svg>',
     home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>',
     extras: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>'
   };
@@ -3722,7 +3746,8 @@
     size: ['Position size', 'How many contracts to trade for the risk you choose.'],
     prop: ['Prop tracker', 'Your funded-account rules, tracked live.'],
     news: ['News', 'High-impact US economic events, with warnings before they hit.'],
-    extras: ['Settings', 'Ads, appearance, shortcuts and info.']
+    extras: ['Settings', 'Ads, appearance, shortcuts and info.'],
+    app: ['Wick app', 'One journal, settings and lockout for Chrome and the TradingView app.']
   };
   // A setting row: title, a one-line summary, the control, and optional details behind an (i).
   const item = (title, desc, control, more) => `<div class="item"><div class="txt"><b>${title}${more ? `<button class="info" type="button" tabindex="0" data-tip="${String(more).replace(/"/g, '&quot;')}" aria-label="More about this">i</button>` : ''}</b>${desc ? `<small>${desc}</small>` : ''}</div>${control}</div>`;
@@ -3757,8 +3782,8 @@
         <label><span>Sounds</span><input type="checkbox" id="qSounds"></label>
         <label><span>Streamer <kbd>Alt+Shift+S</kbd></span><input type="checkbox" id="qStream"></label>
       </div>
-      <div class="tabs tabs-bottom">${NAV('extras', 'Settings')}</div>
-      <div class="foot"><span class="me" id="meAv">W</span><div class="who"><b id="meName">Wick</b><small>v${VERSION} · Alt+Shift+W</small></div><button class="thm" id="thmBtn" title="Theme"></button></div>
+      <div class="tabs tabs-bottom">${NAV('app', 'Wick app')}${NAV('extras', 'Settings')}</div>
+      <div class="foot"><span class="me" id="meAv">W</span><div class="who"><b id="meName">Wick</b><small id="meVer">v${VERSION} · Alt+Shift+W</small></div><button class="thm" id="thmBtn" title="Theme"></button></div>
     </aside>
     <main><div class="backdrop" id="backdrop"></div>
       <header><div class="t"><h1 id="pgTitle"></h1><p id="pgSub"></p></div><button class="pill live sbadge" id="strBadge" title="Streamer mode is on · click to turn off (Alt+Shift+S)" hidden>● Streamer</button><span class="pill" id="pill"></span><label class="hdr-ctl" id="hdrCtl" hidden><span id="hdrCtlLbl"></span></label><button class="x" title="Close">×</button></header>
@@ -3984,6 +4009,30 @@
       <div class="hint">Covers the account panel, money columns in your history tables, and amounts on the chart. Prices and symbols stay visible.</div>
     </section>
 
+    <section data-tab="app">
+      <div class="card pg">
+        <div class="pg-h">Connection</div>
+        <div class="linkopt">${item('Connect this browser to the Wick app', 'Shares your journal, chart videos, settings and lockout with the Wick app on this PC.', '<input type="checkbox" id="aLink">', 'Talks only to the Wick app on this computer (127.0.0.1), never the internet. The first time, Chrome may ask to let tradingview.com reach apps on this device: allow it. Settings that belong to one window stay put: where this panel sits, the wallpaper picked from this browser\'s library, and folder access.')}</div>
+        <div class="item"><div class="txt"><b id="aState">Not connected</b><small id="aSub"></small></div><span class="dot" id="aDot"></span></div>
+      </div>
+      <div class="card pg homeonly">
+        <div class="pg-h">TradingView desktop app</div>
+        <div class="item"><div class="txt"><b id="aTv">Checking…</b><small id="aTvSub"></small></div><button class="btn primary" id="aOpenTv">Open TradingView</button></div>
+        ${item('Open TradingView when Wick starts', '', '<input type="checkbox" id="aTvAuto">')}
+        ${item('Notice when TradingView opens without Wick', 'Offers to reopen it with Wick.', '<input type="checkbox" id="aTvWatch">')}
+      </div>
+      <div class="card pg homeonly">
+        <div class="pg-h">Wick</div>
+        ${item('Start with Windows', 'Starts in the tray, so the journal and lockout are ready.', '<input type="checkbox" id="aLogin">')}
+        <div class="item"><div class="txt"><b id="aUpd">Updates</b><small id="aUpdSub"></small></div><button class="btn" id="aUpdBtn">Check now</button></div>
+        <div class="item"><div class="txt"><b>Your data</b><small id="aData">Trades, videos and settings live on this PC.</small></div><button class="btn" id="aFolder">Open folder</button></div>
+      </div>
+      <div class="card pg notapp">
+        <div class="pg-h">Get the Wick app</div>
+        <div class="hint">The Wick app runs on its own (in the tray), opens the TradingView desktop app with Wick already in it, and keeps one journal, one set of settings and one lockout for Chrome and the desktop app. Download <b>Wick Setup</b> from <a href="https://github.com/antoniog06/tv-wallpaper/releases/latest" target="_blank" rel="noopener">github.com/antoniog06/tv-wallpaper/releases</a>, run it, then switch on “Connect this browser” above.</div>
+      </div>
+    </section>
+
     <section data-tab="extras">
       ${grp('Chart buttons', `
         ${item('Buy button', '', '<div class="row"><span class="hint" id="gBuyLbl"></span><input type="color" id="gBuy"><button class="btn slim" id="gBuyReset">Reset</button></div>')}
@@ -4062,6 +4111,7 @@
       return [cx, cy];
     }
     function placePanel() {
+      if (WICK_HOME) return;
       placeFab();
       const pw = panel.offsetWidth || 780, ph = panel.offsetHeight || 580;
       let left = S.ui.px ?? Math.round((window.innerWidth - pw) / 2);
@@ -4075,7 +4125,7 @@
     const head = $('header');
     let wdrag = null;
     head.addEventListener('pointerdown', e => {
-      if (e.target.closest('button, .pill')) return;
+      if (WICK_HOME || e.target.closest('button, .pill')) return;
       wdrag = { sx: e.clientX, sy: e.clientY, ox: panel.offsetLeft, oy: panel.offsetTop };
       try { head.setPointerCapture(e.pointerId); } catch (err) {}
     });
@@ -4114,6 +4164,7 @@
     }
     $('.x').onclick = () => toggle(false);
     window.addEventListener('keydown', e => {
+      if (WICK_HOME) return;
       if (e.altKey && e.shiftKey && (e.key === 'W' || e.key === 'w')) { e.preventDefault(); toggle(); }
     }, true);
     window.addEventListener('resize', () => { placeFab(); if (panel.classList.contains('open')) placePanel(); });
@@ -4192,6 +4243,7 @@
       $('#pgSub').textContent = PAGES[t][1];
       placeMaster(t);
       if (t === 'home') renderHome();
+      if (t === 'app') renderAppPage();
       if (t === 'wall' && typeof renderWallUI === 'function') renderWallUI();
       $('.content').scrollTop = 0;
       syncDeps();
@@ -5270,6 +5322,29 @@
       let v = await DB.videoGet(t.videoId);
       if (!v) { try { if (await joinVideo(t.id)) v = await DB.videoGet('v_' + t.id); } catch (e) {} }   // pieces left from a reload
       $('#rPMsg').hidden = true; $('#rVideoEl').hidden = false; $('#rPDown').hidden = false;
+      if (!v && bridge.up && bridge.videos.has(t.videoId)) {
+        // filmed in another window (Chrome or the desktop app): play it from the Wick app
+        const url = `${BRIDGE_HTTP}/video/${encodeURIComponent(t.videoId)}`;
+        if (playerUrl) URL.revokeObjectURL(playerUrl); playerUrl = null;
+        $('#rPTitle').textContent = `${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSym(t.symbol)} · ${new Date(t.openTime).toLocaleString()}`;
+        $('#rPlayer').hidden = false;
+        const viaLink = async () => {
+          $('#rPMsg').textContent = 'Loading the video from the Wick app…'; $('#rPMsg').hidden = false;
+          try {
+            const blob = await bridgeVideo(t.videoId);
+            playerUrl = URL.createObjectURL(blob);
+            $('#rVideoEl').src = playerUrl; $('#rPDown').href = playerUrl; $('#rPDown').setAttribute('download', `trade-${shortSym(t.symbol)}.${videoExt(blob.type)}`);
+            $('#rPMsg').hidden = true;
+          } catch (e) { $('#rPMsg').textContent = 'Couldn\'t load this video from the Wick app. Open the Wick app to watch it.'; }
+        };
+        if (VIA_CDP) { viaLink(); return; }
+        const el = $('#rVideoEl');
+        el.onerror = () => { el.onerror = null; viaLink(); };
+        el.src = url;
+        $('#rPDown').href = url + '?download=1'; $('#rPDown').removeAttribute('download');
+        return;
+      }
+      if (!v && bridge.up && !bridge.synced) { $('#rPTitle').textContent = 'Loading…'; setTimeout(() => openVideo(t), 800); return; }
       if (!v) {
         const why = t.videoNote || videoErr[t.id];
         $('#rPTitle').textContent = `${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSym(t.symbol)} · ${new Date(t.openTime).toLocaleString()}`;
@@ -5284,7 +5359,7 @@
       playerUrl = URL.createObjectURL(v.blob);
       $('#rVideoEl').src = playerUrl;
       $('#rPTitle').textContent = `${t.dir > 0 ? 'Long' : 'Short'} ${t.qty} ${shortSym(t.symbol)} · ${new Date(t.openTime).toLocaleString()}`;
-      $('#rPDown').href = playerUrl;
+      $('#rPDown').href = playerUrl; $('#rPDown').setAttribute('download', '');
       $('#rPDown').download = `trade-${shortSym(t.symbol)}-${new Date(t.openTime).toISOString().replace(/[:.]/g, '-')}.${videoExt(v.mime || v.blob.type)}`;
       $('#rPlayer').hidden = false;
     }
@@ -5467,7 +5542,63 @@
       $('#gAllOff').checked = off;
     }
     $('#gResetPos').onclick = () => { S.ui.x = S.ui.y = S.ui.px = S.ui.py = null; save(null); placePanel(); };
+    function renderAppPage() {
+      const st = bridge.status || {}, tv = st.tv || {}, cl = st.clients || {}, up = st.update || {};
+      panel.classList.toggle('linked', bridge.up);
+      panel.classList.toggle('hosted', window.__wickHost === 'app');
+      $('#aLink').checked = !!S.ui.appLink || window.__wickHost === 'app';
+      $('#aDot').classList.toggle('on', bridge.up);
+      $('#aState').textContent = bridge.up ? (WICK_HOME ? 'Running' : 'Connected to the Wick app') : linkWanted() ? 'Looking for the Wick app…' : 'Not connected';
+      const parts = [];
+      if (cl.desktop) parts.push(`${cl.desktop} TradingView app window${cl.desktop === 1 ? '' : 's'}`);
+      if (cl.browser) parts.push(`${cl.browser} browser tab${cl.browser === 1 ? '' : 's'}`);
+      $('#aSub').textContent = bridge.up ? (parts.length ? 'Linked: ' + parts.join(' · ') : 'No TradingView windows linked yet.') + (st.trades != null ? ` · ${st.trades} trades, ${st.videos || 0} videos in the journal` : '')
+        : linkWanted() ? 'Is the Wick app running? It starts from the Start menu or the tray.' : 'Turn this on if you use the Wick app.';
+      if (!WICK_HOME) return;
+      $('#aTv').textContent = !tv.found ? 'TradingView desktop app not found' : tv.linked ? 'Open with Wick' : tv.running ? 'Open without Wick' : 'Closed';
+      $('#aTvSub').textContent = !tv.found ? 'Install it from tradingview.com/desktop, then click Open TradingView.' : tv.linked ? `${tv.charts || 0} chart window${tv.charts === 1 ? '' : 's'} with Wick loaded.` : tv.running ? 'Wick can reopen it with Wick in it (your positions and orders stay at your broker).' : 'Opens with Wick already in it.';
+      $('#aOpenTv').textContent = tv.linked ? 'Show TradingView' : tv.running ? 'Reopen with Wick' : 'Open TradingView';
+      $('#aOpenTv').disabled = !tv.found;
+      $('#aTvAuto').checked = !!(st.prefs && st.prefs.tvOnStart);
+      $('#aTvWatch').checked = !(st.prefs && st.prefs.tvWatch === false);
+      $('#aLogin').checked = !!(st.prefs && st.prefs.login);
+      $('#aUpd').textContent = `Wick app ${st.appVersion ? 'v' + st.appVersion : ''} · script v${VERSION}`;
+      $('#aUpdSub').textContent = up.state === 'ready' ? `Version ${up.version} is ready.` : up.state === 'downloading' ? `Downloading version ${up.version || ''}… ${up.pct ? Math.round(up.pct) + '%' : ''}` : up.state === 'checking' ? 'Checking…' : up.state === 'error' ? 'Couldn\'t check for updates: ' + (up.error || '') : up.state === 'none' ? 'You have the latest version.' : 'Updates install by themselves.';
+      $('#aUpdBtn').textContent = up.state === 'ready' ? 'Restart to update' : 'Check now';
+      if (st.dataDir) $('#aData').textContent = 'Trades, videos and settings live on this PC: ' + st.dataDir;
+    }
+    buildUI.onAppStatus = () => { if (panel.classList.contains('open') && S.ui.tab === 'app') renderAppPage(); renderStatus(); };
+    const appCmd = (name, extra) => bridgeSend({ t: 'cmd', name, ...extra });
+    $('#aLink').onchange = e => {
+      S.ui.appLink = e.target.checked; save(null);
+      if (S.ui.appLink) { bridge.tries = 0; bridgeConnect(); } else bridgeStop();
+      setTimeout(renderAppPage, 300);
+    };
+    $('#aOpenTv').onclick = () => appCmd('openTv');
+    $('#aTvAuto').onchange = e => appCmd('pref', { key: 'tvOnStart', on: e.target.checked });
+    $('#aTvWatch').onchange = e => appCmd('pref', { key: 'tvWatch', on: e.target.checked });
+    $('#aLogin').onchange = e => appCmd('pref', { key: 'login', on: e.target.checked });
+    $('#aUpdBtn').onclick = () => appCmd((bridge.status && bridge.status.update && bridge.status.update.state) === 'ready' ? 'installUpdate' : 'checkUpdate');
+    $('#aFolder').onclick = () => appCmd('openData');
+    setInterval(() => { if (panel.classList.contains('open') && S.ui.tab === 'app') renderAppPage(); }, 1500);
+    if (WICK_HOME) {
+      panel.classList.add('home'); fab.hidden = true; $('.x').hidden = true;
+      if (!S.ui.tab || S.ui.tab === 'wall') S.ui.tab = 'home';
+      setTimeout(() => toggle(true), 0);
+    }
     function renderStatus() {
+      if (WICK_HOME) {
+        const st = bridge.status || {}, tv = st.tv || {}, cl = st.clients || {};
+        $('#connDot').classList.toggle('on', !!tv.linked);
+        $('#connName').textContent = tv.linked ? 'TradingView · with Wick' : tv.running ? 'TradingView · without Wick' : 'TradingView closed';
+        const n = (cl.desktop || 0) + (cl.browser || 0);
+        $('#connText').textContent = `${n} window${n === 1 ? '' : 's'} linked · Skins ${S.extras.allOff ? 'off' : skinsOn() ? 'on' : 'off'}`;
+        const pill = $('#pill'); pill.className = 'pill' + (S.extras.allOff ? ' live' : tv.linked ? ' ok' : '');
+        pill.textContent = S.extras.allOff ? '⏻ All off' : tv.linked ? '● TradingView' : 'Wick app';
+        $('#strBadge').hidden = !S.extras.streamer || !!S.extras.allOff;
+        $('#meVer').textContent = `App v${st.appVersion || '…'} · script v${VERSION}`;
+        return;
+      }
       let name = '', connected = false;
       try {
         const b = currentBroker();
@@ -5509,10 +5640,8 @@
   /* =========================================================
    * Cross-tab sync + startup
    * ======================================================= */
-  if (bc) {
-    bc.onmessage = e => {
+  function applyPart(t) {
       S = readSettings();
-      const t = e.data && e.data.type;
       if (t === 'wall') { loadWallpaper(); refreshWall(); }
       if (t === 'candles') { rebuildLookup(); redraw(); }
       if (t === 'extras') { applyAds(); applyStreamer(); brkKick(); applyButtonColors(); }
@@ -5523,8 +5652,165 @@
       if (t === 'soundlist') bufferCache.clear();
       if (t === 'ind') startInd();
       buildUI.refresh && buildUI.refresh();
-    };
   }
+  if (bc) bc.onmessage = e => applyPart(e.data && e.data.type);
+
+  /* =========================================================
+   * Wick app link: shares settings, the journal, videos and the lockout
+   * between Chrome, the TradingView desktop app and the Wick app window.
+   * Talks only to the Wick app on this PC (127.0.0.1).
+   * ======================================================= */
+  function linkWanted() { return WICK_HOME || window.__wickHost === 'app' || !!S.ui.appLink; }
+  function shareable(src) {
+    const o = JSON.parse(JSON.stringify(src));
+    for (const [k, ks] of Object.entries(LOCAL_KEYS)) for (const f of ks) if (o[k]) delete o[k][f];
+    return o;
+  }
+  function bridgeSend(m) { if (bridge.up) try { bridge.ws.send(typeof m === 'string' || m instanceof ArrayBuffer ? m : JSON.stringify(m)); } catch (e) {} }
+  function bridgeConnect() {
+    clearTimeout(bridge.timer);
+    if (bridge.ws || !linkWanted() || typeof WebSocket === 'undefined') return;
+    let ws;
+    try { ws = VIA_CDP ? cdpSocket() : new WebSocket(BRIDGE_WS); } catch (e) { bridgeRetry(); return; }
+    bridge.ws = ws; ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+      bridge.up = true; bridge.tries = 0; bridge.synced = false;
+      bridgeSend({ t: 'hello', kind: WICK_HOME ? 'home' : IN_APP ? 'desktop' : 'browser', ver: VERSION, url: location.href,
+        // the app window only takes the shared settings; TradingView windows bring yours
+        settings: WICK_HOME ? null : shareable(S), settingsAt: WICK_HOME ? 0 : +localStorage.getItem('tvwp_settings_at') || 0, risk: lockInfo() });
+      tradeSync();
+      buildUI.refresh && buildUI.refresh();
+    };
+    ws.onmessage = e => { if (typeof e.data !== 'string') return; let m; try { m = JSON.parse(e.data); } catch (err) { return; } onBridge(m).catch(err => console.warn('[Wick] app link', err)); };
+    ws.onclose = () => { const was = bridge.up; bridge.ws = null; bridge.up = false; bridge.synced = false; if (was && buildUI.refresh) buildUI.refresh(); bridgeRetry(); };
+    ws.onerror = () => {};
+  }
+  // In the TradingView desktop app, the Wick app talks to this page over the connection it loaded Wick through.
+  function cdpSocket() {
+    const sock = { readyState: 0, bufferedAmount: 0, binaryType: 'arraybuffer',
+      send(d) {
+        if (sock.readyState !== 1 || typeof window.__wickLink !== 'function') return;
+        if (typeof d === 'string') { window.__wickLink('T' + d); return; }
+        const u = new Uint8Array(d); let bin = '';
+        for (let i = 0; i < u.length; i += 0x8000) bin += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000));
+        window.__wickLink('B' + btoa(bin));
+      },
+      close() { if (sock.readyState === 3) return; sock.readyState = 3; window.__wickLinkRecv = null; sock.onclose && sock.onclose(); } };
+    window.__wickLinkRecv = data => { if (sock.readyState === 1 && sock.onmessage) sock.onmessage({ data }); };
+    setTimeout(() => {
+      if (typeof window.__wickLink === 'function') { sock.readyState = 1; sock.onopen && sock.onopen(); }
+      else sock.close();
+    }, 0);
+    return sock;
+  }
+  // A video stored in the Wick app, fetched over the link (when this window can't load its address).
+  function bridgeVideo(id) {
+    return new Promise((resolve, reject) => {
+      bridge.vget = bridge.vget || {};
+      const job = bridge.vget[id] = { parts: [], resolve, reject, timer: setTimeout(() => { delete bridge.vget[id]; reject(new Error('timed out')); }, 120000) };
+      bridgeSend({ t: 'vget', id });
+      return job;
+    });
+  }
+  function bridgeRetry() { clearTimeout(bridge.timer); if (linkWanted()) bridge.timer = setTimeout(bridgeConnect, Math.min(20000, 2000 * ++bridge.tries)); }
+  function bridgeStop() { clearTimeout(bridge.timer); if (bridge.ws) try { bridge.ws.close(); } catch (e) {} }
+  function lockInfo() {
+    const st = riskLoad();
+    return { lockDay: st.lockDay ?? null, lockReason: st.lockReason || '', lockedAt: st.lockedAt || 0, unlocked: !!st.unlocked, unlockedAt: st.unlockedAt || 0, from: WICK_HOME ? 'Wick app' : IN_APP ? 'desktop app' : 'browser' };
+  }
+  // Apply a lock/unlock that happened somewhere else (same rules as the shared lockout file).
+  function mergeLock(f) {
+    if (!f) return;
+    const today = tradingDay(Date.now()), st = riskLoad();
+    const hereLocked = st.lockDay === today && !!st.lockReason;
+    const thereToday = f.lockDay === today && !!f.lockReason;
+    if (!thereToday) { if (hereLocked) bridgeSend({ t: 'risk', data: lockInfo() }); return; }
+    if (!hereLocked && !st.unlocked) {
+      if (f.unlocked) return;
+      st.lockDay = today; st.lockReason = /\(in the /.test(f.lockReason) ? f.lockReason : `${f.lockReason} (in the ${f.from || 'other window'})`; st.lockedAt = f.lockedAt || Date.now(); st.unlocked = false;
+      riskSave(st); bc && bc.postMessage({ type: 'risk' }); playSound('tone:alarm'); applyLock();
+    } else if (hereLocked && !st.unlocked && f.unlocked && (f.unlockedAt || 0) >= (st.lockedAt || 0) - 60000) {
+      st.unlocked = true; st.unlockedAt = f.unlockedAt; riskSave(st); bc && bc.postMessage({ type: 'risk' }); applyLock();
+    }
+  }
+  function applyRemoteSettings(data, at) {
+    if (!data) return;
+    const cur = JSON.parse(JSON.stringify(S)), next = JSON.parse(JSON.stringify(data));
+    for (const [k, ks] of Object.entries(LOCAL_KEYS)) { next[k] = next[k] || {}; for (const f of ks) if (cur[k] && f in cur[k]) next[k][f] = cur[k][f]; }
+    if (rulesFrozen()) { next.risk = cur.risk; next.prop = cur.prop; }   // locked: rules can't be loosened from another window either
+    try { localStorage.setItem('tvwp_settings', JSON.stringify(next)); localStorage.setItem('tvwp_settings_at', String(at || Date.now())); } catch (e) {}
+    const was = JSON.stringify(cur);
+    S = readSettings();
+    if (JSON.stringify(S) === was) return;
+    for (const t of ['wall', 'candles', 'extras', 'alloff', 'sounds', 'ind', 'risk', 'journal']) { try { applyPart(t); } catch (e) {} }
+  }
+  async function tradeSync() {
+    const all = (await DB.tradesAll()) || [];
+    const have = {}; for (const t of all) have[t.id] = t.upd || t.closeTime || 0;
+    bridgeSend({ t: 'tsync', have });
+  }
+  async function onBridge(m) {
+    if (m.t === 'settings') applyRemoteSettings(m.data, m.at);
+    else if (m.t === 'risk') mergeLock(m.data);
+    else if (m.t === 'trades') {
+      let n = 0;
+      for (const r of m.recs || []) {
+        const cur = await DB.tradeGet(r.id);
+        if (cur && (cur.upd || 0) >= (r.upd || 0)) continue;
+        if (cur && cur.videoId && !r.videoId) r.videoId = cur.videoId;
+        await DB.tradePut(r, true); n++;
+      }
+      if (n) { journalDirty = true; buildUI.onJournal && buildUI.onJournal(); bc && bc.postMessage({ type: 'journal' }); }
+    } else if (m.t === 'tdel') {
+      for (const id of m.ids || []) { await DB.tradeDel(id, true); }
+      if ((m.ids || []).length) { journalDirty = true; buildUI.onJournal && buildUI.onJournal(); bc && bc.postMessage({ type: 'journal' }); }
+    } else if (m.t === 'tsync') {
+      // the app's answer: trades we're missing, ones it wants from us, deleted ones, and the videos it holds
+      for (const id of m.tomb || []) await DB.tradeDel(id, true);
+      await onBridge({ t: 'trades', recs: m.recs || [] });
+      if ((m.want || []).length) {
+        const recs = [];
+        for (const id of m.want) { const r = await DB.tradeGet(id); if (r) recs.push(r); }
+        for (let i = 0; i < recs.length; i += 200) bridgeSend({ t: 'trades', recs: recs.slice(i, i + 200), sync: true });
+      }
+      bridge.videos = new Set(m.videos || []);
+      bridge.synced = true;
+      journalDirty = true; buildUI.onJournal && buildUI.onJournal();
+      for (const k of (await DB.videoKeys()) || []) if (!bridge.videos.has(String(k))) videoUpload(String(k));
+    } else if (m.t === 'videos') { for (const id of m.ids || []) bridge.videos.add(id); buildUI.onJournal && buildUI.onJournal(); }
+    else if (m.t === 'vdata') {
+      const job = bridge.vget && bridge.vget[m.id];
+      if (!job) return;
+      if (m.missing) { clearTimeout(job.timer); delete bridge.vget[m.id]; job.reject(new Error('missing')); return; }
+      const bin = atob(m.b64), u = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+      job.parts[m.i] = u; job.mime = m.mime;
+      if (m.last) { clearTimeout(job.timer); delete bridge.vget[m.id]; job.resolve(new Blob(job.parts, { type: job.mime })); }
+    }
+    else if (m.t === 'status') { bridge.status = m; buildUI.onAppStatus && buildUI.onAppStatus(); }
+  }
+  // Videos go to the app in 512 KB pieces, one video at a time.
+  function videoUpload(id) {
+    if (!bridge.up || bridge.videos.has(id) || bridge.uploading.has(id)) return;
+    bridge.uploading.add(id);
+    bridge.sending = bridge.sending.then(async () => {
+      try {
+        const v = await DB.videoGet(id);
+        if (!v || !v.blob || !bridge.up) return;
+        const ws = bridge.ws, size = v.blob.size, step = 512 * 1024;
+        bridgeSend({ t: 'vbegin', id, tradeId: v.tradeId, mime: v.mime || v.blob.type, size, started: v.started, ended: v.ended });
+        for (let off = 0; off < size; off += step) {
+          if (!bridge.up || bridge.ws !== ws) return;
+          while (ws.bufferedAmount > 8 * 1048576) await sleepMs(50);
+          ws.send(await v.blob.slice(off, off + step).arrayBuffer());
+          if (VIA_CDP) await sleepMs(15);
+        }
+        bridgeSend({ t: 'vend', id });
+      } catch (e) { console.warn('[Wick] video upload', e); }
+      finally { bridge.uploading.delete(id); }
+    });
+  }
+  setTimeout(bridgeConnect, WICK_HOME ? 0 : 1500);
 
   function start() {
     buildUI();
