@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.22.1
+// @version      3.23.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.22.1';
+  const VERSION = '3.23.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -69,7 +69,7 @@
    * Settings (localStorage, synced across tabs)
    * ======================================================= */
   const DEFAULTS = {
-    wall: { enabled: true, opacity: 0.55, blend: 'lighten', fit: 'cover', currentId: null, zoom: 1, posX: 0.5, posY: 0.5, dim: 0, blur: 0, perPanel: {}, used: {} },
+    wall: { enabled: true, opacity: 0.55, blend: 'lighten', fit: 'cover', currentId: null, zoom: 1, posX: 0.5, posY: 0.5, dim: 0, blur: 0, perPanel: {}, used: {}, autoDim: false, tint: false },
     candles: {
       enabled: false, up: '#00ff9c', upA: 1, down: '#ff2e88', downA: 1,
       separate: false, borderUp: '#00ff9c', borderDown: '#ff2e88', wickUp: '#00ff9c', wickDown: '#ff2e88',
@@ -876,6 +876,27 @@
     } catch (e) {}
     return { broker, tf };
   }
+  // While a trade is open, note where its stop sits (first stop seen), so the journal can show results in R.
+  async function captureStops() {
+    if (!recActive()) return;
+    const st0 = recLoad();
+    if (!Object.values(st0.open).some(t => t && t.stop == null)) return;
+    const b = currentBroker();
+    if (!b || typeof b.orders !== 'function') return;
+    let orders = [];
+    try { orders = (await b.orders()) || []; } catch (e) { return; }
+    await withLock('tvwp-rec', async () => {
+      const st = recLoad(); let changed = false;
+      for (const sym of Object.keys(st.open)) {
+        const t = st.open[sym];
+        if (!t || t.stop != null) continue;
+        const dir = Math.sign(t.qty) || t.dir || 1;
+        const o = orders.find(o => o && o.symbol === sym && +o.side === -dir && [3, 4].includes(+o.type) && [3, 4, 6].includes(+o.status) && +o.stopPrice);
+        if (o) { t.stop = +o.stopPrice; changed = true; }
+      }
+      if (changed) recSave(st);
+    });
+  }
   function newTrade(f) {
     const ctx = tradeContext(f.symbol);
     return { id: 't' + f.time + Math.random().toString(36).slice(2, 6), symbol: f.symbol, dir: f.side, qty: 0, maxQty: 0,
@@ -893,6 +914,7 @@
       ticks: tick ? Math.round(((exit - entry) * t.dir) / tick) : null,
       gross: pv ? t.points * pv : null, commission: t.commission,
       net: pv ? t.points * pv - t.commission : null, currency: info.currency || 'USD',
+      stop: t.stop ?? null, risk: t.stop != null && pv ? Math.abs(entry - t.stop) * pv * (t.maxQty || 1) : null,
       fills: t.fills, backfilled: t.backfilled, adopted: !!t.adopted, broker: t.broker || '', tf: t.tf || '', pointValue: pv || null, videoId: t.video && !pendingNoVideo.has(t.id) ? 'v_' + t.id : null
     };
     await DB.tradePut(rec);
@@ -2610,6 +2632,7 @@
     if (pageClosing) return;
     if ((S.risk.lockOn || S.risk.newsLock || S.prop.on) && Date.now() - posCache.at > 1500) await pollPositions();
     await refreshDay();
+    captureStops().catch(() => {});
     guardBroker(currentBroker());
     lockFileSync();
     const r = S.risk, out = [];
@@ -2800,8 +2823,28 @@
   const resizeObs = new ResizeObserver(() => schedule());
   const watched = new WeakSet();
 
+  // average brightness 0..1 of an image/frame, for "auto-dim for readability"
+  function brightness(img) {
+    try {
+      const c = document.createElement('canvas'); c.width = c.height = 24;
+      const g = c.getContext('2d', { willReadFrequently: true }); g.drawImage(img, 0, 0, 24, 24);
+      const d = g.getImageData(0, 0, 24, 24).data; let t = 0;
+      for (let i = 0; i < d.length; i += 4) t += (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      return t / (d.length / 4);
+    } catch (e) { return 0.4; }
+  }
+  async function decodeVideo(blob) {
+    const url = URL.createObjectURL(blob);
+    const v = document.createElement('video');
+    Object.assign(v, { muted: true, loop: true, playsInline: true, preload: 'auto', src: url });
+    v.setAttribute('muted', ''); v.setAttribute('playsinline', '');
+    await new Promise((res, rej) => { v.addEventListener('loadeddata', res, { once: true }); v.addEventListener('error', () => rej(new Error('video')), { once: true }); });
+    v.play().catch(() => {});
+    return { kind: 'video', video: v, url, lum: brightness(v) };
+  }
   async function decode(blob) {
     const type = blob.type;
+    if (/^video\//.test(type)) return decodeVideo(blob);
     if ('ImageDecoder' in window && /^image\/(gif|webp|png|apng|avif)$/.test(type)) {
       let ok = false;
       try { ok = await ImageDecoder.isTypeSupported(type); } catch (e) {}
@@ -2810,20 +2853,25 @@
         await decoder.tracks.ready;
         await decoder.completed;
         const track = decoder.tracks.selectedTrack;
-        if (track && track.frameCount > 1) return { kind: 'anim', decoder, count: track.frameCount, frame: null };
+        if (track && track.frameCount > 1) {
+          let lum = 0.4; try { const { image } = await decoder.decode({ frameIndex: 0 }); lum = brightness(image); image.close(); } catch (e) {}
+          return { kind: 'anim', decoder, count: track.frameCount, frame: null, lum };
+        }
         const { image } = await decoder.decode({ frameIndex: 0 });
         const bmp = await createImageBitmap(image);
         image.close(); decoder.close();
-        return { kind: 'static', image: bmp };
+        return { kind: 'static', image: bmp, lum: brightness(bmp) };
       }
     }
-    return { kind: 'static', image: await createImageBitmap(blob) };
+    const bmp = await createImageBitmap(blob);
+    return { kind: 'static', image: bmp, lum: brightness(bmp) };
   }
 
   function dispose(src) {
     if (!src) return;
     try {
       if (src.kind === 'static') src.image.close();
+      else if (src.kind === 'video') { src.dead = true; src.video.pause(); src.video.removeAttribute('src'); src.video.load(); URL.revokeObjectURL(src.url); }
       else { if (src.frame) src.frame.close(); src.decoder.close(); }
     } catch (e) {}
   }
@@ -2834,6 +2882,7 @@
     source = src; sourceId = id;
     document.querySelectorAll('canvas.' + LAYER).forEach(c => delete c.dataset.key);
     if (src && src.kind === 'anim') runAnimation(src, animToken);
+    if (src && src.kind === 'video') runVideo(src, animToken);
     schedule();
   }
 
@@ -2842,8 +2891,10 @@
   function setBackdrop(blob) {
     if (blob === backdropBlob && backdropUrl) return;
     backdropBlob = blob || null;
-    if (backdropUrl) { URL.revokeObjectURL(backdropUrl); backdropUrl = null; }
-    if (blob) backdropUrl = URL.createObjectURL(blob);
+    if (backdropUrl && backdropUrl.startsWith('blob:')) URL.revokeObjectURL(backdropUrl);
+    backdropUrl = null;
+    if (typeof blob === 'string') backdropUrl = blob;                 // a video's preview frame (data URL)
+    else if (blob) backdropUrl = URL.createObjectURL(blob);
     if (buildUI.applyBackdrop) buildUI.applyBackdrop();
   }
   async function loadWallpaper() {
@@ -2854,7 +2905,7 @@
     try {
       const wp = await DB.get(id);
       if (token !== loadToken) return;
-      setBackdrop(wp && wp.blob);
+      setBackdrop(wp && (wp.video ? wp.thumb : wp.blob));
       if (!wp) { setSource(null, null); return; }
       const src = await decode(wp.blob);
       if (token !== loadToken) { dispose(src); return; }
@@ -2867,6 +2918,18 @@
     }
   }
 
+  // Video wallpapers: redraw on each new video frame (about 30 per second), paused while hidden.
+  async function runVideo(src, token, live = () => animToken) {
+    const v = src.video;
+    while (token === live() && !src.dead) {
+      if (document.hidden || !S.wall.enabled || S.extras.allOff || !document.querySelector('canvas.' + LAYER)) { if (!v.paused) v.pause(); await sleep(300); continue; }
+      if (v.paused) v.play().catch(() => {});
+      await new Promise(r => (v.requestVideoFrameCallback ? v.requestVideoFrameCallback(() => r()) : setTimeout(r, 33)));
+      if (token !== live()) return;
+      document.querySelectorAll('canvas.' + LAYER).forEach(cv => drawInto(cv, true));
+      await sleep(25);
+    }
+  }
   async function runAnimation(src, token, live = () => animToken) {
     let i = 0;
     while (token === live()) {
@@ -2928,6 +2991,7 @@
         if (!wp || panelSrc.get(id) !== e) continue;
         e.src = await decode(wp.blob);
         if (e.src.kind === 'anim') runAnimation(e.src, e.tok, () => (panelSrc.get(id) === e ? e.tok : -1));
+        if (e.src.kind === 'video') runVideo(e.src, e.tok, () => (panelSrc.get(id) === e ? e.tok : -1));
       } catch (err) { panelSrc.delete(id); }
     }
     refreshWall();
@@ -2945,19 +3009,22 @@
     cv.style.opacity = String(w.opacity);
     cv.style.mixBlendMode = w.blend;
     const { src, id } = sourceFor(cv);
-    const img = src && (src.kind === 'static' ? src.image : src.frame);
+    const img = src && (src.kind === 'static' ? src.image : src.kind === 'video' ? (src.video.readyState >= 2 ? src.video : null) : src.frame);
     if (!img) { if (cv.width) { cv.getContext('2d').clearRect(0, 0, cv.width, cv.height); delete cv.dataset.key; } return; }
     const dpr = window.devicePixelRatio || 1;
     const W = Math.max(1, Math.round(parent.clientWidth * dpr));
     const H = Math.max(1, Math.round(parent.clientHeight * dpr));
     const zoom = Math.max(1, Math.min(4, +w.zoom || 1)), px = Math.max(0, Math.min(1, w.posX ?? .5)), py = Math.max(0, Math.min(1, w.posY ?? .5));
-    const dim = Math.max(0, Math.min(.9, +w.dim || 0)), blur = Math.max(0, Math.min(30, +w.blur || 0));
-    const key = `${id}|${W}x${H}|${w.fit}|${zoom}|${px}|${py}|${dim}|${blur}`;
+    let dim = Math.max(0, Math.min(.9, +w.dim || 0));
+    if (w.autoDim) dim = Math.max(dim, Math.min(.6, Math.max(0, ((src.lum ?? .4) - .25) * .9)));   // bright pictures get darker
+    const blur = Math.max(0, Math.min(30, +w.blur || 0));
+    const tint = w.tint ? chartBg() : '';
+    const key = `${id}|${W}x${H}|${w.fit}|${zoom}|${px}|${py}|${dim}|${blur}|${tint}`;
     if (!force && cv.dataset.key === key) return;
     cv.dataset.key = key;
     if (cv.width !== W) cv.width = W;
     if (cv.height !== H) cv.height = H;
-    const iw = img.displayWidth || img.width, ih = img.displayHeight || img.height;
+    const iw = img.videoWidth || img.displayWidth || img.width, ih = img.videoHeight || img.displayHeight || img.height;
     let dw = W, dh = H;
     if (w.fit !== 'stretch') {
       const sc = w.fit === 'contain' ? Math.min(W / iw, H / ih) : Math.max(W / iw, H / ih);
@@ -2971,6 +3038,17 @@
     if (blur) { const pad = blur * dpr * 2; ctx.filter = `blur(${blur * dpr}px)`; ctx.drawImage(img, dx - pad, dy - pad, dw + pad * 2, dh + pad * 2); ctx.filter = 'none'; }
     else ctx.drawImage(img, dx, dy, dw, dh);
     if (dim) { ctx.globalCompositeOperation = 'source-atop'; ctx.fillStyle = `rgba(0,0,0,${dim})`; ctx.fillRect(0, 0, W, H); ctx.globalCompositeOperation = 'source-over'; }
+    if (tint) { ctx.globalCompositeOperation = 'source-atop'; ctx.globalAlpha = .38; ctx.fillStyle = tint; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; }
+  }
+  // The chart's own background color (for "tint with TradingView's color")
+  let chartBgCache = { at: 0, v: '' };
+  function chartBg() {
+    if (Date.now() - chartBgCache.at < 5000) return chartBgCache.v;
+    let v = '';
+    try { v = chartWidget().model().model().properties().childs().paneProperties.childs().background.value(); } catch (e) {}
+    if (!v) v = document.documentElement.classList.contains('theme-dark') ? '#131722' : '#ffffff';
+    chartBgCache = { at: Date.now(), v };
+    return v;
   }
 
   function renderAll() {
@@ -2995,7 +3073,7 @@
   /* =========================================================
    * Adding images
    * ======================================================= */
-  const MAX_SIDE = 2560, THUMB = 200, MAX_ANIM = 50e6;
+  const MAX_SIDE = 2560, THUMB = 200, MAX_ANIM = 50e6, MAX_VIDEO = 200e6;
 
   function toCanvas(bmp, maxSide) {
     const sc = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
@@ -3020,6 +3098,23 @@
     const problems = [];
     let lastId = null;
     for (const f of files) {
+      if (/^video\//.test(f.type)) {
+        try {
+          if (f.size > MAX_VIDEO) { problems.push(`${f.name} is over 200 MB`); continue; }
+          const src = await decodeVideo(f);
+          const v = src.video; v.pause();
+          try { v.currentTime = Math.min(0.5, (v.duration || 1) / 4); await new Promise(r => { v.addEventListener('seeked', r, { once: true }); setTimeout(r, 1500); }); } catch (e) {}
+          const c = document.createElement('canvas'), sc = Math.min(1, THUMB / Math.max(v.videoWidth, v.videoHeight));
+          c.width = Math.max(1, Math.round(v.videoWidth * sc)); c.height = Math.max(1, Math.round(v.videoHeight * sc));
+          c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+          const w = v.videoWidth, h = v.videoHeight;
+          dispose(src);
+          const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+          await DB.put({ id, blob: f, thumb: c.toDataURL('image/jpeg', 0.8), animated: true, video: true, added: Date.now(), name: f.name || '', w, h });
+          lastId = id;
+        } catch (e) { problems.push(`Couldn't play ${f.name} (MP4 or WebM work best)`); }
+        continue;
+      }
       try {
         const bmp = await createImageBitmap(f);
         const bmpW = bmp.width, bmpH = bmp.height;
@@ -3240,6 +3335,9 @@
   .wp-prev span { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 12px; }
   .wp-prev span[hidden], .wp-prev i[hidden] { display: none; }
   .wp-meta { display: grid; gap: 6px; min-width: 0; }
+  .wp-meta .row { flex-wrap: wrap; } #wReplaceBtn[hidden], #wRemove[hidden] { display: none; } .wp-meta a { color: var(--accent2); }
+  .panel.drop::after { content: 'Drop to add as wallpaper'; position: absolute; inset: 8px; border: 2px dashed var(--accent); border-radius: 14px; background: rgba(20,22,32,.78);
+    display: grid; place-items: center; font: 600 16px Inter, system-ui, sans-serif; color: #fff; z-index: 50; pointer-events: none; }
   .wp-meta b { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .wp-meta small { color: var(--muted); }
   #wPanels { flex-wrap: wrap; }
@@ -3327,6 +3425,7 @@
   .h-stat b.sm { font-size: 15px; }
   .pos { color: var(--good) !important; } .neg { color: var(--bad) !important; }
   .h-streak { padding: 0 2px; }
+  .h-unitnote { padding: 0 2px; } .h-unitnote input { padding: 3px 6px; margin: 0 3px; }
   .h-mid { display: grid; grid-template-columns: 170px 1fr; gap: 10px; align-items: start; }
   .h-today { padding: 12px 14px; }
   .h-today span { font-size: 11.5px; color: var(--muted); } .h-today b { display: block; font-size: 22px; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
@@ -3536,8 +3635,8 @@
         <div class="wp-prev" id="wPrev" title="Click or drag to choose what stays in view"><img id="wPrevImg" alt=""><i id="wDot"></i><span id="wPrevEmpty">No wallpaper yet</span></div>
         <div class="wp-meta">
           <b id="wName">—</b><small id="wSize"></small>
-          <div class="row"><label class="btn slim">＋ Add images / GIFs<input type="file" id="file" accept="image/*" multiple hidden></label><button class="btn slim" id="next">Next →</button></div>
-          <small class="hint">Click or drag the picture to choose what stays in view.</small>
+          <div class="row"><label class="btn slim">＋ Add<input type="file" id="file" accept="image/*,video/mp4,video/webm" multiple hidden></label><label class="btn slim" id="wReplaceBtn">⟲ Replace<input type="file" id="wReplace" accept="image/*,video/mp4,video/webm" hidden></label><button class="btn slim" id="wRemove">Remove</button><button class="btn slim" id="next">Next →</button></div>
+          <small class="hint">Images, GIFs and videos (MP4 / WebM). Or drop files anywhere on this window.<br>Click or drag the picture to choose what stays in view · <a href="#" id="wCenter">Center</a></small>
           <div class="msg" id="wMsg"></div>
         </div>
       </div>
@@ -3546,6 +3645,8 @@
         ${item('Zoom <span class="hint" id="wZoomVal"></span>', '', '<input type="range" id="wZoom" min="1" max="3" step="0.05">')}
         ${item('Dim <span class="hint" id="wDimVal"></span>', 'Darkens the picture so candles stand out.', '<input type="range" id="wDim" min="0" max="0.8" step="0.02">')}
         ${item('Blur <span class="hint" id="wBlurVal"></span>', '', '<input type="range" id="wBlur" min="0" max="20" step="1">')}
+        ${item('Auto-dim for readability', 'Darkens bright pictures so candles stay easy to read.', '<input type="checkbox" id="wAutoDim">')}
+        ${item('Tint with TradingView\'s color', 'Blends the picture toward your chart background.', '<input type="checkbox" id="wTint">')}
         ${item('Strength <span class="hint" id="opVal"></span>', 'How strongly the image shows through.', '<input type="range" id="opacity" min="0.05" max="1" step="0.05">')}
         ${item('Blend', 'Match this to your chart theme.', `<select id="blend">
           <option value="lighten">Dark chart – subtle</option><option value="screen">Dark chart – vivid</option>
@@ -3601,9 +3702,10 @@
     </section>
 
     <section data-tab="home">
-      <div class="h-bar"><div class="seg" id="hUnit"><button data-v="usd">$</button><button data-v="points">Points</button><button data-v="ticks">Ticks</button></div>
+      <div class="h-bar"><div class="seg" id="hUnit"><button data-v="usd">$</button><button data-v="pct">%</button><button data-v="r">R</button><button data-v="points">Points</button><button data-v="ticks">Ticks</button></div>
         <div class="seg" id="hRange"><button data-v="month">Month</button><button data-v="all">All time</button></div>
         <span style="flex:1"></span><button class="btn primary slim" id="hShare">Share P&amp;L</button></div>
+      <div class="hint h-unitnote" id="hUnitNote" hidden></div>
       <div class="h-stats" id="hStats"></div>
       <div class="h-streak hint" id="hStreak"></div>
       <div class="h-mid">
@@ -3977,7 +4079,7 @@
         const img = document.createElement('img');
         img.src = w.thumb;
         d.appendChild(img);
-        if (w.animated) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = 'GIF'; d.appendChild(t); }
+        if (w.animated) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = w.video ? 'VIDEO' : 'GIF'; d.appendChild(t); }
         const del = document.createElement('button');
         del.className = 'del'; del.title = 'Remove'; del.textContent = '×';
         d.appendChild(del);
@@ -4001,14 +4103,15 @@
     }
     function renderPreview() {
       const w = S.wall, cur = wallList.find(x => x.id === w.currentId);
-      $('#wPrevImg').src = backdropUrl || (cur && cur.thumb) || '';
+      $('#wPrevImg').src = (cur && cur.video ? cur.thumb : backdropUrl) || (cur && cur.thumb) || '';
       $('#wPrevImg').style.objectFit = w.fit === 'contain' ? 'contain' : w.fit === 'stretch' ? 'fill' : 'cover';
       $('#wPrevImg').style.objectPosition = `${(w.posX ?? .5) * 100}% ${(w.posY ?? .5) * 100}%`;
       $('#wPrevEmpty').hidden = !!(backdropUrl || cur);
       $('#wDot').hidden = !(backdropUrl || cur);
       $('#wDot').style.left = (w.posX ?? .5) * 100 + '%'; $('#wDot').style.top = (w.posY ?? .5) * 100 + '%';
       $('#wName').textContent = cur ? (cur.name || (cur.animated ? 'Animated wallpaper' : 'Wallpaper')) : 'No wallpaper';
-      $('#wSize').textContent = cur ? [cur.animated ? 'GIF' : 'Image', cur.w && cur.h ? `${cur.w} × ${cur.h}` : ''].filter(Boolean).join(' · ') : 'Add an image or GIF to start.';
+      $('#wSize').textContent = cur ? [cur.video ? 'Video' : cur.animated ? 'GIF' : 'Image', cur.w && cur.h ? `${cur.w} × ${cur.h}` : ''].filter(Boolean).join(' · ') : 'Add an image, GIF or video to start.';
+      $('#wReplaceBtn').hidden = $('#wRemove').hidden = !cur;
     }
     function renderPanels() {
       const n = Math.max(1, containers().length), pp = S.wall.perPanel || {};
@@ -4040,6 +4143,7 @@
       $('#wZoom').value = w.zoom || 1; $('#wZoomVal').textContent = Math.round((w.zoom || 1) * 100) + '%';
       $('#wDim').value = w.dim || 0; $('#wDimVal').textContent = Math.round((w.dim || 0) * 100) + '%';
       $('#wBlur').value = w.blur || 0; $('#wBlurVal').textContent = (w.blur || 0) + ' px';
+      $('#wAutoDim').checked = !!w.autoDim; $('#wTint').checked = !!w.tint;
       renderGrid().then(renderPreview);
       renderPreview();
     }
@@ -4069,6 +4173,54 @@
     $('#wBlur').oninput = wallLive(e => { S.wall.blur = +e.target.value; $('#wBlurVal').textContent = S.wall.blur + ' px'; });
     $('#blend').onchange = e => { S.wall.blend = e.target.value; save('wall'); refreshWall(); };
     root.querySelectorAll('#wFit button').forEach(b => b.onclick = () => { S.wall.fit = b.dataset.v; save('wall'); refreshWall(); renderWallUI(); });
+    $('#wAutoDim').onchange = e => { S.wall.autoDim = e.target.checked; save('wall'); refreshWall(); };
+    $('#wTint').onchange = e => { S.wall.tint = e.target.checked; chartBgCache.at = 0; save('wall'); refreshWall(); };
+    $('#wCenter').onclick = e => { e.preventDefault(); S.wall.posX = .5; S.wall.posY = .5; save('wall'); refreshWall(); renderPreview(); };
+    // Remove / Replace the wallpaper you're using now
+    async function removeWallpaper(id) {
+      await DB.del(id);
+      for (const k of Object.keys(S.wall.perPanel || {})) if (S.wall.perPanel[k] === id) delete S.wall.perPanel[k];
+      if (S.wall.used) delete S.wall.used[id];
+      if (S.wall.currentId === id) {
+        const rest = (await DB.all()).sort((a, b) => ((S.wall.used || {})[b.id] || b.added || 0) - ((S.wall.used || {})[a.id] || a.added || 0));
+        S.wall.currentId = rest.length ? rest[0].id : null;
+        loadWallpaper();
+      }
+      save('wall'); syncPanelSources(); bc && bc.postMessage({ type: 'list' });
+    }
+    $('#wRemove').onclick = async () => { if (S.wall.currentId) { await removeWallpaper(S.wall.currentId); renderWallUI(); } };
+    $('#wReplace').onchange = async e => {
+      const f = [...e.target.files]; e.target.value = '';
+      if (!f.length) return;
+      const old = S.wall.currentId;
+      $('#wMsg').textContent = 'Replacing…';
+      const problems = await addFiles(f.slice(0, 1));
+      if (!problems.length && old && old !== S.wall.currentId) {
+        for (const k of Object.keys(S.wall.perPanel || {})) if (S.wall.perPanel[k] === old) S.wall.perPanel[k] = S.wall.currentId;
+        await DB.del(old); if (S.wall.used) delete S.wall.used[old]; save('wall'); syncPanelSources();
+      }
+      $('#wMsg').textContent = problems.join(' · ');
+      renderWallUI();
+    };
+    // drop images / GIFs / videos anywhere on the Wick window
+    {
+      let depth = 0;
+      const isFiles = e => e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files');
+      panel.addEventListener('dragenter', e => { if (!isFiles(e)) return; e.preventDefault(); depth++; panel.classList.add('drop'); });
+      panel.addEventListener('dragover', e => { if (isFiles(e)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; } });
+      panel.addEventListener('dragleave', () => { if (--depth <= 0) { depth = 0; panel.classList.remove('drop'); } });
+      panel.addEventListener('drop', async e => {
+        if (!isFiles(e)) return;
+        e.preventDefault(); depth = 0; panel.classList.remove('drop');
+        const files = [...e.dataTransfer.files].filter(f => /^(image|video)\//.test(f.type));
+        if (!files.length) return;
+        S.ui.tab = 'wall'; showTab('wall');
+        $('#wMsg').textContent = 'Adding…';
+        const problems = await addFiles(files);
+        $('#wMsg').textContent = problems.join(' · ');
+        renderWallUI();
+      });
+    }
     $('#wReset').onclick = () => { Object.assign(S.wall, { zoom: 1, posX: .5, posY: .5, dim: 0, blur: 0, fit: 'cover' }); save('wall'); refreshWall(); renderWallUI(); };
     // focus point: click or drag on the preview
     {
@@ -4758,7 +4910,10 @@
     S.ui.hUnit = S.ui.hUnit || 'usd'; S.ui.hRange = S.ui.hRange || 'month';
     var hMonth = null;                         // first trading day number of the month shown
     const dayDate = d => new Date(d * DAY);    // trading day number -> its calendar date (UTC fields)
+    let homeBase = 50000;
     const tradeVal = (t, unit) => {
+      if (unit === 'pct') return t.net == null ? null : t.net / homeBase * 100;
+      if (unit === 'r') { const risk = +t.risk > 0 ? +t.risk : +S.ui.hRisk || 100; return t.net == null ? null : t.net / risk; }
       if (unit === 'ticks') return t.ticks == null ? null : t.ticks * (t.qty || 1);
       if (unit === 'points') return t.entry != null && t.exit != null ? (t.exit - t.entry) * t.dir * (t.qty || 1) : null;
       return t.net == null ? null : t.net;
@@ -4769,6 +4924,8 @@
       const sign = v > 0 ? '+' : v < 0 ? '−' : '';
       const a = Math.abs(v);
       if (unit === 'usd') return sign + '$' + a.toLocaleString(undefined, { maximumFractionDigits: opts.cents ? 2 : 0 });
+      if (unit === 'pct') return sign + a.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: a < 10 ? 2 : 1 }) + '%';
+      if (unit === 'r') return sign + a.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 1 }) + 'R';
       if (unit === 'points') return sign + a.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (opts.short ? '' : ' pts');
       return sign + Math.round(a).toLocaleString() + (opts.short ? '' : ' ticks');
     }
@@ -4799,6 +4956,19 @@
       let trades = [];
       try { trades = (await DB.tradesAll()) || []; } catch (e) {}
       const unit = S.ui.hUnit || 'usd', range = S.ui.hRange || 'month';
+      // % is of your prop starting balance if the prop tracker is on, else your account balance
+      const av = acctValues();
+      homeBase = S.prop.on && +S.prop.start > 0 ? +S.prop.start : (av && (+av.balance || +av.equity)) || +S.ui.hBase || 50000;
+      const note = $('#hUnitNote');
+      if (unit === 'pct') { note.hidden = false; note.innerHTML = `% of ${S.extras.streamer ? '•••' : '$' + Math.round(homeBase).toLocaleString()} (${S.prop.on && +S.prop.start > 0 ? 'prop starting balance' : av ? 'your account balance' : 'default'}).`; }
+      else if (unit === 'r' && root.activeElement && root.activeElement.id === 'hRisk') { /* typing: leave it */ }
+      else if (unit === 'r') {
+        const withStop = trades.filter(t => +t.risk > 0).length;
+        note.hidden = false;
+        note.innerHTML = `1R = the risk to your stop at entry (${withStop} of ${trades.length} trades had one). Trades without a stop use <input type="text" inputmode="decimal" id="hRisk" style="width:70px"> $ as 1R.`;
+        const ri = $('#hRisk'); ri.value = S.ui.hRisk || 100;
+        ri.onchange = () => { const v = parseFloat(String(ri.value).replace(/[^\d.]/g, '')); if (v > 0) { S.ui.hRisk = v; save(null); renderHome(); } };
+      } else note.hidden = true;
       if (hMonth == null) { const d = dayDate(tradingDay(Date.now())); hMonth = Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / DAY); }
       root.querySelectorAll('#hUnit button').forEach(b => b.classList.toggle('on', b.dataset.v === unit));
       root.querySelectorAll('#hRange button').forEach(b => b.classList.toggle('on', b.dataset.v === range));
