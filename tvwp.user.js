@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.18.0
+// @version      3.19.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.18.0';
+  const VERSION = '3.19.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -3154,6 +3154,33 @@
   table.plan td:first-child, table.plan th:first-child { text-align: left; color: #9aa1b2; }
   .plan-ok { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: rgba(34,195,154,.12); color: #4fd8b0; font-size: 12.5px; }
   .plan-warn { margin: 8px 0; padding: 8px 10px; border-radius: 8px; background: rgba(242,73,92,.12); color: #ff8a97; font-size: 12.5px; }
+  /* journal home */
+  .h-bar { display: flex; align-items: center; gap: 8px; }
+  .h-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
+  .h-stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 11px 12px; min-width: 0; }
+  .panel.glass .h-stat { background: color-mix(in srgb, var(--card) 80%, transparent); backdrop-filter: blur(12px); }
+  .h-stat span { display: block; font-size: 11px; color: var(--muted); }
+  .h-stat b { display: block; font-size: 18px; font-weight: 700; margin: 3px 0 2px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .h-stat small { display: block; font-size: 11px; color: var(--muted); line-height: 1.3; }
+  .h-stat b.sm { font-size: 15px; }
+  .pos { color: var(--good) !important; } .neg { color: var(--bad) !important; }
+  .h-streak { padding: 0 2px; }
+  .h-mid { display: grid; grid-template-columns: 170px 1fr; gap: 10px; align-items: start; }
+  .h-today { padding: 12px 14px; }
+  .h-today span { font-size: 11.5px; color: var(--muted); } .h-today b { display: block; font-size: 22px; margin: 6px 0 2px; font-variant-numeric: tabular-nums; }
+  .h-cal { padding: 10px 12px 12px; }
+  .h-cal-h { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; } .h-cal-h b { font-size: 13px; }
+  .h-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)) 64px; gap: 5px; }
+  .h-grid .hd { font-size: 10.5px; color: var(--muted); text-align: center; padding-bottom: 2px; }
+  .h-day { min-height: 46px; border-radius: 8px; background: var(--card2); padding: 5px 6px; font-size: 10.5px; color: var(--muted); display: flex; flex-direction: column; justify-content: space-between; min-width: 0; }
+  .h-day.blank { background: transparent; }
+  .h-day.today { outline: 1px solid var(--accent); }
+  .h-day.win { background: rgba(34,195,154,.18); color: var(--text); } .h-day.loss { background: rgba(242,73,92,.18); color: var(--text); }
+  .h-day b { font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .h-day.win b { color: var(--good); } .h-day.loss b { color: var(--bad); }
+  .h-wk { min-height: 46px; border-radius: 8px; border: 1px dashed var(--line2); padding: 5px 6px; font-size: 10.5px; color: var(--muted); display: flex; flex-direction: column; justify-content: center; }
+  .h-wk b { font-size: 11px; font-variant-numeric: tabular-nums; }
+  .h-chart { padding: 4px 10px 12px; } .h-chart svg { width: 100%; height: 170px; display: block; }
   .counter { position: fixed; z-index: 2147482998; display: flex; align-items: center; gap: 10px; height: 30px; padding: 0 12px; border-radius: 10px;
     cursor: grab; user-select: none; touch-action: none; font: 600 12px/1 Inter, -apple-system, system-ui, sans-serif; color: #e8eaf0;
     background: rgba(18,20,27,.82); border: 1px solid rgba(255,255,255,.08); box-shadow: 0 6px 18px rgba(0,0,0,.28); backdrop-filter: blur(8px);
@@ -3280,7 +3307,8 @@
     size: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 12h2M14 12h2M8 16h2M14 16h2"/></svg>',
     prop: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V10l7-5 7 5v11"/><path d="M10 21v-6h4v6"/></svg>',
     news: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14a2 2 0 002 2H6a2 2 0 01-2-2V5z"/><path d="M17 9h3v10a2 2 0 01-2 2"/><path d="M8 9h5M8 13h5M8 17h3"/></svg>',
-    journal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>',
+    journal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11a3 3 0 013 3v13H8a3 3 0 01-3-3V4z"/><path d="M5 17a3 3 0 013-3h11"/><path d="M9 8h6"/></svg>',
+    home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>',
     extras: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>'
   };
   const PAGES = {
@@ -3290,7 +3318,8 @@
     sounds: ['Sounds', 'A sound when your orders fill, per order type.'],
     trading: ['Brackets', 'Win / lose amounts on your take-profit and stop orders.'],
     stream: ['Streamer', 'Hide your P&L and balances while streaming.'],
-    journal: ['Journal', 'Every trade recorded automatically, with an optional chart video.'],
+    home: ['Home', 'Your trading at a glance.'],
+    journal: ['Trades', 'Every trade recorded automatically, with an optional chart video.'],
     risk: ['Discipline', 'Daily limits and lockout. Never stops you closing a trade.'],
     size: ['Position size', 'How many contracts to trade for the risk you choose.'],
     prop: ['Prop tracker', 'Your funded-account rules, tracked live.'],
@@ -3321,7 +3350,7 @@
         <div class="ng" data-grp="trading"><button class="grp" type="button">Trading<i>›</i></button><div class="ng-b">
           ${NAV('risk', 'Discipline')}${NAV('prop', 'Prop tracker')}${NAV('size', 'Position size')}${NAV('trading', 'Brackets')}${NAV('sounds', 'Sounds')}${NAV('news', 'News')}${NAV('stream', 'Streamer')}</div></div>
         <div class="ng" data-grp="journal"><button class="grp" type="button">Journal<i>›</i></button><div class="ng-b">
-          ${NAV('journal', 'Journal')}</div></div>
+          ${NAV('home', 'Home')}${NAV('journal', 'Trades')}</div></div>
       </nav>
       <div class="quick">
         <label><span>Wallpaper</span><input type="checkbox" id="qWall"></label>
@@ -3399,6 +3428,20 @@
       </div>
       <div class="last" id="sLast"></div>
       <div class="hint" data-when="#sEnabled">Click the chart once after opening it, so the browser allows sound.</div>
+    </section>
+
+    <section data-tab="home">
+      <div class="h-bar"><div class="seg" id="hUnit"><button data-v="usd">$</button><button data-v="points">Points</button><button data-v="ticks">Ticks</button></div>
+        <div class="seg" id="hRange"><button data-v="month">Month</button><button data-v="all">All time</button></div>
+        <span style="flex:1"></span><button class="btn primary slim" id="hShare">Share P&amp;L</button></div>
+      <div class="h-stats" id="hStats"></div>
+      <div class="h-streak hint" id="hStreak"></div>
+      <div class="h-mid">
+        <div class="card h-today" id="hToday"></div>
+        <div class="card h-cal"><div class="h-cal-h"><b id="hMonth"></b><span style="flex:1"></span><button class="btn slim" id="hPrev">‹</button><button class="btn slim" id="hNext">›</button></div><div class="h-grid" id="hGrid"></div></div>
+      </div>
+      <div class="card"><div class="pg-h">P&amp;L <span class="hint" style="display:inline;font-weight:400">· line: running total · bars: each day</span></div><div class="h-chart" id="hChart"></div></div>
+      <div class="hint" id="hEmpty" hidden>Your recorded trades show up here. Turn on <b>Trades → Recording</b> and take a trade.</div>
     </section>
 
     <section data-tab="journal">
@@ -3725,6 +3768,7 @@
       $('#pgTitle').textContent = PAGES[t][0];
       $('#pgSub').textContent = PAGES[t][1];
       placeMaster(t);
+      if (t === 'home') renderHome();
       $('.content').scrollTop = 0;
       syncDeps();
     }
@@ -4463,6 +4507,152 @@
     const fmtPx = v => (+v).toLocaleString(undefined, { maximumFractionDigits: 6 });
     const fmtDur = ms => { const sec = Math.max(0, Math.round(ms / 1000)); return sec < 60 ? sec + 's' : sec < 3600 ? Math.floor(sec / 60) + 'm ' + (sec % 60) + 's' : Math.floor(sec / 3600) + 'h ' + Math.floor(sec % 3600 / 60) + 'm'; };
     const shortSym = sym => String(sym).split(':').pop();
+    /* ---- Journal Home: stats, calendar, P&L chart, share card ---- */
+    S.ui.hUnit = S.ui.hUnit || 'usd'; S.ui.hRange = S.ui.hRange || 'month';
+    var hMonth = null;                         // first trading day number of the month shown
+    const dayDate = d => new Date(d * DAY);    // trading day number -> its calendar date (UTC fields)
+    const tradeVal = (t, unit) => {
+      if (unit === 'ticks') return t.ticks == null ? null : t.ticks * (t.qty || 1);
+      if (unit === 'points') return t.entry != null && t.exit != null ? (t.exit - t.entry) * t.dir * (t.qty || 1) : null;
+      return t.net == null ? null : t.net;
+    };
+    function fmtVal(v, unit, opts = {}) {
+      if (v == null || !isFinite(v)) return '—';
+      if (unit === 'usd' && S.extras.streamer) return '•••';
+      const sign = v > 0 ? '+' : v < 0 ? '−' : '';
+      const a = Math.abs(v);
+      if (unit === 'usd') return sign + '$' + a.toLocaleString(undefined, { maximumFractionDigits: opts.cents ? 2 : 0 });
+      if (unit === 'points') return sign + a.toLocaleString(undefined, { maximumFractionDigits: 2 }) + (opts.short ? '' : ' pts');
+      return sign + Math.round(a).toLocaleString() + (opts.short ? '' : ' ticks');
+    }
+    function homeData(trades, unit, range) {
+      const today = tradingDay(Date.now());
+      const days = new Map();                  // day -> { v, n, w }
+      for (const t of trades) {
+        const v = tradeVal(t, unit); if (v == null) continue;
+        const d = tradingDay(t.closeTime), e = days.get(d) || { v: 0, n: 0, w: 0 };
+        e.v += v; e.n++; if (v > 0) e.w++; days.set(d, e);
+      }
+      const m0 = hMonth, d0 = dayDate(m0), m1 = Math.floor(Date.UTC(d0.getUTCFullYear(), d0.getUTCMonth() + 1, 1) / DAY);
+      const inRange = d => range === 'all' || (d >= m0 && d < m1);
+      const list = trades.filter(t => tradeVal(t, unit) != null && inRange(tradingDay(t.closeTime)));
+      const vals = list.map(t => tradeVal(t, unit));
+      const wins = vals.filter(v => v > 0), losses = vals.filter(v => v < 0);
+      const gw = wins.reduce((a, b) => a + b, 0), gl = -losses.reduce((a, b) => a + b, 0);
+      const dayList = [...days.entries()].filter(([d]) => inRange(d)).sort((a, b) => a[0] - b[0]);
+      // streaks (trades in time order, days in order)
+      const streak = arr => { let cur = 0, best = 0; for (const x of arr) { cur = x > 0 ? cur + 1 : 0; best = Math.max(best, cur); } return { cur, best }; };
+      const tStreak = streak(list.slice().sort((a, b) => a.closeTime - b.closeTime).map(t => tradeVal(t, unit)));
+      const dStreak = streak(dayList.map(([, e]) => e.v));
+      return { today, days, m0, m1, net: vals.reduce((a, b) => a + b, 0), n: vals.length, w: wins.length, l: losses.length,
+        pf: gl > 0 ? gw / gl : (gw > 0 ? Infinity : null), avgW: wins.length ? gw / wins.length : null, avgL: losses.length ? -gl / losses.length : null,
+        dayList, dW: dayList.filter(([, e]) => e.v > 0).length, tStreak, dStreak };
+    }
+    async function renderHome() {
+      let trades = [];
+      try { trades = (await DB.tradesAll()) || []; } catch (e) {}
+      const unit = S.ui.hUnit || 'usd', range = S.ui.hRange || 'month';
+      if (hMonth == null) { const d = dayDate(tradingDay(Date.now())); hMonth = Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / DAY); }
+      root.querySelectorAll('#hUnit button').forEach(b => b.classList.toggle('on', b.dataset.v === unit));
+      root.querySelectorAll('#hRange button').forEach(b => b.classList.toggle('on', b.dataset.v === range));
+      const D = homeData(trades, unit, range);
+      const cls = v => v > 0 ? 'pos' : v < 0 ? 'neg' : '';
+      const pct = (a, b) => b ? Math.round(a / b * 100) + '%' : '—';
+      const tile = (label, value, sub, c = '') => `<div class="h-stat"><span>${label}</span><b class="${c}${String(value).length > 9 ? ' sm' : ''}">${value}</b><small>${sub}</small></div>`;
+      $('#hStats').innerHTML = [
+        tile('Net P&amp;L', fmtVal(D.net, unit), `${D.n} trade${D.n === 1 ? '' : 's'} · ${D.w} won · ${D.l} lost`, cls(D.net)),
+        tile('Profit factor', D.pf == null ? '—' : D.pf === Infinity ? '∞' : D.pf.toFixed(2), 'Won ÷ lost'),
+        tile('Winning trades', pct(D.w, D.n), `${D.w} of ${D.n}`),
+        tile('Winning days', pct(D.dW, D.dayList.length), `${D.dW} of ${D.dayList.length} day${D.dayList.length === 1 ? '' : 's'}`),
+        tile('Avg win / loss', D.avgW == null && D.avgL == null ? '—' : `${fmtVal(D.avgW, unit, { short: true })} / ${fmtVal(D.avgL, unit, { short: true })}`, D.avgW && D.avgL ? `Ratio ${(D.avgW / -D.avgL).toFixed(2)}` : '')
+      ].join('');
+      $('#hStreak').textContent = D.n ? `Trades: ${D.tStreak.cur} win${D.tStreak.cur === 1 ? '' : 's'} in a row · best ${D.tStreak.best}   ·   Days: ${D.dStreak.cur} in a row · best ${D.dStreak.best}` : '';
+      // today
+      const te = D.days.get(D.today) || { v: 0, n: 0, w: 0 };
+      const tdd = dayDate(D.today);
+      $('#hToday').innerHTML = `<span>Today · ${tdd.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}</span><b class="${cls(te.v)}">${te.n ? fmtVal(te.v, unit) : '—'}</b><span>${te.n ? `${te.n} trade${te.n === 1 ? '' : 's'} · ${te.w} won` : 'No trades yet'}</span>`;
+      // calendar (Mon-Fri + week total)
+      const d0 = dayDate(D.m0);
+      $('#hMonth').textContent = d0.toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+      const cells = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Week'].map(h => `<div class="hd">${h}</div>`);
+      let wd = (d0.getUTCDay() + 6) % 7;                         // 0 = Monday
+      let day = D.m0 - Math.min(wd, 5);
+      if (wd >= 5) day = D.m0 + (7 - wd);                        // month starts on a weekend
+      while (day < D.m1) {
+        let wk = 0, wn = 0;
+        for (let i = 0; i < 5; i++, day++) {
+          const dt = dayDate(day), inMonth = day >= D.m0 && day < D.m1, e = D.days.get(day);
+          if (e && inMonth) { wk += e.v; wn += e.n; }
+          cells.push(!inMonth ? '<div class="h-day blank"></div>' :
+            `<div class="h-day${e ? (e.v > 0 ? ' win' : e.v < 0 ? ' loss' : '') : ''}${day === D.today ? ' today' : ''}"><span>${dt.getUTCDate()}</span>${e ? `<b>${fmtVal(e.v, unit, { short: true })}</b><span>${e.n} trade${e.n === 1 ? '' : 's'}</span>` : ''}</div>`);
+        }
+        day += 2;                                                // skip the weekend
+        cells.push(`<div class="h-wk">${wn ? `<b class="${cls(wk)}">${fmtVal(wk, unit, { short: true })}</b><span>${wn} trade${wn === 1 ? '' : 's'}</span>` : ''}</div>`);
+      }
+      $('#hGrid').innerHTML = cells.join('');
+      // chart: daily bars + running total
+      const dl = D.dayList, W = 640, H = 170, pad = 22;
+      if (!dl.length) $('#hChart').innerHTML = '<div class="hint" style="padding:30px 0;text-align:center">No trades in this range yet.</div>';
+      else {
+        let run = 0; const pts = dl.map(([d, e]) => ({ d, v: e.v, r: (run += e.v) }));
+        const lo = Math.min(0, ...pts.map(p => Math.min(p.v, p.r))), hi = Math.max(0, ...pts.map(p => Math.max(p.v, p.r)));
+        const y = v => pad / 2 + (hi - v) / ((hi - lo) || 1) * (H - pad * 1.5);
+        const step = (W - 20) / pts.length, bw = Math.max(3, Math.min(26, step * .55));
+        const x = i => 10 + step * (i + .5);
+        const bars = pts.map((p, i) => `<rect x="${x(i) - bw / 2}" y="${Math.min(y(p.v), y(0))}" width="${bw}" height="${Math.max(1, Math.abs(y(p.v) - y(0)))}" rx="2" fill="${p.v >= 0 ? 'var(--good)' : 'var(--bad)'}" opacity=".55"><title>${dayDate(p.d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}: ${fmtVal(p.v, unit)}</title></rect>`).join('');
+        const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p.r).toFixed(1)}`).join('');
+        const lab = (i) => `<text x="${x(i)}" y="${H - 4}" font-size="10" text-anchor="middle" fill="var(--muted)">${dayDate(pts[i].d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}</text>`;
+        const every = Math.max(1, Math.ceil(pts.length / 8));
+        $('#hChart').innerHTML = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none"><line x1="0" x2="${W}" y1="${y(0)}" y2="${y(0)}" stroke="var(--line2)" stroke-dasharray="3 4"/>${bars}<path d="${line}" fill="none" stroke="var(--accent2)" stroke-width="2.2" vector-effect="non-scaling-stroke"/>${pts.map((p, i) => i % every === 0 || i === pts.length - 1 ? lab(i) : '').join('')}</svg>`;
+      }
+      $('#hEmpty').hidden = trades.length > 0;
+      homeLast = { D, unit, range, trades };
+    }
+    var homeLast = null;
+    root.querySelectorAll('#hUnit button').forEach(b => b.onclick = () => { S.ui.hUnit = b.dataset.v; save(null); renderHome(); });
+    root.querySelectorAll('#hRange button').forEach(b => b.onclick = () => { S.ui.hRange = b.dataset.v; save(null); renderHome(); });
+    const shiftMonth = k => { const d = dayDate(hMonth); hMonth = Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + k, 1) / DAY); renderHome(); };
+    $('#hPrev').onclick = () => shiftMonth(-1);
+    $('#hNext').onclick = () => shiftMonth(1);
+    setInterval(() => { if (panel.classList.contains('open') && S.ui.tab === 'home') renderHome(); }, 5000);
+    // Share card: a PNG of today's (or this month's) result you can post. Streamer mode leaves the $ amount out.
+    $('#hShare').onclick = async () => {
+      if (!homeLast) await renderHome();
+      const { D, unit } = homeLast;
+      const te = D.days.get(D.today);
+      const useToday = !!(te && te.n);
+      const v = useToday ? te.v : D.net, n = useToday ? te.n : D.n, w = useToday ? te.w : D.w;
+      const title = useToday ? 'Today · ' + dayDate(D.today).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
+        : dayDate(D.m0).toLocaleDateString(undefined, { month: 'long', year: 'numeric', timeZone: 'UTC' });
+      const cv = document.createElement('canvas'); cv.width = 1200; cv.height = 630;
+      const g = cv.getContext('2d');
+      const bg = g.createLinearGradient(0, 0, 1200, 630); bg.addColorStop(0, '#12141c'); bg.addColorStop(1, '#1d2040');
+      g.fillStyle = bg; g.fillRect(0, 0, 1200, 630);
+      if (backdropUrl) { try { const im = new Image(); im.src = backdropUrl; await im.decode(); const k = Math.max(1200 / im.width, 630 / im.height); g.globalAlpha = .28; g.drawImage(im, (1200 - im.width * k) / 2, (630 - im.height * k) / 2, im.width * k, im.height * k); g.globalAlpha = 1; } catch (e) {} }
+      const glow = g.createRadialGradient(950, 120, 0, 950, 120, 520); glow.addColorStop(0, v >= 0 ? 'rgba(34,195,154,.35)' : 'rgba(242,73,92,.35)'); glow.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = glow; g.fillRect(0, 0, 1200, 630);
+      g.fillStyle = '#e8eaf0'; g.font = '700 34px Inter, system-ui, sans-serif'; g.fillText('Wick', 70, 95);
+      g.fillStyle = '#9aa1b2'; g.font = '500 30px Inter, system-ui, sans-serif'; g.fillText(title, 70, 200);
+      const big = unit === 'usd' && S.extras.streamer ? `${n} trade${n === 1 ? '' : 's'}` : fmtVal(v, unit);
+      g.fillStyle = unit === 'usd' && S.extras.streamer ? '#e8eaf0' : v >= 0 ? '#22c39a' : '#f2495c'; g.font = '800 132px Inter, system-ui, sans-serif'; g.fillText(big, 64, 345);
+      g.fillStyle = '#c9ccd6'; g.font = '500 32px Inter, system-ui, sans-serif';
+      g.fillText(`${n} trade${n === 1 ? '' : 's'}  ·  ${w} won  ·  ${n ? Math.round(w / n * 100) : 0}% win rate`, 70, 425);
+      // mini running total
+      let run = 0; const pts = D.dayList.map(([, e]) => (run += e.v));
+      if (pts.length > 1) {
+        const lo = Math.min(0, ...pts), hi = Math.max(0, ...pts), X = i => 70 + i * (1060 / (pts.length - 1)), Y = p => 560 - (p - lo) / ((hi - lo) || 1) * 80;
+        g.strokeStyle = '#7f8cff'; g.lineWidth = 4; g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(X(i), Y(p)) : g.moveTo(X(i), Y(p))); g.stroke();
+      }
+      g.fillStyle = '#6b7286'; g.font = '500 22px Inter, system-ui, sans-serif'; g.fillText('Recorded automatically · Wick for TradingView', 70, 605);
+      const blob = await new Promise(r => cv.toBlob(r, 'image/png'));
+      let copied = false;
+      try { await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]); copied = true; } catch (e) {}
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `wick-pnl-${new Date().toISOString().slice(0, 10)}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+      $('#hShare').textContent = copied ? 'Copied + saved ✓' : 'Saved ✓';
+      setTimeout(() => { $('#hShare').textContent = 'Share P&L'; }, 2500);
+    };
+
     let journalCache = [];
     async function renderJournal() {
       $('#rOn').checked = !!S.rec.on;
