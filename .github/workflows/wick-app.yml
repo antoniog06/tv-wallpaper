@@ -1,9 +1,11 @@
 # Builds the Wick app for Windows and publishes it as a GitHub release.
-# Push a tag like v1.0.1 (matching app/package.json "version") to release it; installed apps update themselves from it.
+# Runs when the app changes on main. Bump "version" in app/package.json to publish a new release
+# (tag v<version>); installed apps update themselves from it. Same version again = no new release.
 name: Wick app
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+    paths: ['app/**', '.github/workflows/wick-app.yml']
   workflow_dispatch:
 permissions:
   contents: write
