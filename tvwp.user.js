@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.24.0
+// @version      3.25.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.24.0';
+  const VERSION = '3.25.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -81,7 +81,7 @@
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false, stopOffset: 0, preset: '' },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, fastMs: 0, buyColor: '', sellColor: '', eod: 'traded', eodClose: '17:00', streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
-    ind: { list: [] },
+    ind: { list: [], paused: false },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
       slots: {
@@ -93,7 +93,7 @@
         cancelled: { on: false, s: 'tone:click' }, rejected: { on: true, s: 'tone:buzz' }
       }
     },
-    ui: { x: null, y: null, tab: 'wall', theme: 'auto', px: null, py: null, glass: true, glassDim: 62, closed: {} }
+    ui: { x: null, y: null, tab: 'wall', theme: 'auto', px: null, py: null, glass: true, glassDim: 62, closed: {}, navMini: false, name: '', skinsMem: null }
   };
   function readSettings() {
     try {
@@ -106,7 +106,7 @@
         risk: { ...DEFAULTS.risk, ...s.risk },
         prop: { ...DEFAULTS.prop, ...s.prop },
         news: { ...DEFAULTS.news, ...s.news },
-        ind: { list: Array.isArray(s.ind && s.ind.list) ? s.ind.list : [] },
+        ind: { list: Array.isArray(s.ind && s.ind.list) ? s.ind.list : [], paused: !!(s.ind && s.ind.paused) },
         sounds: (() => {
           const d = DEFAULTS.sounds, u = s.sounds || {}, slots = {};
           for (const k of Object.keys(d.slots)) slots[k] = { ...d.slots[k], ...((u.slots || {})[k] || {}) };
@@ -475,6 +475,24 @@
     if (!S.extras.allOff) setTimeout(() => { try { recBackfill(); } catch (e) {} }, 500);
     if (buildUI.refresh) buildUI.refresh();
   }
+  /* Skins = wallpaper + candle colors together. Turning off remembers which were on. */
+  function skinsOn() { return !!(S.wall.enabled || S.candles.enabled); }
+  function setSkins(on) {
+    if (!on) { S.ui.skinsMem = { wall: !!S.wall.enabled, candles: !!S.candles.enabled }; S.wall.enabled = false; S.candles.enabled = false; }
+    else {
+      const m = S.ui.skinsMem;
+      const any = m && (m.wall || m.candles);
+      S.wall.enabled = any ? !!m.wall : true; S.candles.enabled = any ? !!m.candles : true;
+    }
+    save('wall'); save('candles');
+    try { loadWallpaper(); refreshWall(); } catch (e) {}
+    try { rebuildLookup(); redraw(); } catch (e) {}
+    if (buildUI.refresh) buildUI.refresh();
+  }
+  function setScripts(on) { S.ind.paused = !on; save('ind'); startInd(); if (buildUI.refresh) buildUI.refresh(); }
+  window.addEventListener('keydown', e => {
+    if (e.altKey && e.shiftKey && (e.key === 'B' || e.key === 'b')) { e.preventDefault(); e.stopPropagation(); if (!S.extras.allOff) setSkins(!skinsOn()); }
+  }, true);
   window.addEventListener('keydown', e => {
     if (e.altKey && e.shiftKey && (e.key === 'X' || e.key === 'x')) { e.preventDefault(); e.stopPropagation(); setAllOff(!S.extras.allOff); }
   }, true);
@@ -1439,7 +1457,7 @@
     return nativeCount;
   }
   function overlaySlots() { return Math.max(0, planLimit().limit - nativeCount); }
-  function activeOverlays() { return S.extras.allOff ? [] : S.ind.list.filter(x => x.on).slice(0, overlaySlots()); }
+  function activeOverlays() { return S.extras.allOff || S.ind.paused ? [] : S.ind.list.filter(x => x.on).slice(0, overlaySlots()); }
 
   function readBars(ms) {
     const b = ms.bars(), f = b.firstIndex(), l = b.lastIndex();
@@ -3254,7 +3272,7 @@
     background: linear-gradient(135deg, #5b6cff 0%, #22c3e6 100%); }
   .logo svg { width: 15px; height: 15px; }
   .conn { margin: 0 10px 8px; padding: 9px 10px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); display: flex; gap: 9px; align-items: center; }
-  .conn b { display: block; font-size: 12.5px; }
+  .conn b { display: block; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .conn small { color: var(--muted); font-size: 11.5px; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .conn > div { min-width: 0; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
@@ -3293,7 +3311,26 @@
   .foot { display: flex; align-items: center; gap: 9px; padding: 9px 12px 11px; color: var(--muted); font-size: 11px; border-top: 1px solid var(--line); }
   .foot .me { width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 12px; color: #fff; background: linear-gradient(135deg, #5b6cff, #22c3e6); flex: none; }
   .foot b { display: block; color: var(--text); font-size: 12px; }
-  .foot small { display: block; font-size: 10.5px; }
+  .foot small { display: block; font-size: 10.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .foot .who { flex: 1; min-width: 0; }
+  .foot b { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .thm, .navmini { width: 26px; height: 26px; border-radius: 8px; border: 1px solid var(--line2); background: var(--card); color: var(--muted); cursor: pointer; display: grid; place-items: center; padding: 0; flex: none; font-size: 13px; }
+  .thm:hover, .navmini:hover { color: var(--text); }
+  .thm svg, .navmini svg { width: 14px; height: 14px; }
+  .bname { flex: 1; min-width: 0; }
+  .sbadge { border: none; cursor: pointer; font: inherit; font-size: 11.5px; font-weight: 600; }
+  .sbadge[hidden] { display: none; }
+  /* collapsed sidebar: icons only */
+  .panel { transition: grid-template-columns .18s; }
+  .panel.mini { grid-template-columns: 58px 1fr; }
+  .panel.mini .bname, .panel.mini .conn > div, .panel.mini .tabs button[data-tab] > span, .panel.mini .grp, .panel.mini .quick, .panel.mini .foot .who, .panel.mini .power { display: none; }
+  .panel.mini .brand { flex-direction: column; padding: 12px 0 8px; gap: 8px; }
+  .panel.mini .navmini svg { transform: rotate(180deg); }
+  .panel.mini .conn { margin: 0 auto 8px; padding: 8px; justify-content: center; }
+  .panel.mini .tabs { padding: 2px 6px 8px; }
+  .panel.mini .tabs button[data-tab] { justify-content: center; padding: 8px 0; }
+  .panel.mini .ng.shut .ng-b { display: flex; }
+  .panel.mini .foot { flex-direction: column; padding: 9px 0 11px; }
 
   /* main */
   main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -3664,9 +3701,10 @@
   <div class="counter" id="tradeCounter" hidden></div>
   <div class="panel">
     <aside>
-      <div class="brand"><span class="logo">${ICON.logo}</span><span style="flex:1">Wick</span>
+      <div class="brand"><span class="logo">${ICON.logo}</span><span class="bname">Wick</span>
+        <button class="navmini" id="navMini" title="Collapse sidebar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
         <button class="power" id="power" title="Turn everything off (Alt+Shift+X)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.8a8 8 0 1011.4 0"/></svg></button></div>
-      <div class="conn"><span class="dot" id="connDot"></span><div><b>TradingView</b><small id="connText">Checking…</small></div></div>
+      <div class="conn"><span class="dot" id="connDot"></span><div><b id="connName">TradingView</b><small id="connText">Checking…</small></div></div>
       <nav class="tabs">
         <div class="ng" data-grp="charts"><button class="grp" type="button">Charts<i>›</i></button><div class="ng-b">
           ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}</div></div>
@@ -3676,16 +3714,16 @@
           ${NAV('home', 'Home')}${NAV('journal', 'Trades')}</div></div>
       </nav>
       <div class="quick">
-        <label><span>Wallpaper</span><input type="checkbox" id="qWall"></label>
-        <label><span>Candles</span><input type="checkbox" id="qCandles"></label>
+        <label title="Wallpaper and candle colors together"><span>Skins <kbd>Alt+Shift+B</kbd></span><input type="checkbox" id="qSkins"></label>
+        <label title="Wick's own indicators on the chart"><span>Scripts</span><input type="checkbox" id="qScripts"></label>
         <label><span>Sounds</span><input type="checkbox" id="qSounds"></label>
         <label><span>Streamer <kbd>Alt+Shift+S</kbd></span><input type="checkbox" id="qStream"></label>
       </div>
       <div class="tabs tabs-bottom">${NAV('extras', 'Settings')}</div>
-      <div class="foot"><span class="me">W</span><div><b>Wick</b><small>v${VERSION} · Alt+Shift+W</small></div></div>
+      <div class="foot"><span class="me" id="meAv">W</span><div class="who"><b id="meName">Wick</b><small>v${VERSION} · Alt+Shift+W</small></div><button class="thm" id="thmBtn" title="Theme"></button></div>
     </aside>
     <main><div class="backdrop" id="backdrop"></div>
-      <header><div class="t"><h1 id="pgTitle"></h1><p id="pgSub"></p></div><span class="pill" id="pill"></span><label class="hdr-ctl" id="hdrCtl" hidden><span id="hdrCtlLbl"></span></label><button class="x" title="Close">×</button></header>
+      <header><div class="t"><h1 id="pgTitle"></h1><p id="pgSub"></p></div><button class="pill live sbadge" id="strBadge" title="Streamer mode is on · click to turn off (Alt+Shift+S)" hidden>● Streamer</button><span class="pill" id="pill"></span><label class="hdr-ctl" id="hdrCtl" hidden><span id="hdrCtlLbl"></span></label><button class="x" title="Close">×</button></header>
       <div class="offbar" id="offbar">Everything is turned off. Your settings are saved. <button class="btn primary slim" id="powerOn">Turn back on</button></div>
       <div class="content">
 
@@ -3921,6 +3959,7 @@
       <div class="card">
         ${item('Turn everything off', 'Your settings stay saved.', '<input type="checkbox" id="gAllOff">', 'Stops every feature at once, except the daily lockout if it\'s on. Shortcut: Alt+Shift+X.')}
         ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
+        ${item('Your name', 'Shown at the bottom of the sidebar.', '<input type="text" id="gName" maxlength="24" placeholder="Your name" style="width:150px">')}
         ${item('Theme', 'Auto follows your TradingView theme.', '<div class="seg" id="gTheme"><button data-v="auto">Auto</button><button data-v="dark">Dark</button><button data-v="light">Light</button></div>')}
         ${item('Glass panel', 'Your wallpaper shows softly behind this window.', '<input type="checkbox" id="gGlass">')}
         ${dep('#gGlass', item('Backdrop dim <span class="hint" id="gDimVal"></span>', '', '<input type="range" id="gDim" min="30" max="90" step="2">'))}
@@ -3930,6 +3969,7 @@
         ${item('Open / close this window', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>W</kbd></span>')}
         ${item('Streamer mode on / off', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd></span>')}
         ${item('Everything off / on', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>X</kbd></span>')}
+        ${item('Skins (wallpaper + candles) on / off', '', '<span><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>B</kbd></span>')}
       </div>
       <div class="card">
         ${item('Version', 'Updates install automatically.', `<span class="hint">v${VERSION}</span>`)}
@@ -4583,7 +4623,7 @@
       countNative();
       const plan = planLimit(), slots = overlaySlots();
       const onCount = S.ind.list.filter(x => x.on).length;
-      $('#iStatus').textContent = `Your plan (${plan.name}) allows ${plan.limit} per chart. TradingView indicators showing on this chart: ${nativeCount}. Room for these: ${slots}.`;
+      $('#iStatus').textContent = `Your plan (${plan.name}) allows ${plan.limit} per chart. TradingView indicators showing on this chart: ${nativeCount}. Room for these: ${slots}.` + (S.ind.paused ? ' · Scripts are switched off in the sidebar, so none are drawing.' : '');
       const box = $('#iList');
       box.querySelectorAll('.srow').forEach(r => r.remove());
       if (!S.ind.list.length) {
@@ -5321,17 +5361,36 @@
     $('#gDim').onchange = () => save(null);
     /* ---- sidebar quick switches, theme, status ---- */
     function setQuick(id, on) {
-      if (id === 'qWall') { S.wall.enabled = on; save('wall'); refreshWall(); }
-      if (id === 'qCandles') { S.candles.enabled = on; save('candles'); rebuildLookup(); redraw(); }
+      if (id === 'qSkins') { setSkins(on); return; }
+      if (id === 'qScripts') { setScripts(on); return; }
       if (id === 'qSounds') { S.sounds.enabled = on; save('sounds'); applyMute(); }
       if (id === 'qStream') { S.extras.streamer = on; save('extras'); applyStreamer(); }
       renderAllUI();
     }
-    for (const id of ['qWall', 'qCandles', 'qSounds', 'qStream']) $('#' + id).onchange = e => setQuick(id, e.target.checked);
-    function themeIsLight() {
+    for (const id of ['qSkins', 'qScripts', 'qSounds', 'qStream']) $('#' + id).onchange = e => setQuick(id, e.target.checked);
+    function renderSettingsMisc() {
       $('#gFast').value = String(S.extras.fastMs || 0); renderFast();
       renderBtnColors(); $('#gEod').value = S.extras.eod || 'traded'; $('#gEodClose').value = S.extras.eodClose || '17:00';
       $('#gGlass').checked = S.ui.glass !== false; $('#gDim').value = S.ui.glassDim || 62; $('#gDimVal').textContent = (S.ui.glassDim || 62) + '%';
+      if (root.activeElement !== $('#gName')) $('#gName').value = S.ui.name || '';
+    }
+    $('#gName').oninput = e => { S.ui.name = e.target.value.trim(); save(null); renderProfile(); };
+    function renderProfile() {
+      const n = S.ui.name || '';
+      $('#meAv').textContent = (n || 'Wick').trim().charAt(0).toUpperCase();
+      $('#meName').textContent = n || 'Wick';
+      const t = S.ui.theme || 'auto';
+      const ic = { auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 010 16z" fill="currentColor"/></svg>',
+        dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M20 14.5A8 8 0 119.5 4a6.5 6.5 0 0010.5 10.5z"/></svg>',
+        light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>' };
+      const b = $('#thmBtn'); b.innerHTML = ic[t] || ic.auto; b.title = 'Theme: ' + t[0].toUpperCase() + t.slice(1) + ' · click to change';
+    }
+    $('#thmBtn').onclick = () => { const o = ['auto', 'dark', 'light']; S.ui.theme = o[(o.indexOf(S.ui.theme || 'auto') + 1) % 3]; save(null); applyTheme(); renderProfile(); };
+    function applyMini() { panel.classList.toggle('mini', !!S.ui.navMini); $('#navMini').title = S.ui.navMini ? 'Expand sidebar' : 'Collapse sidebar'; }
+    $('#navMini').onclick = () => { S.ui.navMini = !S.ui.navMini; save(null); applyMini(); };
+    applyMini();
+    $('#strBadge').onclick = () => { S.extras.streamer = false; save('extras'); applyStreamer(); renderAllUI(); };
+    function themeIsLight() {
       const t = S.ui.theme || 'auto';
       if (t === 'light') return true;
       if (t === 'dark') return false;
@@ -5344,7 +5403,7 @@
       panel.classList.toggle('light', themeIsLight());
       root.querySelectorAll('#gTheme button').forEach(b => b.classList.toggle('on', b.dataset.v === (S.ui.theme || 'auto')));
     }
-    root.querySelectorAll('#gTheme button').forEach(b => b.onclick = () => { S.ui.theme = b.dataset.v; save(null); applyTheme(); });
+    root.querySelectorAll('#gTheme button').forEach(b => b.onclick = () => { S.ui.theme = b.dataset.v; save(null); applyTheme(); renderProfile(); });
     new MutationObserver(applyTheme).observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
     $('#power').onclick = () => setAllOff(!S.extras.allOff);
     $('#powerOn').onclick = () => setAllOff(false);
@@ -5370,25 +5429,29 @@
         }
       } catch (e) {}
       $('#connDot').classList.toggle('on', connected);
-      $('#connText').textContent = connected ? (name || 'Broker') + ' · connected' : 'No broker connected';
+      let nCharts = 0; try { nCharts = containers().length; } catch (e) {}
+      $('#connName').textContent = connected ? (name || 'Broker') : 'TradingView';
+      $('#connText').textContent = `${connected ? 'Connected' : 'No broker'} · ${nCharts} chart${nCharts === 1 ? '' : 's'} · Skins ${S.extras.allOff ? 'off' : skinsOn() ? 'on' : 'off'}`;
+      $('#connDot').title = $('#connName').textContent;
       $('#connText').title = $('#connText').textContent;
       const pill = $('#pill');
-      pill.className = 'pill' + (S.extras.allOff ? ' live' : S.extras.streamer ? ' live' : connected ? ' ok' : '');
-      pill.textContent = S.extras.allOff ? '⏻ All off' : S.extras.streamer ? '● Streamer on' : connected ? '● ' + (name || 'Connected') : 'Not trading';
+      pill.className = 'pill' + (S.extras.allOff ? ' live' : connected ? ' ok' : '');
+      pill.textContent = S.extras.allOff ? '⏻ All off' : connected ? '● ' + (name || 'Connected') : 'Not trading';
+      $('#strBadge').hidden = !S.extras.streamer || !!S.extras.allOff;
       const nOn = S.ind.list.filter(x => x.on).length;
       const badge = root.querySelector('[data-badge="ind"]');
       badge.hidden = !nOn; badge.textContent = nOn + ' on';
     }
     setInterval(() => { if (panel.classList.contains('open')) renderStatus(); }, 2000);
     function renderQuick() {
-      $('#qWall').checked = !!S.wall.enabled;
-      $('#qCandles').checked = !!S.candles.enabled;
+      $('#qSkins').checked = skinsOn();
+      $('#qScripts').checked = !S.ind.paused;
       $('#qSounds').checked = !!S.sounds.enabled;
       $('#qStream').checked = !!S.extras.streamer;
     }
     applyTheme();
 
-    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); renderJournal(); renderFolder(); protectStorage().then(renderFolder); renderRiskInputs(); renderRiskPages(); renderSize(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
+    function renderAllUI() { renderOff(); renderQuick(); renderStatus(); applyTheme(); renderSettingsMisc(); renderProfile(); applyMini(); renderWallUI(); renderCandleUI(); renderSoundUI(); renderIndUI(); renderJournal(); renderFolder(); protectStorage().then(renderFolder); renderRiskInputs(); renderRiskPages(); renderSize(); $('#xAds').checked = !!S.extras.hideAds; renderStreamUI(); showTab(S.ui.tab || 'wall'); }
     buildUI.refresh = () => { renderOff(); if (panel.classList.contains('open')) renderAllUI(); placeFab(); };
     renderOff();
   }

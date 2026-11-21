@@ -8,7 +8,11 @@ Wallpapers (including animated GIFs), custom candle colors, custom order-fill so
 
 1. Install the free [Tampermonkey](https://www.tampermonkey.net/) extension.
 2. Open this link and click **Install**: https://raw.githubusercontent.com/antoniog06/tv-wallpaper/main/tvwp.user.js
-3. Open or refresh a TradingView chart. A small square button with a candlestick logo appears near the bottom left. Click it to open the settings window, or drag it anywhere. **Alt+Shift+W** also opens it. The window has a page for each feature on the left, quick on/off switches at the bottom of the sidebar, and can be dragged by its title bar.
+3. Open or refresh a TradingView chart. A small square button with a candlestick logo appears near the bottom left. Click it to open the settings window, or drag it anywhere. **Alt+Shift+W** also opens it. The window has a page for each feature on the left and can be dragged by its title bar.
+
+   - **Quick switches** (bottom of the sidebar): **Skins** turns the wallpaper and candle colors on or off together (**Alt+Shift+B**) and remembers which ones were on; **Scripts** pauses Wick's own indicators without losing which ones you picked; **Sounds**; **Streamer** (**Alt+Shift+S**).
+   - The card under the logo shows your broker, how many charts are open, and whether Skins are on. While Streamer mode is on, a red **Streamer** badge sits in the title bar on every page (click it to turn Streamer off).
+   - The arrow next to the logo collapses the sidebar to icons. Your name (Settings) and a theme button (Auto / Dark / Light) are at the bottom.
 
 Tampermonkey checks for updates on its own.
 
