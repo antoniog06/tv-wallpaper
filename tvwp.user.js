@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.21.0
+// @version      3.22.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.21.0';
+  const VERSION = '3.22.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -80,7 +80,7 @@
       sizeMode: 'usd', sizeRisk: 200, sizePct: 1, sizeStop: 20, sizeUnit: 'ticks', sizeSym: '', sizeStopMode: 'auto', sizeAtr: 1, sizeView: 'simple', simplePts: 0, simpleManual: false },
     prop: { on: false, start: 50000, dd: 2500, ddType: 'eod', stopAtStart: true, daily: 0, target: 3000, maxQty: 0, lockNear: 0, enforce: true, consistency: 0, planDays: 0, bestDay: 0, consLock: false, stopOffset: 0, preset: '' },
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
-    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
+    extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, fastMs: 0, streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [] },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
@@ -2204,6 +2204,61 @@
   }
   setInterval(() => { if (S.extras.oco && !S.extras.allOff) ocoTick(); }, 400);
 
+  /* ---- Faster order updates ----
+     TradingView's Tradovate connection doesn't stream your orders: it asks Tradovate for orders and positions
+     about once a second, which is why fills show up ~1 s late. This shortens that wait.
+     - demo-type accounts only (that includes prop accounts), never a live brokerage account
+     - only while you're in a trade, have working orders, or just placed an order; normal speed when flat
+     - if Tradovate starts answering with errors, it goes back to normal for a minute
+     It only changes how often TradingView checks. Orders still go out exactly as before. */
+  const fastOrig = new WeakMap(), fastErr = new WeakMap(), fastPulse = new WeakMap();
+  let fastBoostUntil = 0, fastBackoffUntil = 0, fastInfo = { state: 'off', ms: 0 };
+  function tvRequesters() {
+    const out = [];
+    try {
+      const rq = currentBroker()._brokerConnection._requesters;
+      for (const name of ['orders', 'positions']) {
+        const x = rq && rq[name];
+        const r = x && (typeof x._requestInterval === 'number' ? x : x._requester);
+        if (r && typeof r._requestInterval === 'number') out.push(r);
+      }
+    } catch (e) {}
+    return out;
+  }
+  async function fastTick() {
+    const reqs = tvRequesters();
+    const b = currentBroker();
+    if (!reqs.length) { fastInfo = { state: b ? 'unsupported' : 'nobroker', ms: 0 }; return; }
+    for (const r of reqs) if (!fastOrig.has(r)) fastOrig.set(r, r._requestInterval || 1000);
+    const want = Math.max(100, +S.extras.fastMs || 0);
+    let type = ''; try { type = String(b.currentAccountType() || ''); } catch (e) {}
+    let working = 0;
+    try { working = ((await b.orders()) || []).filter(o => o && [3, 4, 6].includes(+o.status)).length; } catch (e) {}
+    const now = Date.now();
+    for (const r of reqs) {                                   // Tradovate pushing back? slow down for a minute
+      const n = +r._errorsCount || 0, was = fastErr.get(r);
+      if (was != null && n > was) fastBackoffUntil = now + 60000;
+      fastErr.set(r, n);
+    }
+    const active = openPositionQty() > 0 || working > 0 || now < fastBoostUntil;
+    let state;
+    if (!S.extras.fastMs || S.extras.allOff) state = 'off';
+    else if (type && type !== 'demo') state = 'live';
+    else if (now < fastBackoffUntil) state = 'backoff';
+    else state = active ? 'fast' : 'idle';
+    for (const r of reqs) {
+      const target = state === 'fast' ? want : fastOrig.get(r);
+      if (r._requestInterval !== target) r._requestInterval = target;
+    }
+    // measured speed: requests per second on the orders checker
+    const r0 = reqs[0], pi = +r0._currentPulseIndex || 0, prev = fastPulse.get(r0);
+    let ms = fastInfo.ms;
+    if (prev && now - prev.at >= 2500) { const d = pi - prev.pi; ms = d > 0 ? Math.round((now - prev.at) / d) : 0; fastPulse.set(r0, { pi, at: now }); }
+    else if (!prev) fastPulse.set(r0, { pi, at: now });
+    fastInfo = { state, ms };
+  }
+  setInterval(() => { if (S.extras.fastMs || fastInfo.state === 'fast') fastTick(); }, 500);
+
   function noteBlockedSymbol() { symNotice = Date.now() + 9000; flashBanner(); riskTick(); }
   function applyLock() {
     const on = blocking() || chartSymBlocked();
@@ -2294,6 +2349,7 @@
         const orig = b[m];
         if (typeof orig !== 'function') continue;
         b[m] = function (...args) {
+          fastBoostUntil = Date.now() + 15000;              // speed up checks so the fill shows sooner
           const symRule = symList().length > 0;
           if (!S.risk.lockOn && !entryBlocked() && !(symRule && !(m === 'placeOrder' && symAllowed((args[0] || {}).symbol)))) return orig.apply(this, args);
           // a rule applies: re-check it right now (positions from the broker, today's trades from the journal), then decide
@@ -3690,6 +3746,9 @@
     </section>
 
     <section data-tab="extras">
+      ${grp('Order updates', `
+        ${item('Faster order updates', 'Demo and prop accounts only.', '<select id="gFast"><option value="0">Off (TradingView\'s 1 s)</option><option value="500">Every 500 ms</option><option value="250">Every 250 ms</option><option value="150">Every 150 ms</option></select>', 'TradingView checks Tradovate for your orders and positions about once a second, so fills show up late. This checks more often while you\'re in a trade, have working orders, or just placed one, and goes back to normal when you\'re flat. It doesn\'t make fills happen sooner at the exchange; it shows them sooner, so sounds, the journal, brackets and the lockout react sooner. Only on demo-type accounts (that includes prop accounts). If Tradovate pushes back with errors, it slows down for a minute.')}
+        <div class="item"><div class="txt"><small id="gFastSt" class="oco-st">Off</small></div></div>`)}
       <div class="card">
         ${item('Turn everything off', 'Your settings stay saved.', '<input type="checkbox" id="gAllOff">', 'Stops every feature at once, except the daily lockout if it\'s on. Shortcut: Alt+Shift+X.')}
         ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
@@ -4993,6 +5052,17 @@
     buildUI.onJournal = () => { if (panel.classList.contains('open')) renderJournal(); };
 
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
+    $('#gFast').onchange = e => { S.extras.fastMs = +e.target.value; save('extras'); fastTick().then(renderFast); };
+    function renderFast() {
+      const st = $('#gFast') && $('#gFastSt'); if (!st) return;
+      const f = fastInfo, ms = f.ms ? `checking every ${f.ms} ms` : '';
+      const txt = { off: 'Off · TradingView checks about once a second', nobroker: 'Waiting for your broker in TradingView', unsupported: 'Not available for this broker (works with Tradovate)',
+        live: 'Paused · this is a live account (demo and prop only)', backoff: 'Slowed down for a minute · Tradovate answered with errors',
+        idle: 'On · normal speed while you\'re flat', fast: 'On · fast' }[f.state] || 'Off';
+      $('#gFastSt').textContent = txt + (ms && f.state !== 'off' ? ` · ${ms}` : '');
+      $('#gFastSt').className = 'oco-st ' + (f.state === 'fast' || f.state === 'idle' ? 'ok' : f.state === 'off' ? '' : 'warn');
+    }
+    setInterval(() => { if (panel.classList.contains('open') && S.ui.tab === 'extras') { if (!S.extras.fastMs) fastTick(); renderFast(); } }, 1000);
     $('#gGlass').onchange = e => { S.ui.glass = e.target.checked; save(null); buildUI.applyBackdrop(); };
     $('#gDim').oninput = e => { S.ui.glassDim = +e.target.value; $('#gDimVal').textContent = e.target.value + '%'; buildUI.applyBackdrop(); };
     $('#gDim').onchange = () => save(null);
@@ -5006,6 +5076,7 @@
     }
     for (const id of ['qWall', 'qCandles', 'qSounds', 'qStream']) $('#' + id).onchange = e => setQuick(id, e.target.checked);
     function themeIsLight() {
+      $('#gFast').value = String(S.extras.fastMs || 0); renderFast();
       $('#gGlass').checked = S.ui.glass !== false; $('#gDim').value = S.ui.glassDim || 62; $('#gDimVal').textContent = (S.ui.glassDim || 62) + '%';
       const t = S.ui.theme || 'auto';
       if (t === 'light') return true;
