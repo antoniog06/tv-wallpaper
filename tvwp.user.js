@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.22.0
+// @version      3.22.1
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.22.0';
+  const VERSION = '3.22.1';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -3148,6 +3148,7 @@
   .hdr-ctl { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); cursor: pointer; white-space: nowrap; }
   .hdr-ctl[hidden] { display: none; }
   .item.moved, .card.moved-card { display: none !important; }
+  .card.pg:not(:has(> .item:not(.moved), > .dep:not([hidden]), > .sub, > .row, > .h-chart)) { display: none !important; }
   header .t { flex: 1; min-width: 0; }
   h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: -.01em; }
   header p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
@@ -3242,8 +3243,8 @@
   .wp-meta b { font-size: 13.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .wp-meta small { color: var(--muted); }
   #wPanels { flex-wrap: wrap; }
-  .pnl { width: 64px; height: 40px; border-radius: 8px; border: 1.5px solid var(--line2); background: var(--card2) center/cover; color: var(--text); font: 600 12px Inter, system-ui, sans-serif; cursor: pointer; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
-  .pnl.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentBg); }
+  .pnlb { width: 64px; height: 40px; border-radius: 8px; border: 1.5px solid var(--line2); background: var(--card2) center/cover; color: var(--text); font: 600 12px Inter, system-ui, sans-serif; cursor: pointer; text-shadow: 0 1px 3px rgba(0,0,0,.7); }
+  .pnlb.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentBg); }
   .thumb { position: relative; aspect-ratio: 16/10; border-radius: 9px; overflow: hidden; border: 2px solid transparent; cursor: pointer; background: var(--card2); }
   .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
   .thumb.active { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accentBg); }
@@ -3297,7 +3298,7 @@
   .trow b { font-size: 12.5px; display: block; }
   .trow small { color: var(--muted); font-size: 11.5px; display: block; }
   .trow .px { font-size: 12px; font-variant-numeric: tabular-nums; }
-  .trow .pnl { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+  .trow .pnl { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 12.5px; white-space: nowrap; }
   .trow .pnl.win { color: var(--good); } .trow .pnl.loss { color: var(--bad); }
   .side-l { color: var(--good); } .side-s { color: var(--bad); }
   .rec-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; animation: blink 1s infinite; }
@@ -4015,7 +4016,7 @@
       const thumbOf = id => (wallList.find(x => x.id === id) || {}).thumb;
       $('#wPanels').innerHTML = Array.from({ length: n }, (_, i) => {
         const k = i + 1, t = thumbOf(pp[k] || S.wall.currentId);
-        return `<button class="pnl${k === renderPanels.sel ? ' on' : ''}" data-k="${k}" style="${t ? `background-image:url('${t}')` : ''}">${k}</button>`;
+        return `<button class="pnlb${k === renderPanels.sel ? ' on' : ''}" data-k="${k}" style="${t ? `background-image:url('${t}')` : ''}">${k}</button>`;
       }).join('');
       $('#wPanelHint').hidden = n > 1;
       const k = renderPanels.sel;
@@ -4023,7 +4024,7 @@
       $('#wPanelPick').innerHTML = '<option value="">Same as main wallpaper</option>' +
         wallList.map((w, i) => `<option value="${w.id}">${(w.name || (w.animated ? 'GIF' : 'Image') + ' ' + (i + 1)).replace(/</g, '&lt;')}</option>`).join('');
       $('#wPanelPick').value = pp[k] || '';
-      root.querySelectorAll('#wPanels .pnl').forEach(b => b.onclick = () => { renderPanels.sel = +b.dataset.k; renderPanels(); });
+      root.querySelectorAll('#wPanels .pnlb').forEach(b => b.onclick = () => { renderPanels.sel = +b.dataset.k; renderPanels(); });
     }
     $('#wPanelPick').onchange = e => {
       S.wall.perPanel = S.wall.perPanel || {};
@@ -4750,7 +4751,7 @@
 
     /* ---- journal ---- */
     const money = (v, cur) => (v > 0 ? '+' : v < 0 ? '\u2212' : '') + Math.abs(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' ' + (cur || 'USD');
-    const fmtPx = v => (+v).toLocaleString(undefined, { maximumFractionDigits: 6 });
+    const fmtPx = v => { const n = +v, a = Math.abs(n); return n.toLocaleString(undefined, { maximumFractionDigits: a >= 100 ? 2 : a >= 1 ? 4 : 6 }); };
     const fmtDur = ms => { const sec = Math.max(0, Math.round(ms / 1000)); return sec < 60 ? sec + 's' : sec < 3600 ? Math.floor(sec / 60) + 'm ' + (sec % 60) + 's' : Math.floor(sec / 3600) + 'h ' + Math.floor(sec % 3600 / 60) + 'm'; };
     const shortSym = sym => String(sym).split(':').pop();
     /* ---- Journal Home: stats, calendar, P&L chart, share card ---- */
