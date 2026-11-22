@@ -208,6 +208,8 @@ function startServer({ store, script, homeHtml, hooks, log }) {
     everyone(m);
   }
   setInterval(() => status(), 2000);
+  // heartbeat: TradingView desktop windows use it to notice when the app has gone away
+  setInterval(() => { for (const c of clients) if (c.kind === 'desktop') send(c, { t: 'ping' }); }, 4000);
 
   return new Promise((resolve, reject) => {
     server.once('error', reject);

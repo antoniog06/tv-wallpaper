@@ -46,7 +46,12 @@ function openLink(target, onReady, log) {
   });
   ws.on('message', d => {
     let m; try { m = JSON.parse(String(d)); } catch (e) { return; }
-    if (m.id === 2 && link.readyState === 0) { link.readyState = 1; onReady(link); return; }
+    if (m.id === 2 && link.readyState === 0) {
+      link.readyState = 1; onReady(link);
+      // a Wick already running in this page (from before the app restarted) drops its old link and joins this one
+      ws.send(JSON.stringify({ id: 3, method: 'Runtime.evaluate', params: { expression: 'window.__wickLinkReset && window.__wickLinkReset()' } }));
+      return;
+    }
     if (m.method === 'Runtime.bindingCalled' && m.params && m.params.name === '__wickLink') {
       const p = String(m.params.payload || '');
       if (p[0] === 'B') link.emit('message', Buffer.from(p.slice(1), 'base64'), true);

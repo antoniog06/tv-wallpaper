@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.2
+// @version      3.26.3
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.2';
+  const VERSION = '3.26.3';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2793,6 +2793,8 @@
     }
     eodCheck();
     if (eodNotice && eodNotice.until > Date.now()) out.push({ kind: 'info', act: 'share', text: eodNotice.text });
+    if (VIA_CDP && bridge.up && bridge.status && bridge.status.scriptVersion && newerVer(bridge.status.scriptVersion, VERSION) && !bridge.skipReload)
+      out.push({ kind: 'info', act: 'reload', text: `Wick ${bridge.status.scriptVersion} is ready. Reload TradingView to use it.` });
     const L = lockedNow();
     if (L) out.push({ kind: 'lock', text: `🔒 Done for today: ${L.lockReason}. Unlocks at ${new Date(nextSessionStart(Date.now())).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.` });
     else if (pendingLock) out.push({ kind: 'bad', text: `⚠ ${pendingLock}. Close your position. You can't add to it, and new orders lock once you're flat.` });
@@ -2889,6 +2891,16 @@
         const x = document.createElement('button');
         x.textContent = '×'; x.title = 'Dismiss';
         x.onclick = () => { eodNotice = null; riskTick(); };
+        d.appendChild(x);
+      }
+      if (b.act === 'reload') {
+        const u = document.createElement('button');
+        u.textContent = 'Reload now';
+        u.onclick = () => location.reload();
+        d.appendChild(u);
+        const x = document.createElement('button');
+        x.textContent = 'Later'; x.title = 'Dismiss until TradingView restarts';
+        x.onclick = () => { bridge.skipReload = true; riskTick(); };
         d.appendChild(x);
       }
       if (b.act === 'folder') {
@@ -5693,7 +5705,7 @@
     try { ws = VIA_CDP ? cdpSocket() : new WebSocket(BRIDGE_WS); } catch (e) { bridgeRetry(); return; }
     bridge.ws = ws; ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
-      bridge.up = true; bridge.tries = 0; bridge.synced = false;
+      bridge.up = true; bridge.tries = 0; bridge.synced = false; bridge.lastMsg = Date.now();
       bridgeSend({ t: 'hello', kind: WICK_HOME ? 'home' : IN_APP ? 'desktop' : 'browser', ver: VERSION, url: location.href,
         // the app window only takes the shared settings; TradingView windows bring yours
         settings: WICK_HOME ? null : shareable(S), settingsAt: WICK_HOME ? 0 : +localStorage.getItem('tvwp_settings_at') || 0, risk: lockInfo() });
@@ -5701,7 +5713,7 @@
       bridgeSend({ t: 'wsync' });
       buildUI.refresh && buildUI.refresh();
     };
-    ws.onmessage = e => { if (typeof e.data !== 'string') return; let m; try { m = JSON.parse(e.data); } catch (err) { return; } onBridge(m).catch(err => console.warn('[Wick] app link', err)); };
+    ws.onmessage = e => { bridge.lastMsg = Date.now(); if (typeof e.data !== 'string') return; let m; try { m = JSON.parse(e.data); } catch (err) { return; } onBridge(m).catch(err => console.warn('[Wick] app link', err)); };
     ws.onclose = () => { const was = bridge.up; bridge.ws = null; bridge.up = false; bridge.synced = false; if (was && buildUI.refresh) buildUI.refresh(); bridgeRetry(); };
     ws.onerror = () => {};
   }
@@ -5717,6 +5729,8 @@
       },
       close() { if (sock.readyState === 3) return; sock.readyState = 3; window.__wickLinkRecv = null; sock.onclose && sock.onclose(); } };
     window.__wickLinkRecv = data => { if (sock.readyState === 1 && sock.onmessage) sock.onmessage({ data }); };
+    // the app calls this when it makes a fresh link to this page (e.g. after it restarted to update)
+    window.__wickLinkReset = () => { sock.close(); bridge.tries = 0; };
     setTimeout(() => {
       if (typeof window.__wickLink === 'function') { sock.readyState = 1; sock.onopen && sock.onopen(); }
       else sock.close();
@@ -5751,6 +5765,9 @@
     });
   }
   // Looks for the app every 2 s for the first two minutes, then every 10 s; right away when you come back to the tab.
+  // The desktop app's link can't tell when the Wick app went away: if it's been silent (the app pings every 4 s), reconnect.
+  setInterval(() => { if (VIA_CDP && bridge.up && Date.now() - (bridge.lastMsg || 0) > 12000 && bridge.ws) bridge.ws.close(); }, 3000);
+  function newerVer(a, b) { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 4; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; }
   function bridgeRetry() { clearTimeout(bridge.timer); if (linkWanted()) bridge.timer = setTimeout(bridgeConnect, ++bridge.tries <= 60 ? 2000 : 10000); }
   const bridgeNow = () => { if (!bridge.up && !bridge.ws && linkWanted()) { bridge.tries = 0; bridgeConnect(); } };
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') bridgeNow(); });
