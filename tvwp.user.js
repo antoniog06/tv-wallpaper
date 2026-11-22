@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.3
+// @version      3.26.4
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.3';
+  const VERSION = '3.26.4';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -3311,6 +3311,7 @@
   }
 
   /* floating button */
+  .fab[hidden] { display: none !important; }
   .fab { position: fixed; z-index: 2147483000; width: 38px; height: 38px; border-radius: 12px; border: none; cursor: grab;
     display: grid; place-items: center; color: #fff; touch-action: none; user-select: none;
     background: linear-gradient(135deg, #5b6cff 0%, #22c3e6 100%); box-shadow: 0 6px 18px rgba(0,0,0,.4); transition: transform .12s; }
@@ -4175,12 +4176,10 @@
       else toggle();
     });
     function toggle(force) {
-      // TradingView desktop app with the Wick app running: the Wick button opens the app, docked to this window
-      if (!WICK_HOME && VIA_CDP && bridge.up) {
-        const open = force ?? !bridge.docked;
-        bridge.docked = open;
+      // TradingView desktop app with the Wick app running: Wick lives in its own window (taskbar), not on the chart
+      if (!WICK_HOME && VIA_CDP && appAlive()) {
         panel.classList.remove('open');
-        bridgeSend({ t: 'dock', open, geo: winGeo() });
+        if (force !== false) bridgeSend({ t: 'show' });
         return;
       }
       const open = force ?? !panel.classList.contains('open');
@@ -4191,11 +4190,18 @@
     window.addEventListener('keydown', e => {
       if (!(e.altKey && e.shiftKey && (e.key === 'W' || e.key === 'w'))) return;
       e.preventDefault();
-      if (WICK_HOME) bridgeSend({ t: 'cmd', name: 'dockClose' });   // docked over TradingView: Alt+Shift+W closes it again
-      else toggle();
+      if (!WICK_HOME) toggle();
     }, true);
     window.addEventListener('resize', () => { placeFab(); if (panel.classList.contains('open')) placePanel(); });
     placeFab();
+    // No Wick button on the chart in the TradingView desktop app while the Wick app is running (it's in the taskbar).
+    // If the app ever goes away, the button comes back so Wick stays reachable.
+    const fabCheck = () => {
+      const appOwned = WICK_HOME || (VIA_CDP && appAlive());
+      if (fab.hidden !== appOwned) fab.hidden = appOwned;
+      if (appOwned && !WICK_HOME && panel.classList.contains('open')) panel.classList.remove('open');
+    };
+    fabCheck(); setInterval(fabCheck, 700);
 
     /* ---- tabs ---- */
     // (i) details: one floating tip for the whole panel
@@ -5705,7 +5711,7 @@
     try { ws = VIA_CDP ? cdpSocket() : new WebSocket(BRIDGE_WS); } catch (e) { bridgeRetry(); return; }
     bridge.ws = ws; ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
-      bridge.up = true; bridge.tries = 0; bridge.synced = false; bridge.lastMsg = Date.now();
+      bridge.up = true; bridge.tries = 0; bridge.synced = false; bridge.openedAt = Date.now();
       bridgeSend({ t: 'hello', kind: WICK_HOME ? 'home' : IN_APP ? 'desktop' : 'browser', ver: VERSION, url: location.href,
         // the app window only takes the shared settings; TradingView windows bring yours
         settings: WICK_HOME ? null : shareable(S), settingsAt: WICK_HOME ? 0 : +localStorage.getItem('tvwp_settings_at') || 0, risk: lockInfo() });
@@ -5766,26 +5772,15 @@
   }
   // Looks for the app every 2 s for the first two minutes, then every 10 s; right away when you come back to the tab.
   // The desktop app's link can't tell when the Wick app went away: if it's been silent (the app pings every 4 s), reconnect.
-  setInterval(() => { if (VIA_CDP && bridge.up && Date.now() - (bridge.lastMsg || 0) > 12000 && bridge.ws) bridge.ws.close(); }, 3000);
+  setInterval(() => { if (VIA_CDP && bridge.up && Date.now() - Math.max(bridge.lastMsg || 0, bridge.openedAt || 0) > 12000 && bridge.ws) bridge.ws.close(); }, 3000);
+  // really hearing from the app (the desktop link can look open after the app is gone)
+  function appAlive() { return bridge.up && (!VIA_CDP || Date.now() - (bridge.lastMsg || 0) < 10000); }
   function newerVer(a, b) { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < 4; i++) if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) > (y[i] || 0); return false; }
   function bridgeRetry() { clearTimeout(bridge.timer); if (linkWanted()) bridge.timer = setTimeout(bridgeConnect, ++bridge.tries <= 60 ? 2000 : 10000); }
   const bridgeNow = () => { if (!bridge.up && !bridge.ws && linkWanted()) { bridge.tries = 0; bridgeConnect(); } };
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') bridgeNow(); });
   window.addEventListener('focus', bridgeNow);
   window.addEventListener('online', bridgeNow);
-  // Where this TradingView window is on screen, so the Wick app can dock to it.
-  function winGeo() {
-    return { x: window.screenX, y: window.screenY, w: window.outerWidth, h: window.outerHeight, iw: window.innerWidth, ih: window.innerHeight,
-      vis: document.visibilityState === 'visible', focus: document.hasFocus(), dpr: window.devicePixelRatio || 1 };
-  }
-  if (VIA_CDP) {
-    let lastGeo = '';
-    setInterval(() => {
-      if (!bridge.up) { lastGeo = ''; return; }
-      const g = winGeo(), k = JSON.stringify(g);
-      if (k !== lastGeo) { lastGeo = k; bridgeSend({ t: 'geo', geo: g }); }
-    }, 200);
-  }
   function bridgeStop() { clearTimeout(bridge.timer); if (bridge.ws) try { bridge.ws.close(); } catch (e) {} }
   function lockInfo() {
     const st = riskLoad();
@@ -5876,7 +5871,7 @@
       for (const id of m.ids || []) { bridge.walls.delete(id); try { await DB.del(id, true); } catch (e) {} }
       applyPart('wall'); if (buildUI.onWalls) buildUI.onWalls();
     }
-    else if (m.t === 'docked') { bridge.docked = !!m.open; }
+
     else if (m.t === 'status') { bridge.status = m; buildUI.onAppStatus && buildUI.onAppStatus(); }
   }
   // Videos go to the app in 512 KB pieces, one video at a time.

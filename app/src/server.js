@@ -152,12 +152,11 @@ function startServer({ store, script, homeHtml, hooks, log }) {
         });
         break;
       }
-      case 'geo':
-        ws.geo = m.geo;
-        if (hooks.geo) hooks.geo(ws);
+      case 'show':
+        if (hooks.show) hooks.show();
         break;
       case 'dock':
-        if (ws.kind === 'desktop' && hooks.dock) hooks.dock(ws, !!m.open, m.geo);
+        if (m.open && hooks.show) hooks.show();
         break;
       case 'wsync':
         send(ws, { t: 'wsync', list: store.wallList(), tomb: Object.keys(store.wallTomb) });
