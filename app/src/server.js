@@ -78,6 +78,7 @@ function startServer({ store, script, homeHtml, hooks, log }) {
     });
     ws.on('close', () => {
       clients.delete(ws);
+      if (hooks.gone) hooks.gone(ws);
       const up = uploads.get(ws);
       if (up) { try { up.stream.destroy(); fs.unlinkSync(up.tmp); } catch (e) {} uploads.delete(ws); }
       status();
@@ -144,6 +145,13 @@ function startServer({ store, script, homeHtml, hooks, log }) {
         });
         break;
       }
+      case 'geo':
+        ws.geo = m.geo;
+        if (hooks.geo) hooks.geo(ws);
+        break;
+      case 'dock':
+        if (ws.kind === 'desktop' && hooks.dock) hooks.dock(ws, !!m.open, m.geo);
+        break;
       case 'vget': {
         // a window that can't load the video address directly gets it through the link
         const v = store.videos.get(m.id);
@@ -165,7 +173,7 @@ function startServer({ store, script, homeHtml, hooks, log }) {
       }
       case 'cmd':
         if (ws.kind !== 'home') return;
-        Promise.resolve(hooks.command(m)).then(() => status()).catch(e => log('cmd failed: ' + e.message));
+        Promise.resolve(hooks.command(m, ws)).then(() => status()).catch(e => log('cmd failed: ' + e.message));
         break;
     }
   }

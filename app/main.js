@@ -1,7 +1,7 @@
 // Wick app: runs in the tray, opens the TradingView desktop app with Wick loaded, and keeps one
 // journal, one set of settings and one lockout for Chrome and the desktop app.
 'use strict';
-const { app, BrowserWindow, Tray, Menu, dialog, shell, Notification, nativeImage, net } = require('electron');
+const { app, BrowserWindow, Tray, Menu, dialog, shell, Notification, nativeImage, net, screen } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { Store } = require('./src/store');
@@ -32,31 +32,94 @@ const update = { state: 'idle', version: '', pct: 0, error: '' };
 let win = null, tray = null, server = null, quitting = false, toldTray = !!store.prefs.toldTray;
 
 /* ---------- window ---------- */
-function showWindow() {
-  if (!win) {
+let titleBar = { color: '#15171e', symbolColor: '#c9cdd6', height: 52 };
+function makeWindow() {
     win = new BrowserWindow({
-      width: 1200, height: 820, minWidth: 860, minHeight: 600, title: 'Wick', icon, backgroundColor: '#15171e', show: false,
+      width: 1200, height: 820, minWidth: 820, minHeight: 420, title: 'Wick', icon, backgroundColor: '#15171e', show: false,
+      // Wick draws its own title bar (Windows keeps its own minimize / maximize / close buttons)
+      titleBarStyle: 'hidden', titleBarOverlay: process.platform === 'win32' ? titleBar : false,
       autoHideMenuBar: true, webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false, backgroundThrottling: false }
     });
     win.removeMenu();
     win.loadURL(`${server.url}/home`);
-    win.once('ready-to-show', () => win.show());
     // links (like the releases page) open in your browser
     win.webContents.setWindowOpenHandler(({ url }) => { if (/^https:\/\//.test(url)) shell.openExternal(url); return { action: 'deny' }; });
     win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith(server.url)) { e.preventDefault(); if (/^https:\/\//.test(url)) shell.openExternal(url); } });
     win.on('close', e => {
       if (quitting) return;
-      e.preventDefault(); win.hide();
+      e.preventDefault();
+      if (dock.on) { undock(true); return; }
+      win.hide();
       if (!toldTray && Notification.isSupported()) {
         toldTray = store.prefs.toldTray = true; savePrefs();
         new Notification({ title: 'Wick is still running', body: 'It keeps your journal and lockout working in the tray. Right-click the tray icon to quit.', icon }).show();
       }
     });
     win.on('closed', () => { win = null; });
-  } else {
-    if (win.isMinimized()) win.restore();
-    win.show(); win.focus();
-  }
+    win.on('focus', () => { if (dock.on) win.setAlwaysOnTop(true, 'floating'); });
+    win.on('blur', () => { if (dock.on) setTimeout(followTv, 120); });
+}
+function showWindow() {
+  if (!win) { makeWindow(); win.once('ready-to-show', () => win.show()); return; }
+  if (dock.on) undock(false);
+  if (win.isMinimized()) win.restore();
+  win.show(); win.focus();
+}
+
+/* ---------- docked to TradingView ---------- */
+// The Wick button in the TradingView desktop app opens this window over the right side of TradingView.
+// It moves and resizes with TradingView, hides when TradingView is minimized, and drops behind other apps.
+const dock = { on: false, link: null, normal: null };
+function toDip(g) {
+  // the page reports CSS pixels; with TradingView zoomed in or out those differ from screen units
+  const d = screen.getDisplayNearestPoint({ x: Math.round(g.x), y: Math.round(g.y) });
+  let z = (g.dpr || 1) / (d.scaleFactor || 1); if (Math.abs(z - 1) < 0.03) z = 1;
+  return { x: g.x, y: g.y, w: g.w * z, h: g.h * z, top: Math.max(0, (g.h - g.ih) * z), z };
+}
+function dockBounds(g) {
+  const d = toDip(g);
+  const top = Math.round(d.top + 46 * d.z);              // below TradingView's own top toolbar
+  const w = Math.round(Math.min(1180, Math.max(820, d.w * 0.6), d.w - 16));
+  return { x: Math.round(d.x + d.w - w - 8), y: Math.round(d.y + top), width: Math.max(320, w), height: Math.round(Math.max(380, d.h - top - 10)) };
+}
+function setDock(link, open, geo) {
+  if (geo) link.geo = geo;
+  if (!open) { if (dock.on && dock.link === link) undock(true); return; }
+  if (!link.geo) return;
+  if (!win) makeWindow();
+  if (!dock.on && win.isVisible() && !win.isMinimized()) dock.normal = win.getBounds();
+  if (win.isMaximized()) win.unmaximize();
+  dock.on = true; dock.link = link;
+  win.setMinimumSize(320, 300);
+  win.setBounds(dockBounds(link.geo));
+  log('docked to TradingView ' + JSON.stringify(win.getBounds()));
+  win.setAlwaysOnTop(true, 'floating');
+  win.show(); win.focus();
+  link.send(JSON.stringify({ t: 'docked', open: true }));
+}
+function undock(hide) {
+  const link = dock.link;
+  dock.on = false; dock.link = null;
+  if (link && link.readyState === 1) link.send(JSON.stringify({ t: 'docked', open: false }));
+  log('undocked' + (hide ? ' (hidden)' : ''));
+  if (!win) return;
+  win.setAlwaysOnTop(false);
+  if (hide) win.hide();
+  win.setMinimumSize(820, 420);
+  if (dock.normal) win.setBounds(dock.normal); else win.setBounds({ width: 1200, height: 820 });
+  if (hide) return;
+  win.center && !dock.normal && win.center();
+}
+function followTv() {
+  if (!dock.on || !win || !dock.link || !dock.link.geo) return;
+  const g = dock.link.geo;
+  if (!g.vis) { if (win.isVisible()) { win.hide(); log('TradingView minimized: dock hidden'); } return; }
+  const b = dockBounds(g), c = win.getBounds();
+  if (b.x !== c.x || b.y !== c.y || b.width !== c.width || b.height !== c.height) win.setBounds(b);
+  const front = g.focus || win.isFocused();
+  if (!win.isVisible()) { win.showInactive(); log('dock shown again'); }
+  win.setAlwaysOnTop(front, 'floating');
+  if (front && !win.isFocused()) win.moveTop();
 }
 
 /* ---------- tray ---------- */
@@ -166,7 +229,16 @@ app.whenReady().then(async () => {
       homeHtml: () => fs.readFileSync(path.join(__dirname, 'home.html'), 'utf8'),
       hooks: {
         status: () => ({ appVersion: app.getVersion(), scriptVersion: script.version(), tv: { ...tv.state }, update: { ...update }, prefs: { tvOnStart: !!store.prefs.tvOnStart, tvWatch: store.prefs.tvWatch !== false, login: !!store.prefs.login }, dataDir }),
+        geo: link => { if (dock.on && dock.link === link) followTv(); },
+        dock: (link, open, geo) => setDock(link, open, geo),
+        gone: link => { if (dock.on && dock.link === link) undock(true); },
         command: async m => {
+          if (m.name === 'dockClose') return dock.on ? undock(true) : null;
+          if (m.name === 'theme') {
+            titleBar = m.light ? { color: '#f6f7fb', symbolColor: '#3b3f4a', height: 52 } : { color: '#15171e', symbolColor: '#c9cdd6', height: 52 };
+            if (win && process.platform === 'win32') try { win.setTitleBarOverlay(titleBar); } catch (e) {}
+            return;
+          }
           if (m.name === 'openTv') return openTradingView();
           if (m.name === 'pref') return setPref(m.key, m.on);
           if (m.name === 'checkUpdate') return checkUpdate();

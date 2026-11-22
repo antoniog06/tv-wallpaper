@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.0
+// @version      3.26.1
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.0';
+  const VERSION = '3.26.1';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -3376,7 +3376,10 @@
   .panel.mini { grid-template-columns: 58px 1fr; }
   /* the Wick app's own window: the panel is the whole window */
   .panel.home { left: 0 !important; top: 0 !important; width: 100vw; height: 100vh; max-width: none; max-height: none; border-radius: 0; border: none; box-shadow: none; }
-  .panel.home header { cursor: default; }
+  .panel.home header { cursor: default; -webkit-app-region: drag; padding-right: 150px; }
+  .panel.home header button, .panel.home header .pill, .panel.home header input, .panel.home header select, .panel.home header label, .panel.home #hdrCtl { -webkit-app-region: no-drag; }
+  .panel.home .brand { -webkit-app-region: drag; }
+  .panel.home .brand button { -webkit-app-region: no-drag; }
   .panel:not(.home) .homeonly { display: none; }
   .panel.home .linkopt, .panel.home .notapp, .panel.hosted .linkopt { display: none; }
   .panel.linked .notapp { display: none; }
@@ -4158,14 +4161,24 @@
       else toggle();
     });
     function toggle(force) {
+      // TradingView desktop app with the Wick app running: the Wick button opens the app, docked to this window
+      if (!WICK_HOME && VIA_CDP && bridge.up) {
+        const open = force ?? !bridge.docked;
+        bridge.docked = open;
+        panel.classList.remove('open');
+        bridgeSend({ t: 'dock', open, geo: winGeo() });
+        return;
+      }
       const open = force ?? !panel.classList.contains('open');
       panel.classList.toggle('open', open);
       if (open) { renderAllUI(); placePanel(); }
     }
     $('.x').onclick = () => toggle(false);
     window.addEventListener('keydown', e => {
-      if (WICK_HOME) return;
-      if (e.altKey && e.shiftKey && (e.key === 'W' || e.key === 'w')) { e.preventDefault(); toggle(); }
+      if (!(e.altKey && e.shiftKey && (e.key === 'W' || e.key === 'w'))) return;
+      e.preventDefault();
+      if (WICK_HOME) bridgeSend({ t: 'cmd', name: 'dockClose' });   // docked over TradingView: Alt+Shift+W closes it again
+      else toggle();
     }, true);
     window.addEventListener('resize', () => { placeFab(); if (panel.classList.contains('open')) placePanel(); });
     placeFab();
@@ -5524,8 +5537,11 @@
       if (h.classList.contains('theme-dark')) return false;
       return !(window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches);
     }
+    let sentLight = null;
     function applyTheme() {
-      panel.classList.toggle('light', themeIsLight());
+      const light = themeIsLight();
+      panel.classList.toggle('light', light);
+      if (WICK_HOME && bridge.up && sentLight !== light) { sentLight = light; bridgeSend({ t: 'cmd', name: 'theme', light }); }   // matches the window buttons
       root.querySelectorAll('#gTheme button').forEach(b => b.classList.toggle('on', b.dataset.v === (S.ui.theme || 'auto')));
     }
     root.querySelectorAll('#gTheme button').forEach(b => b.onclick = () => { S.ui.theme = b.dataset.v; save(null); applyTheme(); renderProfile(); });
@@ -5712,7 +5728,25 @@
       return job;
     });
   }
-  function bridgeRetry() { clearTimeout(bridge.timer); if (linkWanted()) bridge.timer = setTimeout(bridgeConnect, Math.min(20000, 2000 * ++bridge.tries)); }
+  // Looks for the app every 2 s for the first two minutes, then every 10 s; right away when you come back to the tab.
+  function bridgeRetry() { clearTimeout(bridge.timer); if (linkWanted()) bridge.timer = setTimeout(bridgeConnect, ++bridge.tries <= 60 ? 2000 : 10000); }
+  const bridgeNow = () => { if (!bridge.up && !bridge.ws && linkWanted()) { bridge.tries = 0; bridgeConnect(); } };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') bridgeNow(); });
+  window.addEventListener('focus', bridgeNow);
+  window.addEventListener('online', bridgeNow);
+  // Where this TradingView window is on screen, so the Wick app can dock to it.
+  function winGeo() {
+    return { x: window.screenX, y: window.screenY, w: window.outerWidth, h: window.outerHeight, iw: window.innerWidth, ih: window.innerHeight,
+      vis: document.visibilityState === 'visible', focus: document.hasFocus(), dpr: window.devicePixelRatio || 1 };
+  }
+  if (VIA_CDP) {
+    let lastGeo = '';
+    setInterval(() => {
+      if (!bridge.up) { lastGeo = ''; return; }
+      const g = winGeo(), k = JSON.stringify(g);
+      if (k !== lastGeo) { lastGeo = k; bridgeSend({ t: 'geo', geo: g }); }
+    }, 200);
+  }
   function bridgeStop() { clearTimeout(bridge.timer); if (bridge.ws) try { bridge.ws.close(); } catch (e) {} }
   function lockInfo() {
     const st = riskLoad();
@@ -5787,6 +5821,7 @@
       job.parts[m.i] = u; job.mime = m.mime;
       if (m.last) { clearTimeout(job.timer); delete bridge.vget[m.id]; job.resolve(new Blob(job.parts, { type: job.mime })); }
     }
+    else if (m.t === 'docked') { bridge.docked = !!m.open; }
     else if (m.t === 'status') { bridge.status = m; buildUI.onAppStatus && buildUI.onAppStatus(); }
   }
   // Videos go to the app in 512 KB pieces, one video at a time.
@@ -5810,7 +5845,7 @@
       finally { bridge.uploading.delete(id); }
     });
   }
-  setTimeout(bridgeConnect, WICK_HOME ? 0 : 1500);
+  setTimeout(bridgeConnect, WICK_HOME || VIA_CDP ? 0 : 400);
 
   function start() {
     buildUI();
