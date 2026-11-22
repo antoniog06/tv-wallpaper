@@ -123,10 +123,12 @@ function startServer({ store, script, homeHtml, hooks, log }) {
         break;
       }
       case 'vbegin': {
-        if (typeof m.id !== 'string' || !/^v_[A-Za-z0-9_-]+$/.test(m.id)) return;
-        const file = store.videoPath(m.id, m.mime), tmp = file + '.part';
+        const wall = m.kind === 'wall';
+        if (typeof m.id !== 'string' || !(wall ? /^[A-Za-z0-9_-]{4,40}$/ : /^v_[A-Za-z0-9_-]+$/).test(m.id)) return;
+        if (wall && (store.walls[m.id] || store.wallTomb[m.id])) return;
+        const file = wall ? store.wallPath(m.id, m.mime) : store.videoPath(m.id, m.mime), tmp = file + '.part';
         const prev = uploads.get(ws); if (prev) try { prev.stream.destroy(); } catch (e) {}
-        uploads.set(ws, { id: m.id, file, tmp, mime: m.mime, size: +m.size || 0, bytes: 0, stream: fs.createWriteStream(tmp) });
+        uploads.set(ws, { kind: wall ? 'wall' : 'video', meta: wall ? m.meta : null, id: m.id, file, tmp, mime: m.mime, size: +m.size || 0, bytes: 0, stream: fs.createWriteStream(tmp) });
         break;
       }
       case 'vend': {
@@ -135,7 +137,12 @@ function startServer({ store, script, homeHtml, hooks, log }) {
         uploads.delete(ws);
         up.stream.end(() => {
           if (up.size && up.bytes !== up.size) { try { fs.unlinkSync(up.tmp); } catch (e) {} log(`video ${up.id} incomplete (${up.bytes}/${up.size})`); return; }
-          try { fs.renameSync(up.tmp, up.file); } catch (e) { log('video save failed: ' + e.message); return; }
+          try { fs.renameSync(up.tmp, up.file); } catch (e) { log('file save failed: ' + e.message); return; }
+          if (up.kind === 'wall') {
+            const info = store.addWall(up.id, up.file, up.mime, up.meta);
+            if (info) { others(ws, { t: 'wnew', wall: info }); log(`wallpaper saved ${up.id} ${(up.bytes / 1048576).toFixed(1)} MB`); }
+            return;
+          }
           const t = store.addVideo(up.id, up.file, up.mime);
           for (const id of store.trimVideos(store.settings.data && store.settings.data.rec && store.settings.data.rec.keep)) log('trimmed ' + id);
           everyone({ t: 'videos', ids: [up.id] });
@@ -152,10 +159,18 @@ function startServer({ store, script, homeHtml, hooks, log }) {
       case 'dock':
         if (ws.kind === 'desktop' && hooks.dock) hooks.dock(ws, !!m.open, m.geo);
         break;
+      case 'wsync':
+        send(ws, { t: 'wsync', list: store.wallList(), tomb: Object.keys(store.wallTomb) });
+        break;
+      case 'wdel': {
+        const ids = store.delWalls(m.ids);
+        if (ids.length) others(ws, { t: 'wdel', ids });
+        break;
+      }
       case 'vget': {
         // a window that can't load the video address directly gets it through the link
-        const v = store.videos.get(m.id);
-        if (!v) { send(ws, { t: 'vdata', id: m.id, missing: true, last: true }); return; }
+        const v = m.kind === 'wall' ? store.walls[m.id] : store.videos.get(m.id);
+        if (!v) { send(ws, { t: 'vdata', kind: m.kind || 'video', id: m.id, missing: true, last: true }); return; }
         const step = 384 * 1024, size = v.size; let i = 0;
         const fd = fs.openSync(v.file, 'r');
         const pump = () => {
@@ -164,7 +179,7 @@ function startServer({ store, script, homeHtml, hooks, log }) {
           const buf = Buffer.alloc(Math.min(step, size - i * step));
           fs.readSync(fd, buf, 0, buf.length, i * step);
           const last = (i + 1) * step >= size;
-          send(ws, { t: 'vdata', id: m.id, i, mime: v.mime, size, last, b64: buf.toString('base64') });
+          send(ws, { t: 'vdata', kind: m.kind || 'video', id: m.id, i, mime: v.mime, size, last, b64: buf.toString('base64') });
           i++;
           if (last) fs.closeSync(fd); else setImmediate(pump);
         };

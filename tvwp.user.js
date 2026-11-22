@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.1
+// @version      3.26.2
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.1';
+  const VERSION = '3.26.2';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -135,9 +135,9 @@
   const IN_APP = !WICK_HOME && /Electron|TradingView\//i.test(navigator.userAgent);
   const BRIDGE_PORT = 47823, BRIDGE_WS = `ws://127.0.0.1:${BRIDGE_PORT}/wick`, BRIDGE_HTTP = `http://127.0.0.1:${BRIDGE_PORT}`;
   const VIA_CDP = !WICK_HOME && window.__wickHost === 'app';
-  const bridge = { ws: null, up: false, synced: false, tries: 0, timer: 0, videos: new Set(), uploading: new Set(), sending: Promise.resolve(), status: null };
-  // Settings that stay with each window: where the panel sits, the wallpaper picked from this window's library, folder access.
-  const LOCAL_KEYS = { ui: ['x', 'y', 'px', 'py', 'tab', 'appLink'], wall: ['currentId', 'perPanel', 'used'], rec: ['folderOn', 'folderName'] };
+  const bridge = { ws: null, up: false, synced: false, tries: 0, timer: 0, videos: new Set(), walls: new Set(), uploading: new Set(), sending: Promise.resolve(), status: null };
+  // Settings that stay with each window: where the panel sits and folder access. (Wallpapers are shared through the app.)
+  const LOCAL_KEYS = { ui: ['x', 'y', 'px', 'py', 'tab', 'appLink'], wall: [], rec: ['folderOn', 'folderName'] };
 
   /* =========================================================
    * Candle colors: swap colors as the chart draws them
@@ -540,8 +540,10 @@
     },
     all() { return this.run('readonly', s => s.getAll()); },
     get(id) { return this.run('readonly', s => s.get(id)); },
-    put(w) { return this.run('readwrite', s => s.put(w)); },
-    del(id) { return this.run('readwrite', s => s.delete(id)); },
+    // wallpapers: added or removed here also go to the Wick app, which shares them with every window
+    put(w, quiet) { return this.run('readwrite', s => s.put(w)).then(r => { if (!quiet) fileUpload('wall', w.id); return r; }); },
+    del(id, quiet) { return this.run('readwrite', s => s.delete(id)).then(r => { if (!quiet) bridgeSend({ t: 'wdel', ids: [id] }); return r; }); },
+    keys() { return this.run('readonly', s => s.getAllKeys()); },
     soundsAll() { return this.run('readonly', s => s.getAll(), 'sounds'); },
     soundGet(id) { return this.run('readonly', s => s.get(id), 'sounds'); },
     soundPut(x) { return this.run('readwrite', s => s.put(x), 'sounds'); },
@@ -5466,6 +5468,7 @@
       renderJournal();
     };
     buildUI.onJournal = () => { if (panel.classList.contains('open')) renderJournal(); };
+    buildUI.onWalls = () => { if (panel.classList.contains('open') && S.ui.tab === 'wall') renderWallUI(); };
 
     $('#xAds').onchange = e => { S.extras.hideAds = e.target.checked; save('extras'); applyAds(); };
     const setBtn = (key, v) => { S.extras[key] = v; save('extras'); applyButtonColors(); renderBtnColors(); };
@@ -5695,6 +5698,7 @@
         // the app window only takes the shared settings; TradingView windows bring yours
         settings: WICK_HOME ? null : shareable(S), settingsAt: WICK_HOME ? 0 : +localStorage.getItem('tvwp_settings_at') || 0, risk: lockInfo() });
       tradeSync();
+      bridgeSend({ t: 'wsync' });
       buildUI.refresh && buildUI.refresh();
     };
     ws.onmessage = e => { if (typeof e.data !== 'string') return; let m; try { m = JSON.parse(e.data); } catch (err) { return; } onBridge(m).catch(err => console.warn('[Wick] app link', err)); };
@@ -5720,12 +5724,30 @@
     return sock;
   }
   // A video stored in the Wick app, fetched over the link (when this window can't load its address).
-  function bridgeVideo(id) {
+  function bridgeVideo(id) { return bridgeFile('video', id); }
+  function bridgeFile(kind, id) {
     return new Promise((resolve, reject) => {
       bridge.vget = bridge.vget || {};
-      const job = bridge.vget[id] = { parts: [], resolve, reject, timer: setTimeout(() => { delete bridge.vget[id]; reject(new Error('timed out')); }, 120000) };
-      bridgeSend({ t: 'vget', id });
-      return job;
+      const key = kind + ':' + id;
+      bridge.vget[key] = { parts: [], resolve, reject, timer: setTimeout(() => { delete bridge.vget[key]; reject(new Error('timed out')); }, 300000) };
+      bridgeSend({ t: 'vget', kind, id });
+    });
+  }
+  // Wallpapers this window doesn't have yet come from the app, one at a time.
+  function wallFetch(info) {
+    if (!info || !info.id || bridge.fetching && bridge.fetching.has(info.id)) return;
+    (bridge.fetching = bridge.fetching || new Set()).add(info.id);
+    bridge.wq = (bridge.wq || Promise.resolve()).then(async () => {
+      try {
+        if (await DB.get(info.id)) return;
+        const blob = await bridgeFile('wall', info.id);
+        const rec = { ...info, blob }; delete rec.mime; delete rec.size;
+        await DB.put(rec, true);
+        bridge.walls.add(info.id);
+        applyPart('wall');
+        if (buildUI.onWalls) buildUI.onWalls();
+      } catch (e) { console.warn('[Wick] wallpaper download', e); }
+      finally { bridge.fetching.delete(info.id); }
     });
   }
   // Looks for the app every 2 s for the first two minutes, then every 10 s; right away when you come back to the tab.
@@ -5813,27 +5835,47 @@
       for (const k of (await DB.videoKeys()) || []) if (!bridge.videos.has(String(k))) videoUpload(String(k));
     } else if (m.t === 'videos') { for (const id of m.ids || []) bridge.videos.add(id); buildUI.onJournal && buildUI.onJournal(); }
     else if (m.t === 'vdata') {
-      const job = bridge.vget && bridge.vget[m.id];
+      const key = (m.kind || 'video') + ':' + m.id, job = bridge.vget && bridge.vget[key];
       if (!job) return;
-      if (m.missing) { clearTimeout(job.timer); delete bridge.vget[m.id]; job.reject(new Error('missing')); return; }
+      if (m.missing) { clearTimeout(job.timer); delete bridge.vget[key]; job.reject(new Error('missing')); return; }
       const bin = atob(m.b64), u = new Uint8Array(bin.length);
       for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
       job.parts[m.i] = u; job.mime = m.mime;
-      if (m.last) { clearTimeout(job.timer); delete bridge.vget[m.id]; job.resolve(new Blob(job.parts, { type: job.mime })); }
+      if (m.last) { clearTimeout(job.timer); delete bridge.vget[key]; job.resolve(new Blob(job.parts, { type: job.mime })); }
+    }
+    else if (m.t === 'wsync') {
+      // the app's wallpaper library: get what's missing here, send what only this window has
+      for (const id of m.tomb || []) { try { await DB.del(id, true); } catch (e) {} }
+      bridge.walls = new Set((m.list || []).map(w => w.id));
+      const local = new Set(((await DB.keys()) || []).map(String));
+      for (const w of m.list || []) if (!local.has(w.id)) wallFetch(w);
+      const tomb = new Set(m.tomb || []);
+      for (const id of local) if (!bridge.walls.has(id) && !tomb.has(id)) fileUpload('wall', id);
+      if ((m.tomb || []).length) applyPart('wall');
+      if (buildUI.onWalls) buildUI.onWalls();
+    }
+    else if (m.t === 'wnew') { if (m.wall) { bridge.walls.add(m.wall.id); wallFetch(m.wall); } }
+    else if (m.t === 'wdel') {
+      for (const id of m.ids || []) { bridge.walls.delete(id); try { await DB.del(id, true); } catch (e) {} }
+      applyPart('wall'); if (buildUI.onWalls) buildUI.onWalls();
     }
     else if (m.t === 'docked') { bridge.docked = !!m.open; }
     else if (m.t === 'status') { bridge.status = m; buildUI.onAppStatus && buildUI.onAppStatus(); }
   }
   // Videos go to the app in 512 KB pieces, one video at a time.
-  function videoUpload(id) {
-    if (!bridge.up || bridge.videos.has(id) || bridge.uploading.has(id)) return;
-    bridge.uploading.add(id);
+  function videoUpload(id) { fileUpload('video', id); }
+  function fileUpload(kind, id) {
+    const key = kind + ':' + id;
+    if (!bridge.up || (kind === 'wall' ? bridge.walls : bridge.videos).has(id) || bridge.uploading.has(key)) return;
+    bridge.uploading.add(key);
     bridge.sending = bridge.sending.then(async () => {
       try {
-        const v = await DB.videoGet(id);
+        const v = kind === 'wall' ? await DB.get(id) : await DB.videoGet(id);
         if (!v || !v.blob || !bridge.up) return;
         const ws = bridge.ws, size = v.blob.size, step = 512 * 1024;
-        bridgeSend({ t: 'vbegin', id, tradeId: v.tradeId, mime: v.mime || v.blob.type, size, started: v.started, ended: v.ended });
+        let meta = null;
+        if (kind === 'wall') { meta = { ...v }; delete meta.blob; }
+        bridgeSend({ t: 'vbegin', kind, id, meta, tradeId: v.tradeId, mime: v.mime || v.blob.type, size, started: v.started, ended: v.ended });
         for (let off = 0; off < size; off += step) {
           if (!bridge.up || bridge.ws !== ws) return;
           while (ws.bufferedAmount > 8 * 1048576) await sleepMs(50);
@@ -5841,8 +5883,9 @@
           if (VIA_CDP) await sleepMs(15);
         }
         bridgeSend({ t: 'vend', id });
-      } catch (e) { console.warn('[Wick] video upload', e); }
-      finally { bridge.uploading.delete(id); }
+        if (kind === 'wall') bridge.walls.add(id);
+      } catch (e) { console.warn('[Wick] upload', e); }
+      finally { bridge.uploading.delete(key); }
     });
   }
   setTimeout(bridgeConnect, WICK_HOME || VIA_CDP ? 0 : 400);

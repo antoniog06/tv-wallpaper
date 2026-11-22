@@ -8,7 +8,9 @@ class Store {
   constructor(dir) {
     this.dir = dir;
     this.videoDir = path.join(dir, 'videos');
+    this.wallDir = path.join(dir, 'wallpapers');
     fs.mkdirSync(this.videoDir, { recursive: true });
+    fs.mkdirSync(this.wallDir, { recursive: true });
     this.file = name => path.join(dir, name);
     this.settings = this.read('settings.json', { data: null, at: 0 });
     this.trades = this.read('trades.json', {});          // id -> trade record
@@ -16,6 +18,10 @@ class Store {
     this.risk = this.read('lockout.json', null);
     this.prefs = this.read('app.json', { tvOnStart: false, tvWatch: true, login: true });
     this.timers = {};
+    // the shared wallpaper library: id -> { meta (thumbnail, name, size...), file, mime }
+    this.walls = this.read('wallpapers.json', {});
+    this.wallTomb = this.read('wallpapers-deleted.json', {});
+    for (const [id, w] of Object.entries(this.walls)) if (!w.file || !fs.existsSync(w.file)) delete this.walls[id];
     this.videos = new Map();                             // id -> { file, mime, size }
     for (const f of fs.readdirSync(this.videoDir)) {
       const m = /^(v_[^.]+)\.(mp4|webm)$/.exec(f);
@@ -39,6 +45,7 @@ class Store {
     for (const k of Object.keys(this.timers)) clearTimeout(this.timers[k]);
     this.write('settings.json', this.settings, true); this.write('trades.json', this.trades, true);
     this.write('deleted.json', this.tomb, true); this.write('app.json', this.prefs, true);
+    this.write('wallpapers.json', this.walls, true); this.write('wallpapers-deleted.json', this.wallTomb, true);
     if (this.risk) this.write('lockout.json', this.risk, true);
   }
 
@@ -101,6 +108,32 @@ class Store {
     if (JSON.stringify(next) === JSON.stringify(cur)) return false;
     this.risk = next; this.write('lockout.json', next);
     return true;
+  }
+
+  /* wallpapers */
+  wallPath(id, mime) {
+    const ext = /mp4/i.test(mime) ? 'mp4' : /webm/i.test(mime) ? 'webm' : /gif/i.test(mime) ? 'gif' : /png/i.test(mime) ? 'png' : /webp/i.test(mime) ? 'webp' : 'jpg';
+    return path.join(this.wallDir, `${id}.${ext}`);
+  }
+  addWall(id, file, mime, meta) {
+    if (this.wallTomb[id]) { try { fs.unlinkSync(file); } catch (e) {} return null; }
+    const m = { ...(meta || {}) }; delete m.blob;
+    this.walls[id] = { id, file, mime: mime || 'image/jpeg', size: fs.statSync(file).size, meta: m };
+    this.write('wallpapers.json', this.walls);
+    return this.wallInfo(id);
+  }
+  wallInfo(id) { const w = this.walls[id]; return w ? { ...w.meta, id, mime: w.mime, size: w.size } : null; }
+  wallList() { return Object.keys(this.walls).map(id => this.wallInfo(id)); }
+  delWalls(ids) {
+    const gone = [];
+    for (const id of ids || []) {
+      if (typeof id !== 'string') continue;
+      this.wallTomb[id] = Date.now();
+      const w = this.walls[id];
+      if (w) { try { fs.unlinkSync(w.file); } catch (e) {} delete this.walls[id]; gone.push(id); }
+    }
+    this.write('wallpapers.json', this.walls); this.write('wallpapers-deleted.json', this.wallTomb);
+    return ids || [];
   }
 
   /* videos */

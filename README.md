@@ -24,7 +24,7 @@ The Wick app runs on its own in the tray. It opens the TradingView desktop app w
 2. Open TradingView from Wick (the **Wick** desktop shortcut, the tray icon, or **Open TradingView** on the Wick app page). If you open TradingView some other way, Wick offers to reopen it with Wick in it.
 3. In Chrome, open Wick on a chart → **Wick app** → switch on **Connect this browser to the Wick app**. The first time, Chrome asks to let tradingview.com reach apps on this device: click **Allow**.
 
-What's shared: trades (a trade seen by both Chrome and the desktop app is recorded once), chart videos (stored once, in the app; any window can play them), settings, and the daily lockout (locking in one locks everywhere). What stays per window: the panel's position, the wallpaper picked from that window's own library, and folder access.
+What's shared: trades (a trade seen by both Chrome and the desktop app is recorded once), chart videos (stored once, in the app; any window can play them), settings, and the daily lockout (locking in one locks everywhere). What stays per window: the panel's position and folder access. Wallpapers are one shared library too: add, pick or remove one anywhere and every window follows.
 
 The app updates itself (it checks GitHub Releases), and the Wick script inside TradingView updates from this repo. Your data stays on your PC in `%APPDATA%\Wick\data`. The app replaces the PowerShell launcher below: if you pinned the old Wick shortcut to the taskbar, unpin it and pin the new one.
 
