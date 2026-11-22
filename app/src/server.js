@@ -152,6 +152,13 @@ function startServer({ store, script, homeHtml, hooks, log }) {
         });
         break;
       }
+      case 'layout':
+        ws.layout = m.layout && typeof m.layout === 'object' ? m.layout : null; ws.layoutAt = Date.now();
+        status();
+        break;
+      case 'fixCandles':
+        if (ws.kind === 'home') for (const c of clients) if (c.kind === 'desktop' || c.kind === 'browser') send(c, { t: 'fixCandles' });
+        break;
       case 'show':
         if (hooks.show) hooks.show();
         break;
@@ -198,9 +205,15 @@ function startServer({ store, script, homeHtml, hooks, log }) {
     for (const x of clients) if (x.kind) c[x.kind]++;
     return c;
   }
+  // the chart layout to show in the app window: the TradingView desktop app's, else Chrome's (most recent first)
+  function pickLayout() {
+    const list = [...clients].filter(c => c.layout && c.layout.charts && c.layout.charts.length);
+    list.sort((a, b) => ((b.kind === 'desktop') - (a.kind === 'desktop')) || (b.layoutAt - a.layoutAt));
+    return list[0] ? list[0].layout : null;
+  }
   let lastStatus = '';
   function status(force) {
-    const m = { t: 'status', ...hooks.status(), clients: counts(), trades: Object.keys(store.trades).length, videos: store.videos.size };
+    const m = { t: 'status', ...hooks.status(), clients: counts(), layout: pickLayout(), trades: Object.keys(store.trades).length, videos: store.videos.size };
     const s = JSON.stringify(m);
     if (!force && s === lastStatus) return;
     lastStatus = s;

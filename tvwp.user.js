@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.4
+// @version      3.26.5
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.4';
+  const VERSION = '3.26.5';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -272,7 +272,23 @@
     try { return window.TradingViewApi._activeChartWidgetWV.value()._chartWidget; } catch (e) { return null; }
   }
 
-  // Reads (never writes) the candle colors set in your TradingView chart settings.
+  function isNeutral(v) { const p = parseColor(v); return !!p && Math.max(p[0], p[1], p[2]) - Math.min(p[0], p[1], p[2]) < 28; }
+  const CANDLE_NAMES = { upColor: 'Up', downColor: 'Down', borderUpColor: 'Border up', borderDownColor: 'Border down', wickUpColor: 'Wick up', wickDownColor: 'Wick down' };
+  function neutralParts(d) { return Object.keys(CANDLE_NAMES).filter(k => d[k] && isNeutral(d[k])); }
+  // Sets those parts of TradingView's own candle style to colored ones, so Wick can repaint them without touching text.
+  function fixNeutralCandles() {
+    let n = 0;
+    try {
+      const cs = chartWidget().model().mainSeries().properties().childs().candleStyle.childs();
+      for (const k of neutralParts(detectSources())) {
+        const v = /down/i.test(k) ? '#f23645' : '#089981';
+        if (cs[k] && cs[k].setValue) { cs[k].setValue(v); n++; }
+      }
+    } catch (e) { console.warn('[Wick] candle colors', e); }
+    applyCandles();
+    return n;
+  }
+  // Reads the candle colors set in your TradingView chart settings (only changed by “Make them colored”).
   function detectSources() {
     const out = {};
     try {
@@ -294,12 +310,14 @@
     const wick = { up: c.separate ? tgt(c.wickUp, c.upA) : body.up, down: c.separate ? tgt(c.wickDown, c.downA) : body.down };
     const m = new Map();
     const add = (src, t) => { const p = parseColor(src); if (p && t) m.set(p[0] + ',' + p[1] + ',' + p[2], { t, srcA: p[3] }); };
+    // White, black and gray are also TradingView's text, logo and grid colors: swapping them would repaint those too.
+    const addC = (src, t) => { if (!isNeutral(src)) add(src, t); };
     DEFAULT_UP.forEach(h => add(h, body.up));
     DEFAULT_DOWN.forEach(h => add(h, body.down));
     const d = detected;
-    add(d.wickUpColor, wick.up); add(d.wickDownColor, wick.down);
-    add(d.borderUpColor, border.up); add(d.borderDownColor, border.down);
-    add(d.upColor, body.up); add(d.downColor, body.down);
+    addC(d.wickUpColor, wick.up); addC(d.wickDownColor, wick.down);
+    addC(d.borderUpColor, border.up); addC(d.borderDownColor, border.down);
+    addC(d.upColor, body.up); addC(d.downColor, body.down);
     lookup = m.size ? m : null;
   }
 
@@ -3544,6 +3562,10 @@
   .preset:hover { border-color: var(--accent); }
   .preset i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
   .detected { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  .detected i.skip { opacity: .45; outline: 1px dashed var(--muted); outline-offset: 1px; }
+  #cNeutral .txt small { line-height: 1.5; }
+  #cNeutral .btn, #wFitWarn .btn { flex: none; white-space: nowrap; }
+  #wFitWarn .txt small { line-height: 1.5; color: var(--warn, #f0a020); }
   .detected i { width: 14px; height: 14px; border-radius: 4px; display: inline-block; border: 1px solid var(--line2); }
 
   /* sounds & indicators */
@@ -3821,6 +3843,7 @@
       </div>
       ${grp('Look', `
         ${item('Fit', '', '<div class="seg" id="wFit"><button data-v="cover">Fill</button><button data-v="contain">Fit</button><button data-v="stretch">Stretch</button></div>')}
+        <div class="item" id="wFitWarn" hidden><div class="txt"><small id="wFitWarnTxt"></small></div><button class="btn" id="wFitFill">Use Fill</button></div>
         ${item('Zoom <span class="hint" id="wZoomVal"></span>', '', '<input type="range" id="wZoom" min="1" max="3" step="0.05">')}
         ${item('Dim <span class="hint" id="wDimVal"></span>', 'Darkens the picture so candles stand out.', '<input type="range" id="wDim" min="0" max="0.8" step="0.02">')}
         ${item('Blur <span class="hint" id="wBlurVal"></span>', '', '<input type="range" id="wBlur" min="0" max="20" step="1">')}
@@ -3847,6 +3870,7 @@
         ${item('Separate border & wick colors', 'Pick border and wick colors on their own.', '<input type="checkbox" id="cSeparate">')}
         ${item('Recolor volume bars', 'Volume bars follow your candle colors.', '<input type="checkbox" id="cVolume">')}
         ${item("Chart's current colors", 'These are the colors being replaced.', '<div class="detected" id="detected"></div>')}
+        <div class="item" id="cNeutral" hidden><div class="txt"><small id="cNeutralTxt"></small></div><button class="btn" id="cNeutralFix">Make them colored</button></div>
         <div class="sub"><div class="row"><button class="btn" id="redetect">Re-detect colors</button><button class="btn" id="cReset">Turn off</button></div></div>
       </div>
     </section>
@@ -4330,8 +4354,29 @@
       }
       renderPanels();
     }
+    // the shape of your chart (in the Wick app window: the TradingView window's chart)
+    function chartShape(k) {
+      const lay = WICK_HOME ? (bridge.status && bridge.status.layout) : chartLayout();
+      const list = (lay && lay.charts) || [];
+      const c = list[(k || 1) - 1] || list[0];
+      return c && c[0] > 80 && c[1] > 60 ? c : null;
+    }
     function renderPreview() {
       const w = S.wall, cur = wallList.find(x => x.id === w.currentId);
+      // the preview has your chart's shape and the same look as on the chart
+      const shape = chartShape(1), ar = shape ? shape[0] / shape[1] : 16 / 9;
+      $('#wPrev').style.aspectRatio = String(Math.min(3.2, Math.max(.6, ar)));
+      const img = $('#wPrevImg'), z = w.fit === 'stretch' ? 1 : (w.zoom || 1);
+      img.style.transformOrigin = `${(w.posX ?? .5) * 100}% ${(w.posY ?? .5) * 100}%`;
+      img.style.transform = z !== 1 ? `scale(${z})` : '';
+      const pw = $('#wPrev').clientWidth || 260, blur = (w.blur || 0) * pw / ((shape && shape[0]) || 1280);
+      img.style.filter = [w.dim ? `brightness(${1 - Math.min(.9, w.dim)})` : '', blur ? `blur(${blur.toFixed(1)}px)` : ''].filter(Boolean).join(' ');
+      img.style.opacity = String(Math.max(.25, w.opacity ?? 1));
+      // Stretch on a picture that isn't your chart's shape squashes it
+      const imgAr = cur && cur.w && cur.h ? cur.w / cur.h : 0, off = imgAr ? ar / imgAr : 1;
+      const warn = w.fit === 'stretch' && imgAr && (off > 1.25 || off < .8);
+      $('#wFitWarn').hidden = !warn;
+      if (warn) $('#wFitWarnTxt').textContent = `Stretch is squashing this picture: it's ${imgAr < 1 ? 'tall' : 'wide'} (${cur.w} × ${cur.h}) and your chart is ${ar > imgAr ? 'wider' : 'taller'}. Fill keeps its shape (the edges are cropped; drag the picture to choose what stays in view). Fit shows all of it.`;
       $('#wPrevImg').src = (cur && cur.video ? cur.thumb : backdropUrl) || (cur && cur.thumb) || '';
       $('#wPrevImg').style.objectFit = w.fit === 'contain' ? 'contain' : w.fit === 'stretch' ? 'fill' : 'cover';
       $('#wPrevImg').style.objectPosition = `${(w.posX ?? .5) * 100}% ${(w.posY ?? .5) * 100}%`;
@@ -4343,7 +4388,8 @@
       $('#wReplaceBtn').hidden = $('#wRemove').hidden = !cur;
     }
     function renderPanels() {
-      const n = Math.max(1, containers().length), pp = S.wall.perPanel || {};
+      const homeLay = WICK_HOME ? (bridge.status && bridge.status.layout) : null;
+      const n = Math.max(1, WICK_HOME ? ((homeLay && homeLay.charts && homeLay.charts.length) || 1) : containers().length), pp = S.wall.perPanel || {};
       if (renderPanels.sel == null || renderPanels.sel > n) renderPanels.sel = 1;
       const thumbOf = id => (wallList.find(x => x.id === id) || {}).thumb;
       $('#wPanels').innerHTML = Array.from({ length: n }, (_, i) => {
@@ -4352,7 +4398,7 @@
       }).join('');
       $('#wPanelHint').hidden = n > 1;
       const k = renderPanels.sel;
-      $('#wPanelLbl').textContent = n > 1 ? `Chart ${k}` : 'Chart 1 (only chart on screen)';
+      $('#wPanelLbl').textContent = WICK_HOME && !homeLay ? 'Open TradingView to see your charts here.' : n > 1 ? `Chart ${k} of ${n}` : 'Chart 1 (the only chart in your TradingView layout)';
       $('#wPanelPick').innerHTML = '<option value="">Same as main wallpaper</option>' +
         wallList.map((w, i) => `<option value="${w.id}">${(w.name || (w.animated ? 'GIF' : 'Image') + ' ' + (i + 1)).replace(/</g, '&lt;')}</option>`).join('');
       $('#wPanelPick').value = pp[k] || '';
@@ -4402,6 +4448,7 @@
     $('#wBlur').oninput = wallLive(e => { S.wall.blur = +e.target.value; $('#wBlurVal').textContent = S.wall.blur + ' px'; });
     $('#blend').onchange = e => { S.wall.blend = e.target.value; save('wall'); refreshWall(); };
     root.querySelectorAll('#wFit button').forEach(b => b.onclick = () => { S.wall.fit = b.dataset.v; save('wall'); refreshWall(); renderWallUI(); });
+    $('#wFitFill').onclick = () => { S.wall.fit = 'cover'; save('wall'); refreshWall(); renderWallUI(); };
     $('#wAutoDim').onchange = e => { S.wall.autoDim = e.target.checked; save('wall'); refreshWall(); };
     $('#wTint').onchange = e => { S.wall.tint = e.target.checked; chartBgCache.at = 0; save('wall'); refreshWall(); };
     $('#wCenter').onclick = e => { e.preventDefault(); S.wall.posX = .5; S.wall.posY = .5; save('wall'); refreshWall(); renderPreview(); };
@@ -4491,16 +4538,28 @@
     function renderDetected() {
       const box = $('#detected');
       box.innerHTML = '';
-      const names = { upColor: 'Up', downColor: 'Down', borderUpColor: 'Border up', borderDownColor: 'Border down', wickUpColor: 'Wick up', wickDownColor: 'Wick down' };
-      const keys = Object.keys(names).filter(k => detected[k]);
-      if (!keys.length) { box.innerHTML = '<span class="hint">Not detected yet — using TradingView defaults. Click Re-detect once the chart loads.</span>'; return; }
+      const names = CANDLE_NAMES;
+      // in the Wick app window there's no chart: show the TradingView window's colors
+      const src = WICK_HOME ? ((bridge.status && bridge.status.layout && bridge.status.layout.detected) || {}) : detected;
+      const keys = Object.keys(names).filter(k => src[k]);
+      const note = $('#cNeutral');
+      if (!keys.length) { box.innerHTML = `<span class="hint">${WICK_HOME ? 'Open TradingView to see its colors.' : 'Not detected yet — using TradingView defaults. Click Re-detect once the chart loads.'}</span>`; note.hidden = true; return; }
       for (const k of keys) {
         const i = document.createElement('i');
-        i.style.background = detected[k];
-        i.title = names[k] + ': ' + detected[k];
+        i.style.background = src[k];
+        i.title = names[k] + ': ' + src[k] + (isNeutral(src[k]) ? ' (not repainted: TradingView uses this color for text too)' : '');
+        if (isNeutral(src[k])) i.classList.add('skip');
         box.appendChild(i);
       }
+      const neu = neutralParts(src);
+      note.hidden = !neu.length;
+      if (neu.length) $('#cNeutralTxt').textContent = `Your chart's ${neu.map(k => names[k].toLowerCase()).join(', ')} ${neu.length === 1 ? 'is' : 'are'} white, black or gray in TradingView. TradingView uses those colors for text and its logo too, so Wick leaves them alone (otherwise the logo turns your candle color). Click “Make them colored” to switch those parts of TradingView's candles to green/red; Wick then paints them your colors.`;
     }
+    $('#cNeutralFix').onclick = () => {
+      if (WICK_HOME) bridgeSend({ t: 'fixCandles' });
+      else fixNeutralCandles();
+      setTimeout(renderDetected, 1200);
+    };
     function renderCandleUI() {
       $('#cEnabled').checked = S.candles.enabled;
       $('#cSeparate').checked = !!S.candles.separate;
@@ -5604,7 +5663,17 @@
       $('#aUpdBtn').textContent = up.state === 'ready' ? 'Restart to update' : 'Check now';
       if (st.dataDir) $('#aData').textContent = 'Trades, videos and settings live on this PC: ' + st.dataDir;
     }
-    buildUI.onAppStatus = () => { if (panel.classList.contains('open') && S.ui.tab === 'app') renderAppPage(); renderStatus(); };
+    let lastLay = '';
+    buildUI.onAppStatus = () => {
+      if (panel.classList.contains('open') && S.ui.tab === 'app') renderAppPage();
+      renderStatus();
+      const lay = JSON.stringify((bridge.status && bridge.status.layout) || null);
+      if (WICK_HOME && lay !== lastLay) {
+        lastLay = lay;
+        if (S.ui.tab === 'wall') { renderPreview(); renderPanels(); }
+        if (S.ui.tab === 'candles') renderDetected();
+      }
+    };
     const appCmd = (name, extra) => bridgeSend({ t: 'cmd', name, ...extra });
     $('#aLink').onchange = e => {
       S.ui.appLink = e.target.checked; save(null);
@@ -5781,6 +5850,18 @@
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') bridgeNow(); });
   window.addEventListener('focus', bridgeNow);
   window.addEventListener('online', bridgeNow);
+  // TradingView windows tell the app their chart layout and candle colors (the app window has no chart of its own).
+  function chartLayout() {
+    return { charts: containers().map(el => [el.clientWidth, el.clientHeight]), detected: { ...detected }, desktop: IN_APP };
+  }
+  if (!WICK_HOME) {
+    let lastLayout = '';
+    setInterval(() => {
+      if (!bridge.up) { lastLayout = ''; return; }
+      const l = chartLayout(), k = JSON.stringify(l);
+      if (k !== lastLayout && l.charts.length) { lastLayout = k; bridgeSend({ t: 'layout', layout: l }); }
+    }, 1500);
+  }
   function bridgeStop() { clearTimeout(bridge.timer); if (bridge.ws) try { bridge.ws.close(); } catch (e) {} }
   function lockInfo() {
     const st = riskLoad();
@@ -5872,6 +5953,7 @@
       applyPart('wall'); if (buildUI.onWalls) buildUI.onWalls();
     }
 
+    else if (m.t === 'fixCandles') { if (!WICK_HOME) { fixNeutralCandles(); } }
     else if (m.t === 'status') { bridge.status = m; buildUI.onAppStatus && buildUI.onAppStatus(); }
   }
   // Videos go to the app in 512 KB pieces, one video at a time.
