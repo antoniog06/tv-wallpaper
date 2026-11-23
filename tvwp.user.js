@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.7
+// @version      3.26.8
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.7';
+  const VERSION = '3.26.8';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -378,6 +378,67 @@
     } else if (st) {
       st.remove();
     }
+    promoWatch();
+  }
+
+  /* TradingView's own promotions: upgrade / offer pop-ups (Black Friday, "Upgrade your plan"...), offer toasts and
+     the offer button in the top bar. Recognized by what they ask you to do (upgrade, see offers, go to pricing),
+     not by TradingView's class names, which change. Real dialogs (settings, orders, alerts) aren't touched. */
+  const PROMO_CTA = /^(explore\b.{0,40}\b(offers?|deals?|plans?)|upgrade\b.{0,25}|see (all )?(plans|offers?|deals?)|compare plans|choose (a |your )?plan|get (the |this |your )?(deal|offer|discount)|claim\b.{0,25}|start (your )?(free )?trial|try\b.{0,30}\bfree\b.{0,20}|go pro|get pro|unlock\b.{0,30}|(black friday|cyber monday)\b.{0,30}|.{0,20}\d{1,2}% off.{0,20})$/i;
+  const PROMO_TEXT = /(black friday|cyber monday|upgrade your plan|special offer|limited[- ]time (offer|deal)|current plan|recommended plan|\d{1,2}% off)/i;
+  const PROMO_HREF = /tradingview\.com\/(pricing|gopro|black-friday|cyber-monday|offers?|promo)|^\/(pricing|gopro|black-friday|cyber-monday|offers?|promo)\b/i;
+  const PROMO_LABEL = /^(black friday|cyber monday|upgrade|go pro|get pro|special offer|offers?|deals?|\d{1,2}% off|-\d{1,2}%)$/i;
+  let promoMo = null, promoQueued = false, promoHidden = 0;
+  const txtOf = el => (el.textContent || '').replace(/\s+/g, ' ').trim();
+  function isPromo(box) {
+    for (const a of box.querySelectorAll('a[href]')) if (PROMO_HREF.test(a.getAttribute('href') || '')) return true;
+    let cta = false;
+    for (const b of box.querySelectorAll('button, a, [role="button"]')) { const t = txtOf(b); if (t && t.length <= 60 && PROMO_CTA.test(t)) { cta = true; break; } }
+    return cta && PROMO_TEXT.test(txtOf(box).slice(0, 3000)) || cta && /upgrade|offer|deal|plan|trial|pro\b/i.test(txtOf(box).slice(0, 400));
+  }
+  function closePromo(box) {
+    if (box.dataset.tvwpPromo) return;
+    box.dataset.tvwpPromo = '1'; promoHidden++;
+    // close it the way you would (its close button or Esc), so TradingView knows it's gone; hide it either way
+    const x = box.querySelector('[data-name="close"], [data-qa-id="close"], button[aria-label*="close" i], button[title*="close" i], [class*="close-"], [class*="closeButton"]');
+    try { if (x) x.click(); else box.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, bubbles: true })); } catch (e) {}
+    box.style.setProperty('display', 'none', 'important');
+  }
+  function promoScan() {
+    promoQueued = false;
+    if (!S.extras.hideAds || S.extras.allOff || !document.body) return;
+    // pop-ups and toasts live in TradingView's overlay layer (or as dialogs)
+    const boxes = new Set();
+    const ov = document.getElementById('overlap-manager-root');
+    if (ov) for (const c of ov.children) boxes.add(c);
+    for (const d of document.querySelectorAll('[role="dialog"], [class*="toast-"], [class*="popup-"], [data-dialog-name], [class*="banner-"]')) {
+      if (d.closest('#tvwp-host')) continue;
+      let top = d; while (top.parentElement && top.parentElement !== document.body && top.parentElement.id !== 'overlap-manager-root') top = top.parentElement;
+      boxes.add(top.parentElement && top.parentElement.id === 'overlap-manager-root' ? top : d);
+    }
+    for (const b of boxes) if (b && !b.dataset.tvwpPromo && b.id !== 'tvwp-host' && b.offsetParent !== null && isPromo(b)) closePromo(b);
+    // offer buttons in the top bar and side toolbars
+    for (const el of document.querySelectorAll('a[href], button, [role="button"]')) {
+      if (el.dataset.tvwpPromo || el.closest('#tvwp-host, [role="dialog"]')) continue;
+      const href = el.getAttribute && el.getAttribute('href') || '';
+      const t = txtOf(el);
+      if ((href && PROMO_HREF.test(href) && t.length < 40) || (t && t.length <= 24 && PROMO_LABEL.test(t))) {
+        el.dataset.tvwpPromo = '1'; promoHidden++;
+        el.style.setProperty('display', 'none', 'important');
+      }
+    }
+  }
+  function promoWatch() {
+    const on = S.extras.hideAds && !S.extras.allOff;
+    if (!on) {
+      if (promoMo) { promoMo.disconnect(); promoMo = null; }
+      for (const el of document.querySelectorAll('[data-tvwp-promo]')) { el.style.removeProperty('display'); delete el.dataset.tvwpPromo; }
+      return;
+    }
+    if (promoMo || !document.body) { if (!document.body) document.addEventListener('DOMContentLoaded', promoWatch, { once: true }); return; }
+    promoMo = new MutationObserver(() => { if (!promoQueued) { promoQueued = true; setTimeout(promoScan, 250); } });
+    promoMo.observe(document.body, { childList: true, subtree: true });
+    promoScan();
   }
   applyAds();
 
@@ -4104,7 +4165,7 @@
         <div class="item"><div class="txt"><small id="gFastSt" class="oco-st">Off</small></div></div>`)}
       <div class="card">
         ${item('Turn everything off', 'Your settings stay saved.', '<input type="checkbox" id="gAllOff">', 'Stops every feature at once, except the daily lockout if it\'s on. Shortcut: Alt+Shift+X.')}
-        ${item('Hide ads', "Hides TradingView's ad pop-ups on the chart.", '<input type="checkbox" id="xAds">')}
+        ${item('Hide ads', "Hides TradingView's ads, and closes its upgrade and offer pop-ups (like Black Friday deals) and offer buttons.", '<input type="checkbox" id="xAds">')}
         ${item('Your name', 'Shown at the bottom of the sidebar.', '<input type="text" id="gName" maxlength="24" placeholder="Your name" style="width:150px">')}
         ${item('Theme', 'Auto follows your TradingView theme.', '<div class="seg" id="gTheme"><button data-v="auto">Auto</button><button data-v="dark">Dark</button><button data-v="light">Light</button></div>')}
         ${item('Glass panel', 'Your wallpaper shows softly behind this window.', '<input type="checkbox" id="gGlass">')}
