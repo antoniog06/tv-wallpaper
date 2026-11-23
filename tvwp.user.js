@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.5
+// @version      3.26.6
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.5';
+  const VERSION = '3.26.6';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2737,7 +2737,10 @@
     newsBusy = true; newsTriedAt = Date.now();
     try {
       const from = new Date(Date.now() - 6 * 3600000).toISOString(), to = new Date(Date.now() + 8 * 86400000).toISOString();
-      const r = await fetch(`https://economic-calendar.tradingview.com/events?from=${from}&to=${to}&countries=US`);
+      // the Wick app window isn't on tradingview.com, so the app fetches the calendar for it
+      const q = `from=${from}&to=${to}&countries=US`;
+      const r = await fetch(WICK_HOME ? `${BRIDGE_HTTP}/news?${q}` : `https://economic-calendar.tradingview.com/events?${q}`);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
       const j = await r.json();
       newsEvents = ((j && j.result) || []).map(e => ({ id: e.id, title: e.title, time: Date.parse(e.date), imp: e.importance,
         forecast: e.forecast, previous: e.previous, actual: e.actual, currency: e.currency })).filter(e => isFinite(e.time)).sort((a, b) => a.time - b.time);
@@ -3444,7 +3447,7 @@
   .pill.ok { background: rgba(34,195,154,.13); color: var(--good); }
   .x { width: 28px; height: 28px; border-radius: 8px; border: none; background: none; color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer; }
   .x:hover { background: var(--card2); color: var(--text); }
-  main { position: relative; isolation: isolate; }
+  main { position: relative; isolation: isolate; overflow: hidden; }   /* keeps the blurred wallpaper inside the content area */
   .backdrop { position: absolute; inset: 0; z-index: -1; background-size: cover; background-position: center; opacity: 0; transition: opacity .4s; pointer-events: none;
     filter: blur(var(--bdBlur, 2px)) saturate(.9); transform: scale(1.04); }
   .backdrop::after { content: ''; position: absolute; inset: 0; background: color-mix(in srgb, var(--bg) var(--bdDim, 62%), transparent); }
@@ -3562,6 +3565,13 @@
   .preset:hover { border-color: var(--accent); }
   .preset i { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
   .detected { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; }
+  #wFitWarn[hidden], #cNeutral[hidden] { display: none !important; }
+  /* shorter screens: tighter sidebar so every page fits without scrolling */
+  @media (max-height: 880px) {
+    .tabs button[data-tab] { padding: 4px 9px; }
+    .ng .grp { padding-top: 6px; padding-bottom: 3px; }
+    .quick label { padding-top: 2px; padding-bottom: 2px; }
+  }
   .detected i.skip { opacity: .45; outline: 1px dashed var(--muted); outline-offset: 1px; }
   #cNeutral .txt small { line-height: 1.5; }
   #cNeutral .btn, #wFitWarn .btn { flex: none; white-space: nowrap; }
@@ -5171,7 +5181,7 @@
       const box = $('#nList');
       box.querySelectorAll('.nrow, .nday, .empty').forEach(e => e.remove());
       const list = newsList().filter(e => e.time > Date.now() - 60 * 60000).slice(0, 30);
-      if (!list.length) { const e = document.createElement('div'); e.className = 'empty'; e.textContent = S.news.on ? (newsFetchedAt ? 'No events coming up.' : 'Loading…') : 'News warnings are off.'; box.appendChild(e); return; }
+      if (!list.length) { const e = document.createElement('div'); e.className = 'empty'; e.textContent = S.news.on ? (newsFetchedAt ? 'No events coming up.' : newsTriedAt && !newsBusy ? "Couldn't reach TradingView's calendar. Trying again in a few minutes." : 'Loading…') : 'News warnings are off.'; box.appendChild(e); return; }
       let lastDay = '';
       for (const ev of list) {
         const d = new Date(ev.time);

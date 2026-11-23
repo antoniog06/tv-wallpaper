@@ -29,6 +29,13 @@ function startServer({ store, script, homeHtml, hooks, log }) {
     }
     const vm = /^\/video\/(v_[A-Za-z0-9_-]+)$/.exec(url.pathname);
     if (vm && req.method === 'GET') return sendVideo(req, res, vm[1], url.searchParams.has('download'));
+    if (url.pathname === '/news') {
+      if (req.headers.origin && req.headers.origin !== SELF) { res.writeHead(403); return res.end(); }
+      return Promise.resolve(hooks.news ? hooks.news(url.search) : null).then(body => {
+        if (!body) { res.writeHead(502); return res.end(); }
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(body);
+      }).catch(() => { res.writeHead(502); res.end(); });
+    }
     if (url.pathname === '/ping') { res.writeHead(200, { 'Content-Type': 'text/plain' }); return res.end('wick'); }
     res.writeHead(404); res.end();
   });

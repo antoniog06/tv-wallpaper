@@ -29,6 +29,7 @@ const script = scriptManager({ bundled: path.join(__dirname, 'wick.user.js'), ca
 const tv = tradingView({ prefs: store.prefs, savePrefs, script, log, attach: l => server && server.attach(l) });
 const icon = nativeImage.createFromPath(path.join(__dirname, 'build', 'icon.png'));
 const update = { state: 'idle', version: '', pct: 0, error: '' };
+const newsCache = { at: 0, body: null };
 let win = null, tray = null, server = null, quitting = false, toldTray = !!store.prefs.toldTray;
 
 /* ---------- window ---------- */
@@ -170,6 +171,15 @@ app.whenReady().then(async () => {
       hooks: {
         status: () => ({ appVersion: app.getVersion(), scriptVersion: script.version(), tv: { ...tv.state }, update: { ...update }, prefs: { tvOnStart: !!store.prefs.tvOnStart, tvWatch: store.prefs.tvWatch !== false, login: !!store.prefs.login }, dataDir }),
         // Alt+Shift+W in TradingView (or an older Wick's dock request) brings the Wick window forward
+        // TradingView's economic calendar for the Wick app window (the page itself isn't on tradingview.com)
+        news: async search => {
+          const now = Date.now();
+          if (newsCache.body && now - newsCache.at < 5 * 60000) return newsCache.body;
+          const r = await net.fetch('https://economic-calendar.tradingview.com/events' + search, { headers: { Origin: 'https://www.tradingview.com', Referer: 'https://www.tradingview.com/' } });
+          if (!r.ok) { log('news calendar: HTTP ' + r.status); return null; }
+          newsCache.body = await r.text(); newsCache.at = now;
+          return newsCache.body;
+        },
         show: () => { log('window brought forward from TradingView'); showWindow(); },
         command: async m => {
           if (m.name === 'theme') {
