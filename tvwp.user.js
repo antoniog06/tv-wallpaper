@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.6
+// @version      3.26.7
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.6';
+  const VERSION = '3.26.7';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2142,6 +2142,8 @@
         else if (/balance|cash/i.test(label) && out.balance === undefined) out.balance = v;
       }
       try { out.account = String(b.currentAccount()); } catch (e) {}
+      // TradingView's own Paper Trading account (never a prop account)
+      try { const mi = typeof b.metainfo === 'function' ? b.metainfo() : null; out.paper = /^paper/i.test(String((mi && (mi.id || mi.title || mi.name)) || '')); } catch (e) {}
       if (out.equity === undefined && out.balance !== undefined) out.equity = out.balance + (out.unrealized || 0);
       return out;
     } catch (e) { return null; }
@@ -2613,6 +2615,8 @@
   /* ---- prop-firm tracker ---- */
   function propState(av) {
     const p = S.prop;
+    // TradingView Paper Trading isn't your prop account: nothing is tracked or enforced there
+    if (av && av.paper) return { paper: true, days: {}, today: tradingDay(Date.now()), eq: null, bal: null, floor: null, toFloor: null, ddLeftPct: null, profit: null, todayProfit: null, target: +p.target || 0, dailyUsed: 0, daily: +p.daily || 0, qty: 0, maxQty: +p.maxQty || 0 };
     const st = riskLoad();
     const acct = (av && av.account) || 'default';
     const ps = (st.prop && st.prop[acct]) || { peak: +p.start, eodPeak: +p.start, lastDay: tradingDay(Date.now()), dayStart: null };
@@ -2641,7 +2645,7 @@
     const dailyUsed = ps.dayStart !== null && eq !== null ? Math.max(0, ps.dayStart - eq) : 0;
     const qty = openPositionQty();
     return { days: ps.days || {}, today, eq, bal, floor, toFloor, ddLeftPct: toFloor !== null && +p.dd ? Math.max(0, Math.min(1, toFloor / +p.dd)) : null,
-      profit: eq !== null ? eq - +p.start : null, target: +p.target || 0, dailyUsed, daily: +p.daily || 0, qty, maxQty: +p.maxQty || 0 };
+      profit: eq !== null ? eq - +p.start : null, todayProfit: eq !== null && ps.dayStart !== null ? eq - ps.dayStart : null, target: +p.target || 0, dailyUsed, daily: +p.daily || 0, qty, maxQty: +p.maxQty || 0 };
   }
 
   /* ---- firm presets: one pick fills in the account's rules (still editable after) ---- */
@@ -2794,7 +2798,7 @@
         const buf = Math.max(0, +p.lockNear || 0);
         const atMax = +p.dd > 0 && ps0.toFloor !== null && ps0.toFloor <= buf;
         const dailyHit = ps0.daily > 0 && ps0.dailyUsed >= ps0.daily;
-        const preason = atMax ? (ps0.toFloor <= 0 ? `Prop max loss limit reached (${money(ps0.floor)})` : `Only ${money(ps0.toFloor).replace(/^\+/, '')} left before your prop max loss limit`)
+        const preason = atMax ? (ps0.toFloor <= 0 ? `Prop max loss limit reached (${money(ps0.floor).replace(/^\+/, '')})` : `Only ${money(ps0.toFloor).replace(/^\+/, '')} left before your prop max loss limit`)
           : dailyHit ? `Prop daily loss limit hit (${money(-ps0.dailyUsed)} of ${money(-ps0.daily)})` : '';
         if (preason && !lockedNow() && !unlockedToday()) {
           if (flat && Date.now() - posCache.at > 300) { await pollPositions(); flat = openPositionQty() === 0; }
@@ -2836,7 +2840,7 @@
         const p = S.prop;
         const quiet = !!(lockedNow() || pendingLock);   // the lock banner already says it
         if (quiet) {}
-        else if (ps.toFloor !== null && ps.toFloor <= 0) out.push({ kind: 'bad', text: `Prop: at the max loss limit (${money(ps.floor)}).` });
+        else if (ps.toFloor !== null && ps.toFloor <= 0) out.push({ kind: 'bad', text: `Prop: at the max loss limit (${money(ps.floor).replace(/^\+/, '')}).` });
         else if (ps.ddLeftPct !== null && ps.ddLeftPct < 0.25) out.push({ kind: ps.ddLeftPct < 0.1 ? 'bad' : 'warn', text: `Prop: only ${money(ps.toFloor).replace(/^\+/, '')} left before the max loss limit.` });
         if (!quiet && ps.daily && ps.dailyUsed >= ps.daily * 0.8) out.push({ kind: ps.dailyUsed >= ps.daily ? 'bad' : 'warn', text: `Prop: daily loss ${money(-ps.dailyUsed)} of ${money(-ps.daily)}.` });
         const cp = consPlan(ps);
@@ -2846,8 +2850,8 @@
             : `Prop consistency: ${money(cp.todayP)} today, cap is ${money(cp.cap).replace(/^\+/, '')}. Going over raises the profit you need.` });
         if (ps.maxQty && ps.qty > ps.maxQty) out.push({ kind: 'bad', text: `Prop: ${ps.qty} contracts open, max allowed is ${ps.maxQty}.` });
         if (ps.target && ps.profit >= ps.target) {
-          if (cp && !cp.ok) out.push({ kind: 'warn', text: `Prop: ${money(ps.profit)} reaches your target, but the consistency rule needs ${money(cp.need).replace(/^\+/, '')} total.` });
-          else out.push({ kind: 'good', text: `Prop: profit target reached (${money(ps.profit)}).` });
+          if (cp && !cp.ok) out.push({ kind: 'warn', text: `Profit today: ${money(ps.todayProfit ?? 0)} · target reached, but the consistency rule needs ${money(cp.need).replace(/^\+/, '')} total.` });
+          else out.push({ kind: 'good', text: `Profit today: ${money(ps.todayProfit ?? 0)} · prop target reached` });
         }
       }
     }
@@ -3613,6 +3617,9 @@
   #kPhraseBox[hidden], #kUnlock[hidden], #kFrozen[hidden] { display: none !important; }
   .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
+  .kv.today b { font-size: 18px; }
+  .kv.today b.up { color: var(--good); }
+  .kv.today b.down { color: var(--bad); }
   .kv { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; font-size: 12.5px; border-bottom: 1px solid rgba(255,255,255,.05); }
   .kv span { color: #9aa1b2; } .kv b { font-weight: 600; text-align: right; } .kv b .hint { display: inline; font-weight: 400; }
   table.plan { width: 100%; border-collapse: collapse; margin: 8px 0 6px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
@@ -5114,13 +5121,15 @@
       if (!S.prop.on) pl.innerHTML = '<span class="hint">Switch on <b>Track a prop account</b> to see your numbers here.</span>';
       else {
         const ps = propState(acctValues());
-        if (ps.eq === null) pl.innerHTML = '<span class="hint">Connect your prop account in TradingView (Trade panel) to track it.</span>';
+        if (ps.paper) pl.innerHTML = '<span class="hint">Paused: TradingView is on <b>Paper Trading</b>. Switch the Trade panel to your prop account (for example Tradovate) to track it. Nothing here counts paper trades.</span>';
+        else if (ps.eq === null) pl.innerHTML = '<span class="hint">Connect your prop account in TradingView (Trade panel) to track it.</span>';
         else {
           const left = ps.ddLeftPct ?? 0;
           pl.innerHTML = [
+            `<div class="kv today"><span>Profit today</span><b class="${(ps.todayProfit || 0) >= 0 ? 'up' : 'down'}">${m(ps.todayProfit ?? 0)}</b></div>`,
             meter('Equity', m(ps.eq).replace(/^\+/, ''), 1, ''),
             meter(`Room before max loss limit (${m(ps.floor).replace(/^\+/, '')})`, m(ps.toFloor), left, left < 0.1 ? 'bad' : left < 0.25 ? 'warn' : ''),
-            ps.target ? meter(`Profit toward target (${m(ps.target)})`, m(ps.profit), ps.profit / ps.target, ps.profit >= ps.target ? '' : 'warn') : '',
+            ps.target ? meter(`Total profit toward target (${m(ps.target)})`, m(ps.profit), ps.profit / ps.target, ps.profit >= ps.target ? '' : 'warn') : '',
             ps.daily ? meter(`Daily loss used (limit ${m(-ps.daily)})`, m(-ps.dailyUsed), ps.dailyUsed / ps.daily, ps.dailyUsed >= ps.daily ? 'bad' : ps.dailyUsed >= ps.daily * .8 ? 'warn' : '') : '',
             ps.maxQty ? meter('Contracts open', `${ps.qty} / ${ps.maxQty}`, ps.qty / ps.maxQty, ps.qty > ps.maxQty ? 'bad' : '') : ''
           ].join('');
