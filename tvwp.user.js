@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.27.1
+// @version      3.28.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.27.1';
+  const VERSION = '3.28.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -82,7 +82,7 @@
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, fastMs: 0, buyColor: '', sellColor: '', eod: 'traded', eodClose: '17:00', streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [], paused: false },
-    draw: { on: true, useTv: true, bar: true, barPos: null, last: {} },
+    draw: { on: true, useTv: true, bar: true, barPos: null, last: {}, templates: {} },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
       slots: {
@@ -108,7 +108,7 @@
         prop: { ...DEFAULTS.prop, ...s.prop },
         news: { ...DEFAULTS.news, ...s.news },
         ind: { list: Array.isArray(s.ind && s.ind.list) ? s.ind.list : [], paused: !!(s.ind && s.ind.paused) },
-        draw: { ...DEFAULTS.draw, ...(s.draw || {}), last: { ...((s.draw && s.draw.last) || {}) } },
+        draw: { ...DEFAULTS.draw, ...(s.draw || {}), last: { ...((s.draw && s.draw.last) || {}) }, templates: { ...((s.draw && s.draw.templates) || {}) } },
         sounds: (() => {
           const d = DEFAULTS.sounds, u = s.sounds || {}, slots = {};
           for (const k of Object.keys(d.slots)) slots[k] = { ...d.slots[k], ...((u.slots || {})[k] || {}) };
@@ -2179,35 +2179,120 @@
     } else if (d.type === 'hl' && P.length) { g.poly = P; g.handles = []; }
     return g;
   }
+  // Per-timeframe visibility, like TradingView's Visibility tab
+  const VIS_GROUPS = [['sec', 'Seconds', 1, 59], ['min', 'Minutes', 1, 59], ['h', 'Hours', 1, 24], ['d', 'Days', 1, 366], ['w', 'Weeks', 1, 52], ['mo', 'Months', 1, 12]];
+  function drRes() {
+    let r = ''; try { r = String(window.TradingViewApi.activeChart().resolution() || ''); } catch (e) {}
+    let m;
+    if ((m = /^(\d+)S$/i.exec(r))) return ['sec', +m[1]];
+    if ((m = /^(\d+)$/.exec(r))) { const n = +m[1]; return n % 60 === 0 ? ['h', n / 60] : ['min', n]; }
+    if ((m = /^(\d*)D$/i.exec(r))) return ['d', +(m[1] || 1)];
+    if ((m = /^(\d*)W$/i.exec(r))) return ['w', +(m[1] || 1)];
+    if ((m = /^(\d*)M$/i.exec(r))) return ['mo', +(m[1] || 1)];
+    return null;
+  }
+  function drVisOk(d) {
+    if (d.hidden) return false;
+    if (!d.vis) return true;
+    const res = drRes(); if (!res) return true;
+    const v = d.vis[res[0]]; if (!v) return true;
+    return v.on !== false && res[1] >= (v.lo || 1) && res[1] <= (v.hi || 9999);
+  }
+  const drFmt = v => { const n = +v, a = Math.abs(n); return n.toLocaleString(undefined, { minimumFractionDigits: a >= 100 ? 2 : 0, maximumFractionDigits: a >= 100 ? 2 : a >= 1 ? 4 : 6 }); };
+  const drShown = () => drVisible().filter(drVisOk);
+  const fmtTime = s => { const dt = new Date(s * 1000); return dt.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); };
+  function arrowHead(g, from, to, w) {
+    const a = Math.atan2(to[1] - from[1], to[0] - from[0]), L = 8 + w * 2;
+    g.beginPath(); g.moveTo(to[0] - L * Math.cos(a - .45), to[1] - L * Math.sin(a - .45)); g.lineTo(to[0], to[1]); g.lineTo(to[0] - L * Math.cos(a + .45), to[1] - L * Math.sin(a + .45)); g.stroke();
+  }
+  function axisTag(g, text, x, y, color, vertical) {
+    g.font = '11px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, sans-serif';
+    const w = g.measureText(text).width + 10, h = 18;
+    const bx = vertical ? x - w / 2 : x - w, by = vertical ? y - h : y - h / 2;
+    g.fillStyle = color; g.fillRect(bx, by, w, h);
+    g.fillStyle = '#ffffff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, bx + w / 2, by + h / 2);
+  }
   function drPaint(g, c, d, W, H, state) {
     const G = drGeom(c, d, W, H);
+    const lineCol = d.type === 'hl' ? hexRgba(d.color, d.alpha ?? 0.25) : hexRgba(d.color, d.lineA ?? 1);
+    const w = +d.width || 1;
     g.save();
     g.lineCap = d.type === 'hl' ? 'round' : 'butt'; g.lineJoin = 'round';
-    if (d.type === 'rect' && G.box && (d.fillA ?? 0) > 0) {
+    if (d.type === 'rect' && G.box && d.bg !== false && (d.fillA ?? 0) > 0) {
       g.fillStyle = hexRgba(d.fill || d.color, d.fillA);
       g.fillRect(G.box[0], G.box[1], G.box[2] - G.box[0], G.box[3] - G.box[1]);
     }
-    g.strokeStyle = d.type === 'hl' ? hexRgba(d.color, d.alpha ?? 0.25) : d.color;
-    g.lineWidth = +d.width || 1;
+    if (d.type === 'curve' && G.poly && d.bg && (d.fillA ?? 0) > 0) {
+      g.fillStyle = hexRgba(d.fill || d.color, d.fillA); g.beginPath(); G.poly.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.closePath(); g.fill();
+    }
+    g.strokeStyle = lineCol; g.lineWidth = w;
     g.setLineDash(d.type === 'hl' ? [] : (DASHES[d.dash] || []));
-    g.beginPath();
-    for (const [a, b] of G.segs) { g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); }
-    if (G.poly) G.poly.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
-    g.stroke();
-    if (d.type === 'rect' && G.box && d.mid) {
-      const ym = (G.box[1] + G.box[3]) / 2;
-      g.setLineDash([6, 5]); g.lineWidth = 1; g.beginPath(); g.moveTo(G.box[0], ym); g.lineTo(G.box[2], ym); g.stroke();
+    if (!(d.type === 'rect' && d.border === false)) {
+      g.beginPath();
+      for (const [a, b] of G.segs) { g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); }
+      if (G.poly) G.poly.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+      g.stroke();
     }
     g.setLineDash([]);
-    // text label (lines and rectangles), like TradingView's
-    if (d.text && G.P[0]) {
-      g.font = `${+d.fontSize || 14}px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif`;
-      g.fillStyle = d.textColor || d.color; g.textBaseline = 'bottom';
-      let tx = G.P[0][0] + 4, ty = G.P[0][1] - 4;
-      if (d.type === 'rect' && G.box) { tx = G.box[0] + 6; ty = G.box[1] + (+d.fontSize || 14) + 4; }
-      if (d.type === 'hray') { g.textAlign = 'right'; tx = W - 8; }
-      if (d.type === 'trend' && G.P[1]) { tx = (G.P[0][0] + G.P[1][0]) / 2; ty = (G.P[0][1] + G.P[1][1]) / 2 - 4; g.textAlign = 'center'; }
-      g.fillText(d.text, tx, ty);
+    // arrow ends (trend line, curve)
+    if ((d.type === 'trend' || d.type === 'curve') && G.handles[1]) {
+      const pa = d.type === 'curve' ? G.poly : [G.handles[0], G.handles[1]];
+      if (d.rightEnd === 'arrow') arrowHead(g, pa[pa.length - 2], pa[pa.length - 1], w);
+      if (d.leftEnd === 'arrow') arrowHead(g, pa[1], pa[0], w);
+    }
+    if (d.type === 'rect' && G.box && d.mid) {
+      const ym = (G.box[1] + G.box[3]) / 2;
+      g.strokeStyle = hexRgba(d.midColor || d.color, d.midA ?? 1); g.lineWidth = +d.midWidth || 1;
+      g.setLineDash(DASHES[d.midDash || 'dashed'] || []); g.beginPath(); g.moveTo(G.box[0], ym); g.lineTo(G.box[2], ym); g.stroke(); g.setLineDash([]);
+    }
+    if (d.type === 'trend' && d.midPoint && G.handles[1]) {
+      const m = [(G.handles[0][0] + G.handles[1][0]) / 2, (G.handles[0][1] + G.handles[1][1]) / 2];
+      g.beginPath(); g.arc(m[0], m[1], 3.5, 0, Math.PI * 2); g.fillStyle = lineCol; g.fill();
+    }
+    // text, with TradingView's alignment options
+    if (d.text && G.P[0] && d.type !== 'hl') {
+      const fs = +d.fontSize || 14, lines = String(d.text).split('\n');
+      g.font = `${d.italic ? 'italic ' : ''}${d.bold ? 'bold ' : ''}${fs}px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif`;
+      g.fillStyle = hexRgba(d.textColor || d.color, d.textA ?? 1);
+      const H2 = (d.textH || (d.type === 'rect' ? 'left' : 'right')), V2 = (d.textV || (d.type === 'rect' ? 'inside' : 'top'));
+      g.textAlign = H2 === 'center' ? 'center' : H2; g.textBaseline = 'middle';
+      const lh = fs * 1.25, block = lh * lines.length;
+      let x, y;
+      if (d.type === 'rect' && G.box) {
+        const [L, T, R, B] = G.box;
+        x = H2 === 'left' ? L + 6 : H2 === 'right' ? R - 6 : (L + R) / 2;
+        y = V2 === 'top' ? T - block - 2 + lh / 2 : V2 === 'bottom' ? B + 4 + lh / 2 : V2 === 'middle' ? (T + B) / 2 - block / 2 + lh / 2 : T + 6 + lh / 2;
+      } else {
+        let a = G.P[0], b = G.P[1] || G.P[0];
+        if (d.type === 'hray') b = [W, a[1]];
+        if (d.type === 'vline' || d.type === 'cross') { a = [G.P[0][0], 0]; b = [G.P[0][0], H]; }
+        x = H2 === 'left' ? Math.min(a[0], b[0]) + 4 : H2 === 'right' ? Math.max(a[0], b[0]) - 4 : (a[0] + b[0]) / 2;
+        const yAt = H2 === 'left' ? (a[0] <= b[0] ? a[1] : b[1]) : H2 === 'right' ? (a[0] <= b[0] ? b[1] : a[1]) : (a[1] + b[1]) / 2;
+        y = V2 === 'bottom' ? yAt + 6 + lh / 2 : V2 === 'middle' ? yAt - block / 2 + lh / 2 : yAt - block - 2 + lh / 2;
+      }
+      lines.forEach((ln, i) => g.fillText(ln, x, y + i * lh));
+    }
+    // price / time labels
+    const tagCol = hexRgba(d.color, 1);
+    if (d.type === 'hray' && d.priceLabel !== false && G.P[0] && (state || d.priceLabel)) axisTag(g, drFmt(d.pts[0].p), W - 2, G.P[0][1], tagCol);
+    if (d.type === 'vline' && (state || d.timeLabel) && G.P[0]) axisTag(g, fmtTime(d.pts[0].t), G.P[0][0], H - 2, tagCol, true);
+    if (d.type === 'cross' && state && G.P[0]) { axisTag(g, drFmt(d.pts[0].p), W - 2, G.P[0][1], tagCol); axisTag(g, fmtTime(d.pts[0].t), G.P[0][0], H - 2, tagCol, true); }
+    if (d.type === 'trend' && d.priceLabels && G.handles[1]) { axisTag(g, drFmt(d.pts[0].p), W - 2, G.handles[0][1], tagCol); axisTag(g, drFmt(d.pts[1].p), W - 2, G.handles[1][1], tagCol); }
+    if (d.type === 'rect' && state && G.box) { axisTag(g, drFmt(Math.max(d.pts[0].p, d.pts[1].p)), W - 2, G.box[1], tagCol); axisTag(g, drFmt(Math.min(d.pts[0].p, d.pts[1].p)), W - 2, G.box[3], tagCol); }
+    // trend line stats (TradingView's INFO box)
+    if (d.type === 'trend' && G.handles[1] && d.stats && d.stats !== 'hidden' && (d.statsAlways || state)) {
+      const p0 = d.pts[0].p, p1 = d.pts[1].p, dp = p1 - p0, pct = p0 ? dp / p0 * 100 : 0;
+      const bars = Math.round(Math.abs(drTimeToIdx(c, d.pts[1].t) - drTimeToIdx(c, d.pts[0].t)));
+      const secs = Math.abs(d.pts[1].t - d.pts[0].t), dur = secs >= 86400 ? `${Math.round(secs / 8640) / 10}d` : secs >= 3600 ? `${Math.round(secs / 360) / 10}h` : `${Math.round(secs / 60)}m`;
+      const ang = Math.round(Math.atan2(-(G.handles[1][1] - G.handles[0][1]), G.handles[1][0] - G.handles[0][0]) * 180 / Math.PI);
+      const rows = d.stats === 'compact' ? [`${dp >= 0 ? '+' : ''}${drFmt(dp)} (${pct.toFixed(2)}%)`] : [`${dp >= 0 ? '+' : ''}${drFmt(dp)} (${pct.toFixed(2)}%)`, `${bars} bars, ${dur}`, `${ang}°`];
+      g.font = '12px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, sans-serif';
+      const bw = Math.max(...rows.map(r => g.measureText(r).width)) + 16, bh = rows.length * 17 + 8;
+      const anchor = d.statsPos === 'left' ? G.handles[0] : d.statsPos === 'center' ? [(G.handles[0][0] + G.handles[1][0]) / 2, (G.handles[0][1] + G.handles[1][1]) / 2] : G.handles[1];
+      const bx = Math.min(W - bw - 4, anchor[0] + 10), by = Math.max(2, anchor[1] - bh - 8);
+      g.fillStyle = 'rgba(30,34,45,.92)'; g.fillRect(bx, by, bw, bh);
+      g.fillStyle = '#d1d4dc'; g.textAlign = 'left'; g.textBaseline = 'top';
+      rows.forEach((r, i) => g.fillText(r, bx + 8, by + 5 + i * 17));
     }
     // selected / hovered: TradingView's round handles
     if (state === 'sel' || state === 'hover') {
@@ -2232,7 +2317,7 @@
     return Math.hypot(p[0] - a[0] - s * dx, p[1] - a[1] - s * dy);
   }
   function drHit(c, x, y, W, H) {
-    const list = drVisible().sort((a, b) => (b.z || 0) - (a.z || 0));
+    const list = drShown().sort((a, b) => (b.z || 0) - (a.z || 0));
     const order = DR.sel ? [DR.items[DR.sel], ...list.filter(d => d.id !== DR.sel)].filter(Boolean) : list;
     for (const d of order) {
       const G = drGeom(c, d, W, H), p = [x, y];
@@ -2260,7 +2345,7 @@
       host.appendChild(DR.canvas); DR.sig = '';
     }
     const W = host.clientWidth, H = host.clientHeight, dpr = window.devicePixelRatio || 1;
-    const sig = [DR.ver, DR.sel, DR.hover, W, H, dpr, c.ts.barSpacing(), c.ts.indexToCoordinate(c.d.idx[c.d.idx.length - 1]), drPY(c, c.fv), drPY(c, c.fv * 1.01), DR.barsSig, drSym(), DR.draft ? JSON.stringify(DR.draft.pts) : ''].join('|');
+    const sig = [DR.ver, DR.sel, DR.hover, W, H, dpr, c.ts.barSpacing(), c.ts.indexToCoordinate(c.d.idx[c.d.idx.length - 1]), drPY(c, c.fv), drPY(c, c.fv * 1.01), DR.barsSig, drSym(), JSON.stringify(drRes()), DR.draft ? JSON.stringify(DR.draft.pts) : ''].join('|');
     if (sig === DR.sig) return;
     DR.sig = sig;
     const cv = DR.canvas;
@@ -2268,7 +2353,7 @@
     if (cv.height !== Math.round(H * dpr)) cv.height = Math.round(H * dpr);
     const g = cv.getContext('2d');
     g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height); g.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const list = drVisible().sort((a, b) => (a.z || 0) - (b.z || 0));
+    const list = drShown().sort((a, b) => (a.z || 0) - (b.z || 0));
     for (const d of list) { try { drPaint(g, c, d, W, H, d.id === DR.sel ? 'sel' : d.id === DR.hover ? 'hover' : ''); } catch (e) {} }
     if (DR.draft) try { drPaint(g, c, DR.draft, W, H, 'sel'); } catch (e) {}
     drBarSync();
@@ -2280,7 +2365,8 @@
   function drNew(type, pts) {
     const T = DRAW_TOOLS[type], last = (S.draw.last && S.draw.last[type]) || {};
     const d = { id: drNewId(), sym: drSym(), type, pts, color: T.color, width: T.width, dash: 'solid', z: Date.now(), upd: Date.now() };
-    if (type === 'rect') { d.fill = T.fill; d.fillA = T.fillA; d.mid = false; d.extL = false; d.extR = false; }
+    if (type === 'rect') { d.fill = T.fill; d.fillA = T.fillA; d.bg = true; d.border = true; d.mid = false; d.midDash = 'dashed'; d.extL = false; d.extR = false; d.textV = 'inside'; d.textH = 'left'; }
+    if (type === 'trend') { d.stats = 'hidden'; d.statsPos = 'right'; d.textV = 'top'; d.textH = 'right'; d.fontSize = 12; }
     if (type === 'trend') { d.extL = false; d.extR = false; }
     if (type === 'hl') d.alpha = T.alpha;
     Object.assign(d, last);   // your last style for this tool, like TradingView remembers
@@ -2289,9 +2375,7 @@
   function drCommit(d) { d.upd = Date.now(); DR.items[d.id] = d; delete DR.tomb[d.id]; drSave([d]); drKick(); }
   function drDelete(id) { if (!DR.items[id]) return; delete DR.items[id]; DR.tomb[id] = Date.now(); if (DR.sel === id) DR.sel = null; drSave(null, [id]); drKick(); }
   function drRemember(d) {
-    const keep = ['color', 'width', 'dash', 'fill', 'fillA', 'mid', 'extL', 'extR', 'alpha', 'textColor', 'fontSize'];
-    S.draw.last = S.draw.last || {}; S.draw.last[d.type] = {};
-    for (const k of keep) if (d[k] !== undefined) S.draw.last[d.type][k] = d[k];
+    S.draw.last = S.draw.last || {}; S.draw.last[d.type] = pickStyle(d);
     save(null);
   }
   function drSetTool(type) {
@@ -2433,8 +2517,14 @@
   window.addEventListener('pointermove', drMove, true);
   window.addEventListener('pointerup', drUp, true);
   window.addEventListener('keydown', drKey, true);
+  window.addEventListener('dblclick', e => {
+    if (!drOn() || DR.tool) return;
+    const L = drLocal(e), c = drCtx(); if (!L || !c) return;
+    const hit = drHit(c, L.x, L.y, L.W, L.H); if (!hit) return;
+    swallow(e); DR.sel = hit.d.id; drKick(); drBarSync(true); drSettings('style');
+  }, true);
 
-  /* ---- Wick's drawing toolbar + TradingView-style floating style bar ---- */
+  /* ---- Wick's drawing toolbar, and TradingView's floating toolbar + Settings dialog for the selected drawing ---- */
   const DRAW_ICONS = {
     hray: '<path d="M5 12h15"/><circle cx="5" cy="12" r="2"/>',
     vline: '<path d="M12 3v18"/>',
@@ -2444,64 +2534,283 @@
     curve: '<path d="M4 18C8 4 16 4 20 18"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="18" r="1.6"/>',
     hl: '<path d="M5 19l4-1 10-10-3-3L6 15z"/><path d="M14 6l3 3"/>'
   };
-  const SVG = inner => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+  const UI_ICONS = {
+    tpl: '<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/><path d="M17 4v6M14 7h6"/>',
+    pen: '<path d="M4 20l1-4L16 5l3 3L8 19z"/>', fill: '<path d="M6 12l6-6 6 6-6 6z"/><path d="M19 15s2 2.2 2 3.3a2 2 0 01-4 0c0-1.1 2-3.3 2-3.3z"/>',
+    text: '<path d="M6 5h12M12 5v14"/>', gear: '<path d="M12 3l7.8 4.5v9L12 21l-7.8-4.5v-9z"/><circle cx="12" cy="12" r="3"/>',
+    alarm: '<circle cx="12" cy="13" r="7"/><path d="M12 9v4l2 2M4 5l3-2M20 5l-3-2"/><path d="M18 18l2 2"/>',
+    lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 018 0v3"/>', unlock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 017.5-2"/>',
+    trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>', more: '<circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/>',
+    edit: '<path d="M4 20l1-4L16 5l3 3L8 19z"/>', close: '<path d="M6 6l12 12M18 6L6 18"/>'
+  };
+  const SVG = (inner, sz = 18) => `<svg viewBox="0 0 24 24" width="${sz}" height="${sz}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+  // TradingView's color palette: grays, then 10 hues in 7 shades
+  const PAL_BASE = ['#F23645', '#FF9800', '#FFEB3B', '#4CAF50', '#089981', '#00BCD4', '#2962FF', '#673AB7', '#9C27B0', '#E91E63'];
+  const PAL_GRAY = ['#FFFFFF', '#D1D4DC', '#B2B5BE', '#9598A1', '#787B86', '#5D606B', '#434651', '#2A2E39', '#131722', '#000000'];
+  const mixHex = (hex, to, k) => { const a = parseInt(hex.slice(1), 16), b = parseInt(to.slice(1), 16); const ch = s => Math.round(((a >> s) & 255) * (1 - k) + ((b >> s) & 255) * k); return '#' + [16, 8, 0].map(s => ch(s).toString(16).padStart(2, '0')).join('').toUpperCase(); };
+  const PALETTE = [PAL_GRAY, PAL_BASE.map(h => mixHex(h, '#FFFFFF', .8)), PAL_BASE.map(h => mixHex(h, '#FFFFFF', .6)), PAL_BASE.map(h => mixHex(h, '#FFFFFF', .4)), PAL_BASE.map(h => mixHex(h, '#FFFFFF', .2)), PAL_BASE, PAL_BASE.map(h => mixHex(h, '#000000', .25)), PAL_BASE.map(h => mixHex(h, '#000000', .5))];
+  const TOOL_TITLE = { hray: 'Horizontal Ray', vline: 'Vertical Line', cross: 'Cross Line', trend: 'Trendline', rect: 'Rectangle', curve: 'Curve', hl: 'Highlighter' };
+  // the style fields of each tool (used by templates, "remember my last style" and Cancel)
+  const STYLE_KEYS = ['color', 'lineA', 'width', 'dash', 'fill', 'fillA', 'bg', 'border', 'mid', 'midColor', 'midA', 'midDash', 'midWidth', 'extL', 'extR', 'alpha', 'textColor', 'textA', 'fontSize', 'bold', 'italic', 'textH', 'textV', 'leftEnd', 'rightEnd', 'midPoint', 'priceLabels', 'priceLabel', 'timeLabel', 'stats', 'statsPos', 'statsAlways', 'vis'];
+  const pickStyle = d => { const o = {}; for (const k of STYLE_KEYS) if (d[k] !== undefined) o[k] = JSON.parse(JSON.stringify(d[k])); return o; };
+
   function drBuildUi() {
     if (DR.ui || !document.body) return;
     const hostEl = document.createElement('div'); hostEl.id = 'tvwp-draw-ui';
     Object.assign(hostEl.style, { position: 'fixed', left: '0', top: '0', width: '0', height: '0', zIndex: '2147483000' });
     const sr = hostEl.attachShadow({ mode: 'open' });
     sr.innerHTML = `<style>
-      .bar, .sty { position: fixed; display: flex; align-items: center; gap: 2px; padding: 4px; background: #1e222d; border: 1px solid #363a45; border-radius: 6px; box-shadow: 0 2px 12px rgba(0,0,0,.4); font: 12px -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif; color: #d1d4dc; }
-      .bar[hidden], .sty[hidden] { display: none; }
-      .bar .grip { width: 10px; height: 26px; cursor: grab; display: grid; place-items: center; color: #6a6d78; font-size: 10px; letter-spacing: -1px; }
-      button { all: unset; box-sizing: border-box; height: 28px; min-width: 28px; padding: 0 5px; display: grid; place-items: center; border-radius: 4px; cursor: pointer; color: #d1d4dc; }
-      button:hover { background: #2a2e39; }
+      * { box-sizing: border-box; }
+      .bar, .ftb, .pop, .dlg { position: fixed; font: 13px -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif; color: #dbdbdb; }
+      .bar, .ftb { display: flex; align-items: center; gap: 2px; padding: 3px; background: #1f1f1f; border: 1px solid #2e2e2e; border-radius: 6px; box-shadow: 0 2px 10px rgba(0,0,0,.45); }
+      [hidden] { display: none !important; }
+      .grip { width: 12px; height: 28px; cursor: grab; display: grid; place-items: center; color: #6b6b6b; }
+      button { all: unset; box-sizing: border-box; height: 30px; min-width: 30px; padding: 0 6px; display: inline-flex; align-items: center; justify-content: center; gap: 4px; border-radius: 4px; cursor: pointer; color: #dbdbdb; position: relative; }
+      button:hover { background: #2e2e2e; }
       button.on { background: #2962FF; color: #fff; }
-      .lbl { font-size: 10px; color: #8a8f9c; padding: 0 4px 0 2px; }
-      .sw { width: 16px; height: 16px; border-radius: 3px; border: 1px solid rgba(255,255,255,.25); }
-      .sep { width: 1px; height: 20px; background: #363a45; margin: 0 3px; }
-      input[type=color] { width: 26px; height: 24px; padding: 0; border: none; background: none; cursor: pointer; }
-      input[type=text] { width: 120px; height: 24px; background: #131722; border: 1px solid #363a45; border-radius: 4px; color: #d1d4dc; padding: 0 6px; font: inherit; }
-      select { height: 26px; background: #131722; color: #d1d4dc; border: 1px solid #363a45; border-radius: 4px; font: inherit; }
+      button[disabled] { opacity: .35; cursor: default; }
+      .cbar { position: absolute; left: 7px; right: 7px; bottom: 4px; height: 3px; border-radius: 1px; }
+      .ico { display: inline-flex; flex-direction: column; align-items: center; }
+      .wtxt { font-size: 13px; }
+      .pop { background: #1f1f1f; border: 1px solid #2e2e2e; border-radius: 6px; box-shadow: 0 4px 18px rgba(0,0,0,.5); padding: 8px; z-index: 3; }
+      .pal { display: grid; grid-template-columns: repeat(10, 20px); gap: 3px; }
+      .pal i { width: 20px; height: 20px; border-radius: 3px; cursor: pointer; border: 1px solid rgba(255,255,255,.08); }
+      .pal i.on { outline: 2px solid #2962FF; outline-offset: 1px; }
+      .pal-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
+      .pal-row input[type=range] { flex: 1; accent-color: #2962FF; }
+      .menu { display: flex; flex-direction: column; min-width: 170px; padding: 4px 0; }
+      .menu button { justify-content: flex-start; height: 32px; padding: 0 14px; border-radius: 0; }
+      .menu .sep { height: 1px; background: #2e2e2e; margin: 4px 0; }
+      .dlg { left: 50%; top: 50%; transform: translate(-50%, -50%); width: 380px; background: #1f1f1f; border: 1px solid #2e2e2e; border-radius: 8px; box-shadow: 0 10px 40px rgba(0,0,0,.6); display: flex; flex-direction: column; max-height: 86vh; }
+      .dh { display: flex; align-items: center; gap: 8px; padding: 16px 18px 6px; font-size: 20px; font-weight: 600; color: #ededed; cursor: move; }
+      .dh .sp { flex: 1; }
+      .tabs { display: flex; gap: 22px; padding: 6px 18px 0; border-bottom: 3px solid #2e2e2e; margin: 0 18px; padding-left: 0; padding-right: 0; }
+      .tabs button { height: 34px; padding: 0; font-size: 15px; font-weight: 600; color: #a3a3a3; border-radius: 0; margin-bottom: -3px; border-bottom: 3px solid transparent; }
+      .tabs button.on { background: none; color: #fff; border-bottom-color: #fff; }
+      .tabs button:hover { background: none; color: #fff; }
+      .db { padding: 14px 18px; overflow: auto; flex: 1; }
+      .row { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+      .row > label:first-child, .row > .lb { width: 118px; flex: none; font-size: 14px; color: #dbdbdb; display: flex; align-items: center; gap: 8px; }
+      .sub { font-size: 11px; letter-spacing: .06em; color: #8c8c8c; margin: 10px 0 2px; }
+      select, input[type=text], input[type=number], textarea { background: #1f1f1f; color: #dbdbdb; border: 1px solid #4a4a4a; border-radius: 6px; height: 36px; padding: 0 10px; font: inherit; }
+      select { min-width: 120px; }
+      select:focus, input:focus, textarea:focus { outline: none; border-color: #2962FF; }
+      textarea { width: 100%; height: 96px; padding: 8px 10px; resize: vertical; border-width: 2px; }
+      input[type=checkbox] { width: 18px; height: 18px; accent-color: #2962FF; margin: 0; }
+      .sw { display: inline-flex; align-items: center; gap: 8px; height: 36px; padding: 0 8px; border: 1px solid #4a4a4a; border-radius: 6px; cursor: pointer; }
+      .sw i { width: 22px; height: 22px; border-radius: 3px; display: block; background-image: linear-gradient(45deg, #2e2e2e 25%, transparent 25%, transparent 75%, #2e2e2e 75%), linear-gradient(45deg, #2e2e2e 25%, transparent 25%, transparent 75%, #2e2e2e 75%); background-size: 8px 8px; background-position: 0 0, 4px 4px; position: relative; overflow: hidden; }
+      .sw i b { position: absolute; inset: 0; }
+      .sw .ln { width: 26px; border-top: 2px solid #dbdbdb; }
+      .tbtn { width: 36px; height: 36px; border: 1px solid #4a4a4a; border-radius: 6px; font-weight: 700; }
+      .tbtn.on { background: #2e2e2e; border-color: #dbdbdb; }
+      .df { display: flex; align-items: center; gap: 10px; padding: 14px 18px 16px; }
+      .df .sp { flex: 1; }
+      .btn2 { height: 36px; padding: 0 14px; border: 1px solid #dbdbdb; border-radius: 8px; font-weight: 600; }
+      .btn2.pri { background: #fff; color: #141414; border-color: #fff; }
+      .btn2.pri:hover { background: #ededed; }
+      .coord { display: grid; grid-template-columns: 34px 1fr 1fr; gap: 8px; align-items: center; margin-bottom: 8px; }
+      .coord input { width: 100%; }
+      .vis { display: grid; grid-template-columns: 22px 80px 58px 10px 58px; gap: 8px; align-items: center; min-height: 40px; }
+      .vis input[type=number] { width: 58px; padding: 0 6px; }
+      .ep { display: inline-flex; border: 1px solid #4a4a4a; border-radius: 6px; }
     </style>
-    <div class="bar" id="bar"><span class="grip" title="Drag">⋮⋮</span>${Object.keys(DRAW_TOOLS).map(t => `<button data-t="${t}" title="${DRAW_TOOLS[t].name} (Wick, unlimited)">${SVG(DRAW_ICONS[t])}</button>`).join('')}</div>
-    <div class="sty" id="sty" hidden>
-      <input type="color" id="sCol" title="Color">
-      <span class="fillw"><input type="color" id="sFill" title="Fill color"></span>
-      <select id="sW" title="Width"><option value="1">1px</option><option value="2">2px</option><option value="3">3px</option><option value="4">4px</option><option value="10">10px</option><option value="20">20px</option><option value="30">30px</option></select>
-      <select id="sDash" title="Style"><option value="solid">——</option><option value="dashed">- - -</option><option value="dotted">· · ·</option></select>
-      <select id="sA" title="Fill opacity"><option value="0">0%</option><option value="0.1">10%</option><option value="0.2">20%</option><option value="0.3">30%</option><option value="0.5">50%</option><option value="0.8">80%</option></select>
-      <button id="sMid" title="Middle line">½</button><button id="sExtL" title="Extend left">⇤</button><button id="sExtR" title="Extend right">⇥</button>
-      <input type="text" id="sTxt" placeholder="Text" title="Label">
-      <span class="sep"></span>
-      <button id="sLock" title="Lock">🔒</button><button id="sDup" title="Clone">⧉</button><button id="sDel" title="Remove (Del)">🗑</button>
-    </div>`;
+    <div class="bar" id="bar"><span class="grip" title="Drag">${SVG('<circle cx="9" cy="7" r="1"/><circle cx="15" cy="7" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="17" r="1"/><circle cx="15" cy="17" r="1"/>', 14)}</span>${Object.keys(DRAW_TOOLS).map(t => `<button data-t="${t}" title="${DRAW_TOOLS[t].name} (Wick, unlimited)">${SVG(DRAW_ICONS[t])}</button>`).join('')}</div>
+    <div class="ftb" id="ftb" hidden>
+      <span class="grip" id="fGrip" title="Drag">${SVG('<circle cx="9" cy="7" r="1"/><circle cx="15" cy="7" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="17" r="1"/><circle cx="15" cy="17" r="1"/>', 14)}</span>
+      <button id="fTpl" title="Template">${SVG(UI_ICONS.tpl)}</button>
+      <button id="fLine" title="Line tool colors">${SVG(UI_ICONS.pen)}<span class="cbar" id="fLineBar"></span></button>
+      <button id="fFill" title="Background color">${SVG(UI_ICONS.fill)}<span class="cbar" id="fFillBar"></span></button>
+      <button id="fText" title="Text color">${SVG(UI_ICONS.text)}<span class="cbar" id="fTextBar"></span></button>
+      <button id="fW" title="Line width"><span class="wtxt" id="fWTxt">— 1px</span></button>
+      <button id="fDash" title="Line style"><span class="wtxt" id="fDashTxt">——</span></button>
+      <button id="fSet" title="Settings">${SVG(UI_ICONS.gear)}</button>
+      <button id="fAlert" title="Alerts on Wick drawings aren't available yet" disabled>${SVG(UI_ICONS.alarm)}</button>
+      <button id="fLock" title="Lock">${SVG(UI_ICONS.unlock)}</button>
+      <button id="fDel" title="Remove">${SVG(UI_ICONS.trash)}</button>
+      <button id="fMore" title="More">${SVG(UI_ICONS.more)}</button>
+    </div>
+    <div class="pop" id="pop" hidden></div>
+    <div class="dlg" id="dlg" hidden></div>`;
     document.body.appendChild(hostEl);
     const $s = q => sr.querySelector(q);
     DR.ui = { hostEl, sr, $: $s };
     sr.querySelectorAll('#bar button[data-t]').forEach(b => b.onclick = () => drSetTool(DR.tool === b.dataset.t ? null : b.dataset.t));
-    // drag the toolbar
-    $s('.grip').addEventListener('pointerdown', e => {
+    const dragBy = (grip, el, done) => grip.addEventListener('pointerdown', e => {
       e.preventDefault();
-      const bar = $s('#bar'), r = bar.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
-      const mv = ev => { bar.style.left = Math.max(0, ev.clientX - ox) + 'px'; bar.style.top = Math.max(0, ev.clientY - oy) + 'px'; };
-      const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); S.draw.barPos = [parseInt(bar.style.left), parseInt(bar.style.top)]; save(null); };
+      const r = el.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
+      const mv = ev => { el.style.left = Math.max(0, ev.clientX - ox) + 'px'; el.style.top = Math.max(0, ev.clientY - oy) + 'px'; el.style.transform = 'none'; };
+      const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); done && done(); };
       window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
     });
-    const edit = fn => () => { const d = DR.items[DR.sel]; if (!d) return; fn(d); drRemember(d); drCommit(d); drBarSync(); };
-    $s('#sCol').oninput = edit(d => { d.color = $s('#sCol').value; if (d.type === 'rect' && !d.fillSet) d.fill = d.color; });
-    $s('#sFill').oninput = edit(d => { d.fill = $s('#sFill').value; d.fillSet = true; });
-    $s('#sW').onchange = edit(d => { d.width = +$s('#sW').value; });
-    $s('#sDash').onchange = edit(d => { d.dash = $s('#sDash').value; });
-    $s('#sA').onchange = edit(d => { if (d.type === 'hl') d.alpha = +$s('#sA').value; else d.fillA = +$s('#sA').value; });
-    $s('#sMid').onclick = edit(d => { d.mid = !d.mid; });
-    $s('#sExtL').onclick = edit(d => { d.extL = !d.extL; });
-    $s('#sExtR').onclick = edit(d => { d.extR = !d.extR; });
-    $s('#sTxt').oninput = () => { const d = DR.items[DR.sel]; if (!d) return; d.text = $s('#sTxt').value; drCommit(d); };
-    $s('#sLock').onclick = () => { const d = DR.items[DR.sel]; if (!d) return; d.locked = !d.locked; drCommit(d); drBarSync(); };
-    $s('#sDup').onclick = () => { const d = DR.items[DR.sel]; if (!d) return; const c2 = JSON.parse(JSON.stringify(d)); c2.id = drNewId(); c2.z = Date.now(); c2.locked = false; const c = drCtx(); if (c) c2.pts = c2.pts.map(q => ({ t: q.t + c.step * 3, p: q.p })); drCommit(c2); DR.sel = c2.id; drKick(); };
-    $s('#sDel').onclick = () => { if (DR.sel) drDelete(DR.sel); };
+    dragBy($s('#bar .grip'), $s('#bar'), () => { S.draw.barPos = [parseInt($s('#bar').style.left), parseInt($s('#bar').style.top)]; save(null); });
+    dragBy($s('#fGrip'), $s('#ftb'), () => { DR.ftbMoved = [parseInt($s('#ftb').style.left), parseInt($s('#ftb').style.top)]; });
+    const sel = () => DR.items[DR.sel];
+    const edit = fn => { const d = sel(); if (!d) return; fn(d); drRemember(d); drCommit(d); drBarSync(true); };
+    $s('#fLine').onclick = e => drColorPop(e.currentTarget, () => [sel().color, sel().type === 'hl' ? (sel().alpha ?? .25) : (sel().lineA ?? 1)], (c, a) => edit(d => { d.color = c; if (d.type === 'hl') d.alpha = a; else d.lineA = a; }));
+    $s('#fFill').onclick = e => drColorPop(e.currentTarget, () => [sel().fill || sel().color, sel().fillA ?? .2], (c, a) => edit(d => { d.fill = c; d.fillA = a; d.bg = true; }));
+    $s('#fText').onclick = e => drColorPop(e.currentTarget, () => [sel().textColor || sel().color, sel().textA ?? 1], (c, a) => edit(d => { d.textColor = c; d.textA = a; if (!d.text) { drSettings('text'); } }));
+    $s('#fW').onclick = e => drMenu(e.currentTarget, [1, 2, 3, 4].map(w => [`<span style="display:inline-block;width:30px;border-top:${w}px solid #dbdbdb;margin-right:10px;vertical-align:middle"></span>${w}px`, () => edit(d => { d.width = w; })]));
+    $s('#fDash').onclick = e => drMenu(e.currentTarget, [['solid', 'Line'], ['dashed', 'Dashed line'], ['dotted', 'Dotted line']].map(([v, n]) => [`<span style="display:inline-block;width:30px;border-top:2px ${v} #dbdbdb;margin-right:10px;vertical-align:middle"></span>${n}`, () => edit(d => { d.dash = v; })]));
+    $s('#fSet').onclick = () => drSettings('style');
+    $s('#fLock').onclick = () => edit(d => { d.locked = !d.locked; });
+    $s('#fDel').onclick = () => { if (DR.sel) drDelete(DR.sel); };
+    $s('#fTpl').onclick = e => drTemplateMenu(e.currentTarget, sel(), st => edit(d => Object.assign(d, st)));
+    $s('#fMore').onclick = e => {
+      const d = sel(); if (!d) return;
+      drMenu(e.currentTarget, [
+        ['Clone', () => { const c2 = JSON.parse(JSON.stringify(d)); c2.id = drNewId(); c2.z = Date.now(); c2.locked = false; const c = drCtx(); if (c) c2.pts = c2.pts.map(q => ({ t: q.t + c.step * 3, p: q.p })); drCommit(c2); DR.sel = c2.id; drKick(); }],
+        ['Bring to front', () => edit(x => { x.z = Date.now(); })],
+        ['Send to back', () => edit(x => { x.z = Math.min(...Object.values(DR.items).map(i => i.z || 0)) - 1; })],
+        '-',
+        ['Hide', () => { edit(x => { x.hidden = true; }); DR.sel = null; drKick(); }],
+        [d.locked ? 'Unlock' : 'Lock', () => edit(x => { x.locked = !x.locked; })],
+        ['Remove', () => drDelete(d.id)]
+      ]);
+    };
+    // clicks outside a popup close it
+    window.addEventListener('pointerdown', e => { if (!e.composedPath().includes(hostEl)) { $s('#pop').hidden = true; } }, true);
   }
+  function drPopAt(anchor, html) {
+    const pop = DR.ui.$('#pop');
+    pop.innerHTML = html; pop.hidden = false;
+    const r = anchor.getBoundingClientRect();
+    pop.style.left = Math.min(window.innerWidth - pop.offsetWidth - 6, r.left) + 'px';
+    pop.style.top = (r.bottom + 6 + pop.offsetHeight > window.innerHeight ? r.top - pop.offsetHeight - 6 : r.bottom + 6) + 'px';
+    return pop;
+  }
+  function drMenu(anchor, items) {
+    const pop = drPopAt(anchor, `<div class="menu">${items.map((it, i) => it === '-' ? '<div class="sep"></div>' : `<button data-i="${i}">${it[0]}</button>`).join('')}</div>`);
+    pop.querySelectorAll('button[data-i]').forEach(b => b.onclick = () => { pop.hidden = true; items[+b.dataset.i][1](); });
+  }
+  // TradingView's color picker: palette, custom color and opacity
+  function drColorPop(anchor, get, set) {
+    if (!DR.items[DR.sel] && !anchor.closest) return;
+    let [col, a] = get(); col = (col || '#2962FF').toUpperCase();
+    const pop = drPopAt(anchor, `<div class="pal">${PALETTE.flat().map(h => `<i data-c="${h}" style="background:${h}" class="${h === col ? 'on' : ''}"></i>`).join('')}</div>
+      <div class="pal-row"><input type="color" id="pcCustom" value="${/^#[0-9a-f]{6}$/i.test(col) ? col : '#2962ff'}" title="Custom color" style="width:28px;height:24px;border:none;background:none;padding:0"><span style="font-size:12px;color:#9598a1">Opacity</span><input type="range" id="pcA" min="0" max="100" value="${Math.round((a ?? 1) * 100)}"><span id="pcAv" style="width:36px;text-align:right">${Math.round((a ?? 1) * 100)}%</span></div>`);
+    const apply = () => set(col, (+pop.querySelector('#pcA').value) / 100);
+    pop.querySelectorAll('.pal i').forEach(i => i.onclick = () => { col = i.dataset.c; pop.querySelectorAll('.pal i').forEach(x => x.classList.toggle('on', x === i)); apply(); });
+    pop.querySelector('#pcCustom').oninput = e => { col = e.target.value.toUpperCase(); apply(); };
+    pop.querySelector('#pcA').oninput = e => { pop.querySelector('#pcAv').textContent = e.target.value + '%'; apply(); };
+  }
+  // Wick's own templates (separate from TradingView's: yours there aren't touched)
+  function drTemplateMenu(anchor, d, applyStyle) {
+    if (!d) return;
+    const list = ((S.draw.templates || {})[d.type]) || [];
+    const items = [
+      ['Save drawing template as…', () => {
+        const pop = drPopAt(anchor, `<div style="display:flex;gap:6px;align-items:center"><input type="text" id="tName" placeholder="Template name" style="width:180px"><button class="btn2 pri" id="tSave">Save</button></div>`);
+        const inp = pop.querySelector('#tName'); inp.focus();
+        const go = () => { const n = inp.value.trim(); if (!n) return; S.draw.templates = S.draw.templates || {}; const arr = (S.draw.templates[d.type] = (S.draw.templates[d.type] || []).filter(t => t.name !== n)); arr.push({ name: n, style: pickStyle(d) }); save('draw'); pop.hidden = true; };
+        pop.querySelector('#tSave').onclick = go; inp.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') go(); };
+      }],
+      ['Apply default drawing template', () => { const T = DRAW_TOOLS[d.type]; const base = { color: T.color, width: T.width, dash: 'solid', lineA: 1 }; if (d.type === 'rect') Object.assign(base, { fill: T.fill, fillA: T.fillA, bg: true, mid: false, extL: false, extR: false }); if (d.type === 'hl') base.alpha = T.alpha; applyStyle(base); }]
+    ];
+    if (list.length) items.push('-');
+    for (const t of list) items.push([t.name, () => applyStyle(JSON.parse(JSON.stringify(t.style)))]);
+    if (list.length) items.push('-', ['Remove a template…', () => drMenu(anchor, list.map(t => [`Remove “${t.name}”`, () => { S.draw.templates[d.type] = list.filter(x => x !== t); save('draw'); }]))]);
+    drMenu(anchor, items);
+  }
+
+  /* ---- Settings dialog (Style / Text / Coordinates / Visibility), like TradingView's ---- */
+  function drSettings(tab) {
+    const d0 = DR.items[DR.sel]; if (!d0 || !DR.ui) return;
+    const orig = JSON.parse(JSON.stringify(d0));      // Cancel puts this back
+    const dlg = DR.ui.$('#dlg'), $d = q => dlg.querySelector(q);
+    let cur = tab || 'style';
+    const d = DR.items[DR.sel];
+    const live = () => { d.upd = Date.now(); DR.items[d.id] = d; drKick(); };
+    const sw = (key, aKey, defA = 1) => `<span class="sw" data-c="${key}" data-a="${aKey}" data-da="${defA}"><i><b style="background:${hexRgba(d[key] || d.color, d[aKey] ?? defA)}"></b></i></span>`;
+    const lineSw = () => `<span class="sw" data-c="color" data-a="${d.type === 'hl' ? 'alpha' : 'lineA'}" data-da="${d.type === 'hl' ? .25 : 1}"><i><b style="background:${hexRgba(d.color, d.type === 'hl' ? (d.alpha ?? .25) : (d.lineA ?? 1))}"></b></i>${d.type === 'hl' ? '' : `<span class="ln" style="border-top-width:${Math.min(4, d.width || 1)}px;border-top-style:${d.dash || 'solid'}"></span>`}</span>`;
+    const ext = () => `<select id="xExt"><option value="none">Don't extend</option><option value="left">Extend left</option><option value="right">Extend right</option><option value="both">Extend both</option></select>`;
+    const styleTab = () => {
+      const t = d.type;
+      if (t === 'rect') return `
+        <div class="row"><span class="lb">Extend</span>${ext()}</div>
+        <div class="row"><label><input type="checkbox" id="xBorder" ${d.border !== false ? 'checked' : ''}> Border</label>${lineSw()}</div>
+        <div class="row"><label><input type="checkbox" id="xMid" ${d.mid ? 'checked' : ''}> Middle line</label><span class="sw" data-c="midColor" data-a="midA" data-da="1" id="xMidSw"><i><b style="background:${hexRgba(d.midColor || d.color, d.midA ?? 1)}"></b></i><span class="ln" style="border-top-style:${d.midDash || 'dashed'}"></span></span></div>
+        <div class="row"><label><input type="checkbox" id="xBg" ${d.bg !== false ? 'checked' : ''}> Background</label>${sw('fill', 'fillA', .2)}</div>`;
+      if (t === 'trend') return `
+        <div class="row"><span class="lb">Line</span>${lineSw()}<span class="ep"><button id="xLE" title="Left end">${d.leftEnd === 'arrow' ? '←—' : '○—'}</button></span><span class="ep"><button id="xRE" title="Right end">${d.rightEnd === 'arrow' ? '—→' : '—○'}</button></span></div>
+        <div class="row"><span class="lb">Extend</span>${ext()}</div>
+        <div class="row"><label style="width:auto"><input type="checkbox" id="xMP" ${d.midPoint ? 'checked' : ''}> Middle point</label></div>
+        <div class="row"><label style="width:auto"><input type="checkbox" id="xPL" ${d.priceLabels ? 'checked' : ''}> Price labels</label></div>
+        <div class="sub">INFO</div>
+        <div class="row"><span class="lb">Stats</span><select id="xStats"><option value="hidden">Hidden</option><option value="compact">Compact</option><option value="values">Values</option></select></div>
+        <div class="row"><span class="lb">Stats position</span><select id="xStatsPos"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></div>
+        <div class="row"><label style="width:auto"><input type="checkbox" id="xSA" ${d.statsAlways ? 'checked' : ''}> Always show stats</label></div>`;
+      if (t === 'curve') return `
+        <div class="row"><span class="lb">Line</span>${lineSw()}<span class="ep"><button id="xLE">${d.leftEnd === 'arrow' ? '←—' : '○—'}</button></span><span class="ep"><button id="xRE">${d.rightEnd === 'arrow' ? '—→' : '—○'}</button></span></div>
+        <div class="row"><label><input type="checkbox" id="xBg" ${d.bg ? 'checked' : ''}> Background</label>${sw('fill', 'fillA', .2)}</div>`;
+      if (t === 'hl') return `<div class="row"><span class="lb">Color</span>${lineSw()}</div><div class="row"><span class="lb">Width</span><select id="xHW">${[5, 10, 15, 20, 25, 30, 40].map(w => `<option value="${w}">${w}px</option>`).join('')}</select></div>`;
+      return `<div class="row"><span class="lb">Line</span>${lineSw()}</div>` +
+        (t === 'hray' ? `<div class="row"><label style="width:auto"><input type="checkbox" id="xPrice" ${d.priceLabel ? 'checked' : ''}> Show price label</label></div>` : '') +
+        (t === 'vline' ? `<div class="row"><label style="width:auto"><input type="checkbox" id="xTime" ${d.timeLabel ? 'checked' : ''}> Show time label</label></div>` : '');
+    };
+    const textTab = () => d.type === 'hl' ? '<div class="row" style="color:#8c8c8c">The highlighter has no text.</div>' : `
+      <div class="row" style="gap:8px">${sw('textColor', 'textA', 1)}<select id="xFs" style="min-width:90px">${[10, 11, 12, 14, 16, 20, 24, 28, 32, 40].map(f => `<option value="${f}">${f}</option>`).join('')}</select><button class="tbtn ${d.bold ? 'on' : ''}" id="xB">B</button><button class="tbtn ${d.italic ? 'on' : ''}" id="xI" style="font-style:italic;font-weight:400">I</button></div>
+      <textarea id="xTxt" placeholder="Add text"></textarea>
+      <div class="row"><span class="lb">Text alignment</span><select id="xTV">${d.type === 'rect' ? '<option value="inside">Inside</option><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option>' : '<option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option>'}</select><select id="xTH"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select></div>`;
+    const coordTab = () => d.pts.slice(0, d.type === 'hl' ? 0 : 3).map((q, i) => {
+      const dt = new Date(q.t * 1000), loc = new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+      return `<div class="coord"><span>#${i + 1}</span><input type="text" data-cp="${i}" value="${drFmt(q.p).replace(/,/g, '')}" title="Price"><input type="datetime-local" data-ct="${i}" value="${loc}" title="Time" style="color-scheme:dark;background:#1f1f1f;color:#dbdbdb;border:1px solid #4a4a4a;border-radius:6px;height:36px;padding:0 6px"></div>`;
+    }).join('') || '<div class="row" style="color:#8c8c8c">Move the highlighter on the chart.</div>';
+    const visTab = () => VIS_GROUPS.map(([k, n, lo, hi]) => { const v = (d.vis && d.vis[k]) || {}; return `<div class="vis"><input type="checkbox" data-vk="${k}" ${v.on !== false ? 'checked' : ''}><span>${n}</span><input type="number" data-vlo="${k}" min="${lo}" max="${hi}" value="${v.lo || lo}"><span>–</span><input type="number" data-vhi="${k}" min="${lo}" max="${hi}" value="${v.hi || hi}"></div>`; }).join('');
+    const render = () => {
+      dlg.innerHTML = `<div class="dh" id="dHead"><span>${TOOL_TITLE[d.type]}</span>${SVG(UI_ICONS.edit, 16)}<span class="sp"></span><button id="dX" title="Close">${SVG(UI_ICONS.close)}</button></div>
+        <div class="tabs">${[['style', 'Style'], ['text', 'Text'], ['coords', 'Coordinates'], ['vis', 'Visibility']].map(([k, n]) => `<button data-tab="${k}" class="${cur === k ? 'on' : ''}">${n}</button>`).join('')}</div>
+        <div class="db">${cur === 'style' ? styleTab() : cur === 'text' ? textTab() : cur === 'coords' ? coordTab() : visTab()}</div>
+        <div class="df"><button class="btn2" id="dTpl">Template ▾</button><span class="sp"></span><button class="btn2" id="dCancel">Cancel</button><button class="btn2 pri" id="dOk">Ok</button></div>`;
+      dlg.hidden = false;
+      dlg.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { cur = b.dataset.tab; render(); });
+      // keys typed in the dialog belong to the dialog, not to TradingView
+      dlg.onkeydown = e => { e.stopPropagation(); if (e.key === 'Escape') cancel(); };
+      dlg.onkeyup = e => e.stopPropagation();
+      const extSel = $d('#xExt'); if (extSel) { extSel.value = d.extL && d.extR ? 'both' : d.extL ? 'left' : d.extR ? 'right' : 'none'; extSel.onchange = () => { d.extL = /left|both/.test(extSel.value); d.extR = /right|both/.test(extSel.value); live(); }; }
+      const chk = (id, key) => { const el = $d(id); if (el) el.onchange = () => { d[key] = el.checked; live(); }; };
+      chk('#xBorder', 'border'); chk('#xMid', 'mid'); chk('#xBg', 'bg'); chk('#xMP', 'midPoint'); chk('#xPL', 'priceLabels'); chk('#xSA', 'statsAlways'); chk('#xPrice', 'priceLabel'); chk('#xTime', 'timeLabel');
+      const selp = (id, key, def) => { const el = $d(id); if (el) { el.value = String(d[key] ?? def); el.onchange = () => { d[key] = isNaN(+el.value) || el.value === '' ? el.value : +el.value; live(); }; } };
+      selp('#xStats', 'stats', 'hidden'); selp('#xStatsPos', 'statsPos', 'right'); selp('#xHW', 'width', 20); selp('#xFs', 'fontSize', 14);
+      selp('#xTV', 'textV', d.type === 'rect' ? 'inside' : 'top'); selp('#xTH', 'textH', d.type === 'rect' ? 'left' : 'right');
+      const le = $d('#xLE'); if (le) le.onclick = () => { d.leftEnd = d.leftEnd === 'arrow' ? 'normal' : 'arrow'; live(); render(); };
+      const re = $d('#xRE'); if (re) re.onclick = () => { d.rightEnd = d.rightEnd === 'arrow' ? 'normal' : 'arrow'; live(); render(); };
+      const bB = $d('#xB'); if (bB) bB.onclick = () => { d.bold = !d.bold; live(); render(); };
+      const bI = $d('#xI'); if (bI) bI.onclick = () => { d.italic = !d.italic; live(); render(); };
+      const ta = $d('#xTxt'); if (ta) { ta.value = d.text || ''; ta.oninput = () => { d.text = ta.value; live(); }; setTimeout(() => ta.focus(), 0); }
+      dlg.querySelectorAll('.sw').forEach(s => s.onclick = () => {
+        const ck = s.dataset.c, ak = s.dataset.a, da = +s.dataset.da;
+        const withLine = ck === 'color' || ck === 'midColor';
+        drColorPop(s, () => [d[ck] || d.color, d[ak] ?? da], (c, a) => { d[ck] = c; d[ak] = a; if (ck === 'fill') d.bg = true; live(); s.querySelector('b').style.background = hexRgba(c, a); });
+        if (withLine && d.type !== 'hl') {
+          // width + style under the palette, like TradingView's line popup
+          const pop = DR.ui.$('#pop'), wk = ck === 'midColor' ? 'midWidth' : 'width', dk = ck === 'midColor' ? 'midDash' : 'dash';
+          pop.insertAdjacentHTML('beforeend', `<div class="pal-row"><span style="font-size:12px;color:#a3a3a3;width:56px">Thickness</span>${[1, 2, 3, 4].map(w => `<button data-w="${w}" class="${(d[wk] || 1) === w ? 'on' : ''}" style="height:26px;min-width:40px"><span style="width:22px;border-top:${w}px solid currentColor"></span></button>`).join('')}</div><div class="pal-row"><span style="font-size:12px;color:#a3a3a3;width:56px">Line style</span>${['solid', 'dashed', 'dotted'].map(v => `<button data-ds="${v}" class="${(d[dk] || (ck === 'midColor' ? 'dashed' : 'solid')) === v ? 'on' : ''}" style="height:26px;min-width:40px"><span style="width:22px;border-top:2px ${v} currentColor"></span></button>`).join('')}</div>`);
+          pop.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { d[wk] = +b.dataset.w; live(); pop.querySelectorAll('[data-w]').forEach(x => x.classList.toggle('on', x === b)); render(); DR.ui.$('#pop').hidden = false; });
+          pop.querySelectorAll('[data-ds]').forEach(b => b.onclick = () => { d[dk] = b.dataset.ds; live(); pop.querySelectorAll('[data-ds]').forEach(x => x.classList.toggle('on', x === b)); render(); DR.ui.$('#pop').hidden = false; });
+        }
+      });
+      dlg.querySelectorAll('[data-cp]').forEach(inp => inp.onchange = () => { const v = parseFloat(inp.value.replace(/,/g, '')); if (isFinite(v)) { d.pts[+inp.dataset.cp].p = v; live(); } });
+      dlg.querySelectorAll('[data-ct]').forEach(inp => inp.onchange = () => { const ms = new Date(inp.value).getTime(); if (isFinite(ms)) { d.pts[+inp.dataset.ct].t = Math.round(ms / 1000); live(); } });
+      dlg.querySelectorAll('[data-vk]').forEach(cb => {
+        const k = cb.dataset.vk, upd = () => { d.vis = d.vis || {}; d.vis[k] = { on: cb.checked, lo: +dlg.querySelector(`[data-vlo="${k}"]`).value, hi: +dlg.querySelector(`[data-vhi="${k}"]`).value }; live(); };
+        cb.onchange = upd; dlg.querySelector(`[data-vlo="${k}"]`).onchange = upd; dlg.querySelector(`[data-vhi="${k}"]`).onchange = upd;
+      });
+      $d('#dTpl').onclick = e => drTemplateMenu(e.currentTarget, d, st => { Object.assign(d, st); live(); render(); });
+      $d('#dX').onclick = cancel; $d('#dCancel').onclick = cancel;
+      $d('#dOk').onclick = () => { dlg.hidden = true; DR.ui.$('#pop').hidden = true; drRemember(d); drCommit(d); drBarSync(true); };
+      const head = $d('#dHead');
+      head.onpointerdown = e => {
+        if (e.target.closest('button')) return;
+        const r = dlg.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
+        const mv = ev => { dlg.style.left = (ev.clientX - ox) + 'px'; dlg.style.top = (ev.clientY - oy) + 'px'; dlg.style.transform = 'none'; };
+        const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
+        window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+      };
+    };
+    const cancel = () => { dlg.hidden = true; DR.ui.$('#pop').hidden = true; DR.items[orig.id] = orig; drKick(); drBarSync(true); };
+    render();
+  }
+
   function drToolbarSync() {
     if (!DR.ui) drBuildUi();
     if (!DR.ui) return;
@@ -2510,30 +2819,42 @@
     if (!bar.style.left) { const p = S.draw.barPos; bar.style.left = (p ? p[0] : 60) + 'px'; bar.style.top = (p ? p[1] : 120) + 'px'; }
     bar.querySelectorAll('button[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === DR.tool));
   }
-  let drStyKey = '';
-  function drBarSync() {
+  let drStyKey = '', drFtbFor = '';
+  function drBarSync(force) {
     if (!DR.ui) return;
-    const sty = DR.ui.$('#sty'), d = DR.items[DR.sel];
-    if (!d || !drOn() || DR.drag) { sty.hidden = true; drStyKey = ''; return; }
-    const c = drCtx(), host = drHost(); if (!c || !host) { sty.hidden = true; return; }
-    const r = host.getBoundingClientRect(), G = drGeom(c, d, r.width, r.height);
-    const ys = G.handles.map(h => h[1]).concat(G.P.map(p => p[1])), xs = G.handles.map(h => h[0]).concat(G.P.map(p => p[0]));
-    const top = Math.max(r.top + 4, Math.min(...ys) + r.top - 50), left = Math.min(r.right - 460, Math.max(r.left + 4, (xs.length ? Math.min(...xs) : 0) + r.left));
-    sty.style.top = top + 'px'; sty.style.left = left + 'px';
+    const ftb = DR.ui.$('#ftb'), d = DR.items[DR.sel];
+    if (!d || !drOn() || DR.drag) { ftb.hidden = true; drStyKey = ''; if (!d) { DR.ui.$('#dlg').hidden = true; } return; }
+    const c = drCtx(), host = drHost(); if (!c || !host) { ftb.hidden = true; return; }
+    // TradingView keeps the floating toolbar where it is while the same drawing stays selected
+    if (drFtbFor !== d.id) {
+      drFtbFor = d.id;
+      const r = host.getBoundingClientRect();
+      ftb.hidden = false;
+      const p = DR.ftbMoved || [r.left + Math.max(8, (r.width - ftb.offsetWidth) / 2), r.top + 10];
+      ftb.style.left = p[0] + 'px'; ftb.style.top = p[1] + 'px';
+    }
+    ftb.hidden = false;
     const key = d.id + d.upd;
-    sty.hidden = false;
-    if (key === drStyKey) return;
+    if (key === drStyKey && !force) return;
     drStyKey = key;
     const $s = DR.ui.$;
-    $s('#sCol').value = /^#[0-9a-f]{6}$/i.test(d.color) ? d.color : '#2962ff';
-    $s('.fillw').hidden = d.type !== 'rect'; $s('#sFill').value = /^#[0-9a-f]{6}$/i.test(d.fill || '') ? d.fill : $s('#sCol').value;
-    $s('#sW').value = String(d.width); $s('#sDash').hidden = d.type === 'hl'; $s('#sDash').value = d.dash || 'solid';
-    $s('#sA').hidden = !(d.type === 'rect' || d.type === 'hl'); $s('#sA').value = String(d.type === 'hl' ? (d.alpha ?? .25) : (d.fillA ?? 0));
-    $s('#sMid').hidden = d.type !== 'rect'; $s('#sMid').classList.toggle('on', !!d.mid);
-    $s('#sExtL').hidden = $s('#sExtR').hidden = !(d.type === 'rect' || d.type === 'trend');
-    $s('#sExtL').classList.toggle('on', !!d.extL); $s('#sExtR').classList.toggle('on', !!d.extR);
-    $s('#sTxt').hidden = d.type === 'hl' || d.type === 'curve'; if (DR.ui.sr.activeElement !== $s('#sTxt')) $s('#sTxt').value = d.text || '';
-    $s('#sLock').classList.toggle('on', !!d.locked);
+    const isHl = d.type === 'hl';
+    $s('#fLineBar').style.background = hexRgba(d.color, isHl ? (d.alpha ?? .25) : (d.lineA ?? 1));
+    $s('#fFill').hidden = !(d.type === 'rect' || d.type === 'curve'); $s('#fFillBar').style.background = hexRgba(d.fill || d.color, d.fillA ?? .2);
+    $s('#fText').hidden = isHl; $s('#fTextBar').style.background = hexRgba(d.textColor || d.color, d.textA ?? 1);
+    $s('#fW').hidden = isHl; $s('#fWTxt').textContent = `— ${d.width || 1}px`;
+    $s('#fDash').hidden = isHl; $s('#fDashTxt').innerHTML = `<span style="display:inline-block;width:22px;border-top:2px ${d.dash || 'solid'} currentColor;vertical-align:middle"></span>`;
+    $s('#fLock').innerHTML = SVG(d.locked ? UI_ICONS.lock : UI_ICONS.unlock); $s('#fLock').title = d.locked ? 'Unlock' : 'Lock';
+  }
+  // which of TradingView's buttons Wick found (shown on the Drawings page)
+  function drDetectTv() {
+    const found = {};
+    for (const el of document.querySelectorAll('[data-name], [aria-label], [data-tooltip]')) {
+      if (el.closest('#tvwp-host, #tvwp-draw-ui')) continue;
+      const names = [el.getAttribute('data-tooltip'), el.getAttribute('aria-label'), el.getAttribute('data-name')].filter(Boolean);
+      for (const [type, re] of TV_TOOL_MATCH) if (names.some(n => re.test(n.trim()))) found[type] = (found[type] || 0) + 1;
+    }
+    return found;
   }
   function drStart() {
     if (!document.body) { document.addEventListener('DOMContentLoaded', drStart, { once: true }); return; }
@@ -4654,6 +4975,7 @@
         <div class="hint" style="padding:2px 14px 10px">TradingView's free plan caps drawings per chart. Wick draws these itself, on its own layer over the chart, so they don't count toward that cap: draw as many as you like. They're pinned to price and time, look like TradingView's, and are shared between Chrome and the TradingView app.</div>
         ${item("Use TradingView's buttons", "TradingView's Horizontal Ray, Vertical Line, Cross Line, Trend Line, Rectangle, Curve and Highlighter buttons (and their hotkeys) draw Wick's unlimited version.", '<input type="checkbox" id="dUseTv">', 'Turn off to get TradingView\'s own versions of these tools back (they count toward its cap).')}
         ${item('Show the Wick drawing toolbar', 'A small bar on the chart with the same tools. Drag it by its handle.', '<input type="checkbox" id="dBar">')}
+        <div class="item"><div class="txt"><b>TradingView buttons found</b><small id="dFound">—</small></div></div>
         <div class="item"><div class="txt"><b>How it works</b><small>Pick a tool, then click (or drag) on the chart. Click a drawing to select it: drag it or its handles, change color, width, style, fill, text, middle line and extend in the bar above it. Del removes it, Esc cancels.</small></div></div>
       </div>
       <div class="card pg">
@@ -6293,6 +6615,8 @@
       $('#dCount').textContent = `${all.length} drawing${all.length === 1 ? '' : 's'}`;
       $('#dCountSub').textContent = WICK_HOME ? `Across ${syms} symbol${syms === 1 ? '' : 's'}.` : `${here} on ${sym || 'this chart'} · ${syms} symbol${syms === 1 ? '' : 's'} in all`;
       $('#dClearSym').hidden = WICK_HOME || !here;
+      if (WICK_HOME) $('#dFound').textContent = 'Shown in TradingView (Chrome or the TradingView app).';
+      else { const f = drDetectTv(); $('#dFound').textContent = Object.keys(DRAW_TOOLS).map(t => `${DRAW_TOOLS[t].name} ${f[t] ? '✓' : '✗'}`).join(' · ') + (Object.keys(f).length < 7 ? ' — tools with ✗ aren\'t on your toolbars right now (or have a different name); use Wick\'s toolbar for those.' : ''); }
     }
     $('#dOn').onchange = e => { S.draw.on = e.target.checked; save('draw'); drToolbarSync(); drKick(); };
     $('#dUseTv').onchange = e => { S.draw.useTv = e.target.checked; save('draw'); drMarkTvButtons(); };

@@ -34,7 +34,10 @@ TradingView's free plan caps how many drawings a chart can have. Wick draws its 
 
 - TradingView's own buttons for these tools (and Alt+J / Alt+V / Alt+C / Alt+T / Alt+Shift+R) start Wick's version. Turn this off in **Drawings** to get TradingView's versions back.
 - Or use the small Wick drawing toolbar on the chart (drag it by its handle; hide it in Drawings).
-- Click a drawing to select it: drag it or its handles; the bar above it changes color, fill, width, style, text, middle line (rectangles), extend left/right, lock, clone and remove. **Del** removes, **Esc** cancels.
+- Click a drawing to select it, and you get TradingView's floating toolbar: template, line color, background, text color (TradingView's palette with opacity), width, line style, settings, lock, remove, and More (clone, bring to front, send to back, hide). **Del** removes, **Esc** cancels.
+- Double-click a drawing (or the settings button) for TradingView's Settings dialog: **Style** (extend, border, middle line, background; trend line ends, middle point, price labels and stats), **Text** (color, size, bold, italic, alignment), **Coordinates** and **Visibility** (which timeframes it shows on). Cancel puts everything back.
+- Templates are Wick's own (save, apply, apply default); your TradingView drawing templates aren't touched.
+- The Drawings page shows which of TradingView's buttons Wick found on your toolbars.
 - Coming next: Long/Short Position, Price Range, Fib Retracement, Fib Extension; then Gann Box and Fixed Range Volume Profile.
 
 ## TradingView desktop app without the Wick app (PowerShell launcher)
