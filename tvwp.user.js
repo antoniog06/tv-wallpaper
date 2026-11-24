@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.8
+// @version      3.26.9
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.8';
+  const VERSION = '3.26.9';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2220,6 +2220,14 @@
     return q;
   }
 
+  /* ---- paper vs. real: TradingView's Paper Trading is practice. Its trades are journaled (tagged Paper)
+     but never count toward your trade counter, max trades, daily limits or lockout, and the lockout doesn't block it. ---- */
+  const isPaperTrade = t => /^paper/i.test(String((t && t.broker) || ''));
+  function onPaper() {
+    try { const b = currentBroker(), mi = b && typeof b.metainfo === 'function' ? b.metainfo() : null; return /^paper/i.test(String((mi && (mi.id || mi.title || mi.name)) || '')); } catch (e) { return false; }
+  }
+  const realOpen = () => { try { return Object.values(recLoad().open || {}).filter(t => !isPaperTrade(t)).length; } catch (e) { return 0; } };
+
   /* ---- today's numbers (from the Journal + open P&L) ---- */
   const day = { pnl: 0, closedPnl: 0, trades: 0, day: -1 };
   let journalDirty = true, dayTrades = [], dayLoadedAt = 0;
@@ -2230,7 +2238,7 @@
       try { dayTrades = (await DB.tradesAll()) || []; } catch (e) {}
     }
     const trades = dayTrades;
-    const td = trades.filter(t => tradingDay(t.closeTime) === today);
+    const td = trades.filter(t => tradingDay(t.closeTime) === today && !isPaperTrade(t));   // paper trades don't count
     // trades deleted with "Clear journal" today still count toward today's limits
     const carry = riskLoad().carry, have = new Set(td.map(t => t.id));
     const gone = carry && carry.day === today ? (carry.items || []).filter(x => !have.has(x.id)) : [];
@@ -2238,7 +2246,7 @@
     day.trades = td.length + gone.length;
     day.closedPnl = td.reduce((a, t) => a + (t.net || 0), 0) + gone.reduce((a, x) => a + (x.net || 0), 0);
     const av = acctValues();
-    day.pnl = day.closedPnl + ((av && av.unrealized) || 0);
+    day.pnl = day.closedPnl + ((av && !av.paper && av.unrealized) || 0);
   }
 
   /* ---- lock state ---- */
@@ -2511,12 +2519,12 @@
   // (even before the lock banner appears).
   function lastTradeUsed() {
     const r = S.risk;
-    if (!r.lockOn || !(+r.maxTrades > 0) || unlockedToday()) return false;
-    let open = 0;
-    try { open = Object.keys(recLoad().open || {}).length; } catch (e) {}
+    if (!r.lockOn || !(+r.maxTrades > 0) || unlockedToday() || onPaper()) return false;
+    const open = realOpen();
     return day.day === tradingDay(Date.now()) && day.trades + open >= +r.maxTrades;
   }
   function orderAllowed(method, o) {
+    if (onPaper()) return true;      // Paper Trading is practice: the lockout and limits don't apply to it
     if (!entryBlocked()) {
       if (!lastTradeUsed()) return true;
       if (method === 'reversePosition' || openPositionQty() === 0) return false;
@@ -3011,8 +3019,7 @@
     const r = S.risk, max = +r.maxTrades || 0;
     const show = r.counter !== false && max > 0 && (!S.extras.allOff || r.lockOn);
     if (!show) { el.hidden = true; if (edge) edge.className = 'edge'; counterKey = ''; return; }
-    let open = 0;
-    try { open = Object.keys(recLoad().open || {}).length; } catch (e) {}
+    const open = realOpen(), paper = onPaper();
     const closed = day.day === tradingDay(Date.now()) ? day.trades : 0;
     const inTrade = open > 0 && openPositionQty() > 0;
     const left = max - closed;                                   // trades you can still start (counting the one you're in)
@@ -3022,9 +3029,9 @@
       : left === 1 ? (inTrade ? 'last' : 'one')
       : left === 2 && max >= 3 ? 'two'
       : 'calm';
-    const tag = { off: 'Recording off', over: 'Over limit', done: 'Done', last: 'Last trade', one: '1 left', two: '2 left', calm: '' }[lvl];
+    const tag = paper ? 'Paper · not counted' : { off: 'Recording off', over: 'Over limit', done: 'Done', last: 'Last trade', one: '1 left', two: '2 left', calm: '' }[lvl];
     const icon = lvl === 'done' ? CI.lock : (lvl === 'last' || lvl === 'one' || lvl === 'over') ? CI.warn : '';
-    const key = [closed, inTrade, max, lvl].join('|');
+    const key = [closed, inTrade, max, lvl, paper].join('|');
     if (key !== counterKey || el.hidden) {
       counterKey = key; el.hidden = false;
       el.className = 'counter ' + lvl;
@@ -3032,7 +3039,7 @@
       el.innerHTML = `${icon ? `<span class="tc-ic">${icon}</span>` : ''}<span class="tc-lb">Trades</span>` +
         `<span class="tc-n"><b>${Math.min(closed, 999)}</b><span>/${max}</span></span>` +
         (segs ? `<span class="tc-bar">${segs}</span>` : '') + (tag ? `<span class="tc-tag">${tag}</span>` : '');
-      el.title = `${closed} of ${max} trades used today${inTrade ? ' (1 open)' : ''}. Drag to move. Turn off in Limits.`;
+      el.title = paper ? `You're on TradingView Paper Trading: these trades don't count. ${closed} of ${max} real trades used today.` : `${closed} of ${max} trades used today${inTrade ? ' (1 open)' : ''}. Drag to move. Turn off in Limits.`;
     }
     if (edge) edge.className = 'edge' + (lvl === 'last' ? ' on' : '');
   }
@@ -3678,6 +3685,8 @@
   #kPhraseBox[hidden], #kUnlock[hidden], #kFrozen[hidden] { display: none !important; }
   .pbox { width: min(680px, 92%); background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px; display: grid; gap: 10px; }
   .pbox video { width: 100%; border-radius: 8px; background: #000; max-height: 60vh; }
+  .ptag { padding: 0 6px; border-radius: 6px; background: rgba(140,150,170,.18); color: var(--muted); font-weight: 600; font-size: 10.5px; }
+  #hAcctNote { margin: 0 0 8px; }
   .kv.today b { font-size: 18px; }
   .kv.today b.up { color: var(--good); }
   .kv.today b.down { color: var(--bad); }
@@ -3983,8 +3992,9 @@
     </section>
 
     <section data-tab="home">
-      <div class="h-bar"><div class="seg" id="hUnit"><button data-v="usd">$</button><button data-v="pct">%</button><button data-v="r">R</button><button data-v="points">Points</button><button data-v="ticks">Ticks</button></div>
+      <div class="hint" id="hAcctNote" hidden></div><div class="h-bar"><div class="seg" id="hUnit"><button data-v="usd">$</button><button data-v="pct">%</button><button data-v="r">R</button><button data-v="points">Points</button><button data-v="ticks">Ticks</button></div>
         <div class="seg" id="hRange"><button data-v="month">Month</button><button data-v="all">All time</button></div>
+        <div class="seg" id="hAcct" title="Paper = TradingView Paper Trading"><button data-v="real">Real</button><button data-v="paper">Paper</button><button data-v="all">Both</button></div>
         <span style="flex:1"></span><button class="btn primary slim" id="hShare">Share P&amp;L</button></div>
       <div class="hint h-unitnote" id="hUnitNote" hidden></div>
       <div class="h-stats" id="hStats"></div>
@@ -5323,6 +5333,13 @@
     async function renderHome() {
       let trades = [];
       try { trades = (await DB.tradesAll()) || []; } catch (e) {}
+      // Real accounts by default; paper trades are practice
+      const acct = S.ui.hAcct || 'real', allTrades = trades;
+      trades = acct === 'all' ? trades : trades.filter(t => isPaperTrade(t) === (acct === 'paper'));
+      root.querySelectorAll('#hAcct button').forEach(b => b.classList.toggle('on', b.dataset.v === acct));
+      const nPaper = allTrades.filter(isPaperTrade).length;
+      $('#hAcctNote').hidden = !(acct === 'real' && !trades.length && nPaper);
+      $('#hAcctNote').textContent = `No real-account trades yet. Your ${nPaper} paper trade${nPaper === 1 ? ' is' : 's are'} under Paper.`;
       const unit = S.ui.hUnit || 'usd', range = S.ui.hRange || 'month';
       // % is of your prop starting balance if the prop tracker is on, else your account balance
       const av = acctValues();
@@ -5396,6 +5413,7 @@
     var homeLast = null;
     root.querySelectorAll('#hUnit button').forEach(b => b.onclick = () => { S.ui.hUnit = b.dataset.v; save(null); renderHome(); });
     root.querySelectorAll('#hRange button').forEach(b => b.onclick = () => { S.ui.hRange = b.dataset.v; save(null); renderHome(); });
+    root.querySelectorAll('#hAcct button').forEach(b => b.onclick = () => { S.ui.hAcct = b.dataset.v; save(null); renderHome(); });
     const shiftMonth = k => { const d = dayDate(hMonth); hMonth = Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + k, 1) / DAY); renderHome(); };
     $('#hPrev').onclick = () => shiftMonth(-1);
     $('#hNext').onclick = () => shiftMonth(1);
@@ -5473,7 +5491,7 @@
         const tk = t.ticks !== null && t.ticks !== undefined ? `${t.ticks > 0 ? '+' : ''}${t.ticks} ticks` : '';
         const win = (t.net ?? t.ticks ?? 0) > 0;
         row.innerHTML = `<div><b><span class="${t.dir > 0 ? 'side-l' : 'side-s'}">${t.dir > 0 ? 'Long' : 'Short'} ${t.qty}</span> ${shortSym(t.symbol)}</b>
-            <small>${new Date(t.openTime).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${fmtDur(t.closeTime - t.openTime)}${t.backfilled ? ' · caught up' : ''}</small></div>
+            <small>${new Date(t.openTime).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} · ${fmtDur(t.closeTime - t.openTime)}${t.backfilled ? ' · caught up' : ''}${isPaperTrade(t) ? ' · <span class="ptag">Paper</span>' : ''}</small></div>
           <div class="px">${fmtPx(t.entry)} → ${fmtPx(t.exit)}</div>
           <div class="pnl ${win ? 'win' : 'loss'}">${hide ? '•••••' : (pnl || tk)}<small>${hide ? '' : (pnl ? tk : '')}</small></div>`;
         const play = document.createElement('button');
