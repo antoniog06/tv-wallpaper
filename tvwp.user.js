@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.27.0
+// @version      3.27.1
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.27.0';
+  const VERSION = '3.27.1';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -4811,8 +4811,8 @@
       else toggle();
     });
     function toggle(force) {
-      // TradingView desktop app with the Wick app running: Wick lives in its own window (taskbar), not on the chart
-      if (!WICK_HOME && VIA_CDP && appAlive()) {
+      // Linked to the Wick app (TradingView desktop app or Chrome): Wick lives in its own window (taskbar), not on the chart
+      if (!WICK_HOME && appAlive()) {
         panel.classList.remove('open');
         if (force !== false) bridgeSend({ t: 'show' });
         return;
@@ -4829,10 +4829,10 @@
     }, true);
     window.addEventListener('resize', () => { placeFab(); if (panel.classList.contains('open')) placePanel(); });
     placeFab();
-    // No Wick button on the chart in the TradingView desktop app while the Wick app is running (it's in the taskbar).
+    // No Wick button on the chart while this window is linked to the Wick app (it's in the taskbar).
     // If the app ever goes away, the button comes back so Wick stays reachable.
     const fabCheck = () => {
-      const appOwned = WICK_HOME || (VIA_CDP && appAlive());
+      const appOwned = WICK_HOME || appAlive();
       if (fab.hidden !== appOwned) fab.hidden = appOwned;
       if (appOwned && !WICK_HOME && panel.classList.contains('open')) panel.classList.remove('open');
     };
