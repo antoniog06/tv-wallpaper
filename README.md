@@ -28,6 +28,15 @@ What's shared: trades (a trade seen by both Chrome and the desktop app is record
 
 The app updates itself (it checks GitHub Releases), and the Wick script inside TradingView updates from this repo. Your data stays on your PC in `%APPDATA%\Wick\data`. The app replaces the PowerShell launcher below: if you pinned the old Wick shortcut to the taskbar, unpin it and pin the new one.
 
+## Drawings (unlimited)
+
+TradingView's free plan caps how many drawings a chart can have. Wick draws its own versions of these tools on its own layer over the chart, so they don't count toward that cap: **Horizontal Ray, Vertical Line, Cross Line, Trend Line, Rectangle, Curve, Highlighter**. They look like TradingView's (same default colors and handles), stay pinned to price and time when you scroll, zoom or change timeframe, and are kept per symbol and shared between Chrome and the TradingView app through the Wick app.
+
+- TradingView's own buttons for these tools (and Alt+J / Alt+V / Alt+C / Alt+T / Alt+Shift+R) start Wick's version. Turn this off in **Drawings** to get TradingView's versions back.
+- Or use the small Wick drawing toolbar on the chart (drag it by its handle; hide it in Drawings).
+- Click a drawing to select it: drag it or its handles; the bar above it changes color, fill, width, style, text, middle line (rectangles), extend left/right, lock, clone and remove. **Del** removes, **Esc** cancels.
+- Coming next: Long/Short Position, Price Range, Fib Retracement, Fib Extension; then Gann Box and Fixed Range Volume Profile.
+
 ## TradingView desktop app without the Wick app (PowerShell launcher)
 
 Paste this into a normal PowerShell window (no admin needed):

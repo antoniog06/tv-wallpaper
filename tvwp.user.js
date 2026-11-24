@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.26.9
+// @version      3.27.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.26.9';
+  const VERSION = '3.27.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -82,6 +82,7 @@
     news: { on: true, mins: 15, medium: false, sound: true, around: 2 },
     extras: { allOff: false, hideAds: true, streamer: false, streamerChart: true, streamerTicks: false, hideQty: false, oco: false, fastMs: 0, buyColor: '', sellColor: '', eod: 'traded', eodClose: '17:00', streamerStyle: 'blur', brk: true, brkMode: 'ticks', brkRight: 300 },
     ind: { list: [], paused: false },
+    draw: { on: true, useTv: true, bar: true, barPos: null, last: {} },
     sounds: {
       enabled: true, volume: 0.8, oneForAll: false, all: 'tone:chime', muteTV: false,
       slots: {
@@ -107,6 +108,7 @@
         prop: { ...DEFAULTS.prop, ...s.prop },
         news: { ...DEFAULTS.news, ...s.news },
         ind: { list: Array.isArray(s.ind && s.ind.list) ? s.ind.list : [], paused: !!(s.ind && s.ind.paused) },
+        draw: { ...DEFAULTS.draw, ...(s.draw || {}), last: { ...((s.draw && s.draw.last) || {}) } },
         sounds: (() => {
           const d = DEFAULTS.sounds, u = s.sounds || {}, slots = {};
           for (const k of Object.keys(d.slots)) slots[k] = { ...d.slots[k], ...((u.slots || {})[k] || {}) };
@@ -137,7 +139,7 @@
   const VIA_CDP = !WICK_HOME && window.__wickHost === 'app';
   const bridge = { ws: null, up: false, synced: false, tries: 0, timer: 0, videos: new Set(), walls: new Set(), uploading: new Set(), sending: Promise.resolve(), status: null };
   // Settings that stay with each window: where the panel sits and folder access. (Wallpapers are shared through the app.)
-  const LOCAL_KEYS = { ui: ['x', 'y', 'px', 'py', 'tab', 'appLink'], wall: [], rec: ['folderOn', 'folderName'] };
+  const LOCAL_KEYS = { ui: ['x', 'y', 'px', 'py', 'tab', 'appLink'], wall: [], draw: ['barPos'], rec: ['folderOn', 'folderName'] };
 
   /* =========================================================
    * Candle colors: swap colors as the chart draws them
@@ -2049,6 +2051,510 @@
   }, 2000);
 
   /* =========================================================
+   * Wick drawings: unlimited, on any TradingView plan.
+   * Wick draws these itself, on its own layer over the chart, pinned to price and time,
+   * so they never use TradingView's drawing slots. TradingView's own buttons and hotkeys
+   * for these tools start Wick's version instead (switchable). Look and handles follow TradingView's.
+   * ======================================================= */
+  const DRAW_TOOLS = {
+    hray:  { name: 'Horizontal Ray', pts: 1, color: '#2962FF', width: 1 },
+    vline: { name: 'Vertical Line', pts: 1, color: '#2962FF', width: 1 },
+    cross: { name: 'Cross Line', pts: 1, color: '#2962FF', width: 1 },
+    trend: { name: 'Trend Line', pts: 2, color: '#2962FF', width: 2 },
+    rect:  { name: 'Rectangle', pts: 2, color: '#9C27B0', width: 1, fill: '#9C27B0', fillA: 0.2 },
+    curve: { name: 'Curve', pts: 3, color: '#2962FF', width: 2 },
+    hl:    { name: 'Highlighter', pts: -1, color: '#F23645', width: 20, alpha: 0.25 }
+  };
+  // How TradingView names these tools on its buttons (labels / tooltips / internal names)
+  const TV_TOOL_MATCH = [
+    ['hray', /^(horizontal ray|LineToolHorzRay)$/i], ['vline', /^(vertical line|LineToolVertLine)$/i],
+    ['cross', /^(cross line|LineToolCrossLine)$/i], ['trend', /^(trend line|LineToolTrendLine)$/i],
+    ['rect', /^(rectangle|LineToolRectangle)$/i], ['curve', /^(curve|LineToolBezierQuadro)$/i],
+    ['hl', /^(highlighter|LineToolHighlighter)$/i]
+  ];
+  // TradingView's hotkeys for these tools
+  const TV_TOOL_KEYS = { j: 'hray', v: 'vline', c: 'cross', t: 'trend' };
+  const DASHES = { solid: [], dashed: [6, 5], dotted: [2, 3] };
+
+  const DR = {
+    items: {}, tomb: {}, sel: null, hover: null, tool: null, draft: null, drag: null, canvas: null, sig: '', loop: false,
+    bars: null, barsSig: '', step: 60, ver: 0, ui: null
+  };
+  function drLoad() {
+    try { const j = JSON.parse(localStorage.getItem('tvwp_drawings') || '{}'); DR.items = j.items || {}; DR.tomb = j.tomb || {}; } catch (e) {}
+  }
+  let drSaveT = 0;
+  function drSave(changed, deleted) {
+    clearTimeout(drSaveT);
+    drSaveT = setTimeout(() => { try { localStorage.setItem('tvwp_drawings', JSON.stringify({ items: DR.items, tomb: DR.tomb })); } catch (e) {} }, 200);
+    if (changed && changed.length) { bridgeSend({ t: 'dput', recs: changed }); bc && bc.postMessage({ type: 'drawings' }); }
+    if (deleted && deleted.length) { bridgeSend({ t: 'ddel', ids: deleted }); bc && bc.postMessage({ type: 'drawings' }); }
+    DR.ver++;
+  }
+  drLoad();
+  window.__tvwpDraw = DR; window.__tvwpBridge = bridge;   // read by the automated tests
+  const drOn = () => S.draw.on && !S.extras.allOff;
+  const drSym = () => String(chartSymbol() || '').split(':').pop();
+  const drVisible = () => { const sym = drSym(); return Object.values(DR.items).filter(d => d.sym === sym); };
+
+  /* ---- price / time <-> screen ---- */
+  function drCtx() {
+    try {
+      const cw = window.TradingViewApi._activeChartWidgetWV.value()._chartWidget;
+      const m = cw.model(), ms = m.mainSeries(), ts = m.timeScale(), ps = ms.priceScale(), fv = ms.firstValue();
+      const b = ms.bars(), sig = [b.size(), b.firstIndex(), b.lastIndex()].join('|');
+      if (sig !== DR.barsSig) {
+        DR.bars = readBars(ms); DR.barsSig = sig;
+        const t = DR.bars.t, ix = DR.bars.idx, diffs = [];
+        for (let k = Math.max(1, t.length - 60); k < t.length; k++) diffs.push((t[k] - t[k - 1]) / Math.max(1, ix[k] - ix[k - 1]));
+        diffs.sort((a, c) => a - c);
+        DR.step = diffs.length ? diffs[diffs.length >> 1] : 60;
+      }
+      if (!DR.bars || !DR.bars.t.length) return null;
+      return { ts, ps, fv, d: DR.bars, step: DR.step || 60 };
+    } catch (e) { return null; }
+  }
+  // bar index (fractional) <-> time (seconds), interpolated between bars and extended past either end
+  function drIdxToTime(c, fi) {
+    const { idx, t } = c.d, n = idx.length;
+    if (fi <= idx[0]) return t[0] + (fi - idx[0]) * c.step;
+    if (fi >= idx[n - 1]) return t[n - 1] + (fi - idx[n - 1]) * c.step;
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (idx[mid] <= fi) lo = mid; else hi = mid; }
+    return t[lo] + (t[hi] - t[lo]) * (fi - idx[lo]) / (idx[hi] - idx[lo]);
+  }
+  function drTimeToIdx(c, tm) {
+    const { idx, t } = c.d, n = idx.length;
+    if (tm <= t[0]) return idx[0] + (tm - t[0]) / c.step;
+    if (tm >= t[n - 1]) return idx[n - 1] + (tm - t[n - 1]) / c.step;
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (t[mid] <= tm) lo = mid; else hi = mid; }
+    return idx[lo] + (idx[hi] - idx[lo]) * (tm - t[lo]) / ((t[hi] - t[lo]) || 1);
+  }
+  function drIdxToX(c, fi) { const i0 = Math.floor(fi); return c.ts.indexToCoordinate(i0) + (fi - i0) * c.ts.barSpacing(); }
+  function drXToIdx(c, x) { const base = c.d.idx[c.d.idx.length - 1]; return base + (x - c.ts.indexToCoordinate(base)) / c.ts.barSpacing(); }
+  const drPY = (c, p) => c.ps.priceToCoordinate(p, c.fv);
+  function drYP(c, y) {
+    if (typeof c.ps.coordinateToPrice === 'function') { const v = c.ps.coordinateToPrice(y, c.fv); if (isFinite(v)) return v; }
+    const p0 = c.fv, p1 = c.fv * 1.01, y0 = drPY(c, p0), y1 = drPY(c, p1);
+    return p0 + (y - y0) * (p1 - p0) / ((y1 - y0) || 1);
+  }
+  const drXY = (c, pt) => [drIdxToX(c, drTimeToIdx(c, pt.t)), drPY(c, pt.p)];
+  const drPt = (c, x, y) => ({ t: drIdxToTime(c, drXToIdx(c, x)), p: drYP(c, y) });
+
+  /* ---- drawing ---- */
+  function hexRgba(hex, a) {
+    const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+    if (!m) return hex;
+    const v = parseInt(m[1], 16);
+    return `rgba(${(v >> 16) & 255},${(v >> 8) & 255},${v & 255},${a})`;
+  }
+  function bez(p0, p1, p2, s) { const u = 1 - s; return [u * u * p0[0] + 2 * u * s * p1[0] + s * s * p2[0], u * u * p0[1] + 2 * u * s * p1[1] + s * s * p2[1]]; }
+  // screen geometry of one drawing (and its handles)
+  function drGeom(c, d, W, H) {
+    const P = (d.pts || []).map(pt => drXY(c, pt));
+    const g = { P, segs: [], handles: [], box: null, poly: null };
+    if (d.type === 'hray' && P[0]) { g.segs.push([P[0], [W + 10, P[0][1]]]); g.handles = [P[0]]; }
+    else if (d.type === 'vline' && P[0]) { g.segs.push([[P[0][0], -10], [P[0][0], H + 10]]); g.handles = [[P[0][0], H / 2]]; }
+    else if (d.type === 'cross' && P[0]) { g.segs.push([[-10, P[0][1]], [W + 10, P[0][1]]], [[P[0][0], -10], [P[0][0], H + 10]]); g.handles = [P[0]]; }
+    else if (d.type === 'trend' && P[1]) {
+      let [a, b] = P;
+      const dx = b[0] - a[0], dy = b[1] - a[1], far = 1e4;
+      const ea = d.extL && (dx || dy) ? [a[0] - dx * far, a[1] - dy * far] : a;
+      const eb = d.extR && (dx || dy) ? [b[0] + dx * far, b[1] + dy * far] : b;
+      g.segs.push([ea, eb]); g.handles = [a, b];
+    } else if (d.type === 'rect' && P[1]) {
+      const x0 = Math.min(P[0][0], P[1][0]), x1 = Math.max(P[0][0], P[1][0]), y0 = Math.min(P[0][1], P[1][1]), y1 = Math.max(P[0][1], P[1][1]);
+      const L = d.extL ? -10 : x0, R = d.extR ? W + 10 : x1;
+      g.box = [L, y0, R, y1];
+      g.segs.push([[L, y0], [R, y0]], [[L, y1], [R, y1]]);
+      if (!d.extL) g.segs.push([[x0, y0], [x0, y1]]);
+      if (!d.extR) g.segs.push([[x1, y0], [x1, y1]]);
+      const xm = (x0 + x1) / 2, ym = (y0 + y1) / 2;
+      g.handles = [[x0, y0], [x1, y0], [x1, y1], [x0, y1], [xm, y0], [x1, ym], [xm, y1], [x0, ym]];
+    } else if (d.type === 'curve' && P[1]) {
+      const ctl = P[2] || [(P[0][0] + P[1][0]) / 2, Math.min(P[0][1], P[1][1]) - 40];
+      const pts = []; for (let s = 0; s <= 40; s++) pts.push(bez(P[0], ctl, P[1], s / 40));
+      g.poly = pts; g.handles = [P[0], P[1], ctl];
+    } else if (d.type === 'hl' && P.length) { g.poly = P; g.handles = []; }
+    return g;
+  }
+  function drPaint(g, c, d, W, H, state) {
+    const G = drGeom(c, d, W, H);
+    g.save();
+    g.lineCap = d.type === 'hl' ? 'round' : 'butt'; g.lineJoin = 'round';
+    if (d.type === 'rect' && G.box && (d.fillA ?? 0) > 0) {
+      g.fillStyle = hexRgba(d.fill || d.color, d.fillA);
+      g.fillRect(G.box[0], G.box[1], G.box[2] - G.box[0], G.box[3] - G.box[1]);
+    }
+    g.strokeStyle = d.type === 'hl' ? hexRgba(d.color, d.alpha ?? 0.25) : d.color;
+    g.lineWidth = +d.width || 1;
+    g.setLineDash(d.type === 'hl' ? [] : (DASHES[d.dash] || []));
+    g.beginPath();
+    for (const [a, b] of G.segs) { g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); }
+    if (G.poly) G.poly.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]));
+    g.stroke();
+    if (d.type === 'rect' && G.box && d.mid) {
+      const ym = (G.box[1] + G.box[3]) / 2;
+      g.setLineDash([6, 5]); g.lineWidth = 1; g.beginPath(); g.moveTo(G.box[0], ym); g.lineTo(G.box[2], ym); g.stroke();
+    }
+    g.setLineDash([]);
+    // text label (lines and rectangles), like TradingView's
+    if (d.text && G.P[0]) {
+      g.font = `${+d.fontSize || 14}px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, Ubuntu, sans-serif`;
+      g.fillStyle = d.textColor || d.color; g.textBaseline = 'bottom';
+      let tx = G.P[0][0] + 4, ty = G.P[0][1] - 4;
+      if (d.type === 'rect' && G.box) { tx = G.box[0] + 6; ty = G.box[1] + (+d.fontSize || 14) + 4; }
+      if (d.type === 'hray') { g.textAlign = 'right'; tx = W - 8; }
+      if (d.type === 'trend' && G.P[1]) { tx = (G.P[0][0] + G.P[1][0]) / 2; ty = (G.P[0][1] + G.P[1][1]) / 2 - 4; g.textAlign = 'center'; }
+      g.fillText(d.text, tx, ty);
+    }
+    // selected / hovered: TradingView's round handles
+    if (state === 'sel' || state === 'hover') {
+      for (const h of G.handles) {
+        g.beginPath(); g.arc(h[0], h[1], state === 'sel' ? 5.5 : 4.5, 0, Math.PI * 2);
+        g.fillStyle = state === 'sel' ? '#ffffff' : 'rgba(255,255,255,.85)'; g.fill();
+        g.lineWidth = 1.5; g.strokeStyle = '#2962FF'; g.stroke();
+      }
+      if (d.type === 'curve' && state === 'sel' && G.handles[2]) {
+        g.setLineDash([3, 3]); g.lineWidth = 1; g.strokeStyle = 'rgba(41,98,255,.55)';
+        g.beginPath(); g.moveTo(G.handles[0][0], G.handles[0][1]); g.lineTo(G.handles[2][0], G.handles[2][1]); g.lineTo(G.handles[1][0], G.handles[1][1]); g.stroke();
+      }
+    }
+    g.restore();
+    return G;
+  }
+
+  /* ---- hit testing (6 px, like TradingView) ---- */
+  function segDist(p, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1], l = dx * dx + dy * dy;
+    let s = l ? ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / l : 0; s = Math.max(0, Math.min(1, s));
+    return Math.hypot(p[0] - a[0] - s * dx, p[1] - a[1] - s * dy);
+  }
+  function drHit(c, x, y, W, H) {
+    const list = drVisible().sort((a, b) => (b.z || 0) - (a.z || 0));
+    const order = DR.sel ? [DR.items[DR.sel], ...list.filter(d => d.id !== DR.sel)].filter(Boolean) : list;
+    for (const d of order) {
+      const G = drGeom(c, d, W, H), p = [x, y];
+      if (d.id === DR.sel) for (let i = 0; i < G.handles.length; i++) if (Math.hypot(x - G.handles[i][0], y - G.handles[i][1]) <= 7) return { d, h: i };
+      const tol = d.type === 'hl' ? Math.max(6, (+d.width || 20) / 2 + 2) : 6;
+      if (G.segs.some(([a, b]) => segDist(p, a, b) <= tol)) return { d, h: -1 };
+      if (G.poly) for (let i = 1; i < G.poly.length; i++) if (segDist(p, G.poly[i - 1], G.poly[i]) <= tol) return { d, h: -1 };
+      if (G.box && (d.fillA ?? 0) > 0 && x >= G.box[0] && x <= G.box[2] && y >= G.box[1] && y <= G.box[3]) return { d, h: -1 };
+    }
+    return null;
+  }
+
+  /* ---- the layer ---- */
+  function drHost() { return indPaneEl(); }
+  function drFrame() {
+    DR.loop = false;
+    if (!drOn() || (!drVisible().length && !DR.tool && !DR.draft)) { if (DR.canvas) { DR.canvas.remove(); DR.canvas = null; } DR.sig = ''; drBarSync(); return; }
+    DR.loop = true; requestAnimationFrame(drFrame);
+    const host = drHost(), c = drCtx();
+    if (!host || !c) return;
+    if (!DR.canvas || !DR.canvas.isConnected || DR.canvas.parentElement !== host) {
+      if (DR.canvas) DR.canvas.remove();
+      DR.canvas = document.createElement('canvas'); DR.canvas.className = 'tvwp-draw';
+      Object.assign(DR.canvas.style, { position: 'absolute', left: '0', top: '0', width: '100%', height: '100%', pointerEvents: 'none', zIndex: '3' });
+      host.appendChild(DR.canvas); DR.sig = '';
+    }
+    const W = host.clientWidth, H = host.clientHeight, dpr = window.devicePixelRatio || 1;
+    const sig = [DR.ver, DR.sel, DR.hover, W, H, dpr, c.ts.barSpacing(), c.ts.indexToCoordinate(c.d.idx[c.d.idx.length - 1]), drPY(c, c.fv), drPY(c, c.fv * 1.01), DR.barsSig, drSym(), DR.draft ? JSON.stringify(DR.draft.pts) : ''].join('|');
+    if (sig === DR.sig) return;
+    DR.sig = sig;
+    const cv = DR.canvas;
+    if (cv.width !== Math.round(W * dpr)) cv.width = Math.round(W * dpr);
+    if (cv.height !== Math.round(H * dpr)) cv.height = Math.round(H * dpr);
+    const g = cv.getContext('2d');
+    g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const list = drVisible().sort((a, b) => (a.z || 0) - (b.z || 0));
+    for (const d of list) { try { drPaint(g, c, d, W, H, d.id === DR.sel ? 'sel' : d.id === DR.hover ? 'hover' : ''); } catch (e) {} }
+    if (DR.draft) try { drPaint(g, c, DR.draft, W, H, 'sel'); } catch (e) {}
+    drBarSync();
+  }
+  function drKick() { DR.ver++; if (!DR.loop) { DR.loop = true; requestAnimationFrame(drFrame); } }
+
+  /* ---- making and editing ---- */
+  const drNewId = () => 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  function drNew(type, pts) {
+    const T = DRAW_TOOLS[type], last = (S.draw.last && S.draw.last[type]) || {};
+    const d = { id: drNewId(), sym: drSym(), type, pts, color: T.color, width: T.width, dash: 'solid', z: Date.now(), upd: Date.now() };
+    if (type === 'rect') { d.fill = T.fill; d.fillA = T.fillA; d.mid = false; d.extL = false; d.extR = false; }
+    if (type === 'trend') { d.extL = false; d.extR = false; }
+    if (type === 'hl') d.alpha = T.alpha;
+    Object.assign(d, last);   // your last style for this tool, like TradingView remembers
+    return d;
+  }
+  function drCommit(d) { d.upd = Date.now(); DR.items[d.id] = d; delete DR.tomb[d.id]; drSave([d]); drKick(); }
+  function drDelete(id) { if (!DR.items[id]) return; delete DR.items[id]; DR.tomb[id] = Date.now(); if (DR.sel === id) DR.sel = null; drSave(null, [id]); drKick(); }
+  function drRemember(d) {
+    const keep = ['color', 'width', 'dash', 'fill', 'fillA', 'mid', 'extL', 'extR', 'alpha', 'textColor', 'fontSize'];
+    S.draw.last = S.draw.last || {}; S.draw.last[d.type] = {};
+    for (const k of keep) if (d[k] !== undefined) S.draw.last[d.type][k] = d[k];
+    save(null);
+  }
+  function drSetTool(type) {
+    DR.tool = type && DRAW_TOOLS[type] ? type : null; DR.draft = null;
+    if (DR.tool) DR.sel = null;
+    drMarkTvButtons(); drToolbarSync(); drKick();
+  }
+
+  /* ---- mouse ---- */
+  function drLocal(e) {
+    const host = drHost(); if (!host) return null;
+    const r = host.getBoundingClientRect();
+    const x = e.clientX - r.left, y = e.clientY - r.top;
+    if (x < 0 || y < 0 || x > r.width || y > r.height) return null;
+    return { x, y, W: r.width, H: r.height, host };
+  }
+  const swallow = e => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); };
+  function drDown(e) {
+    if (!drOn() || e.button !== 0) return;
+    if (e.target.closest && e.target.closest('#tvwp-host, #tvwp-draw-ui')) return;
+    const L = drLocal(e); if (!L) { if (DR.sel && !DR.tool) { DR.sel = null; drKick(); } return; }
+    const c = drCtx(); if (!c) return;
+    if (DR.tool) {
+      swallow(e);
+      const pt = drPt(c, L.x, L.y), T = DRAW_TOOLS[DR.tool];
+      if (DR.draft && DR.draft.placing) {             // second click of click-click drawing
+        DR.draft.placing = false; drFinishDraft(); return;
+      }
+      const d = drNew(DR.tool, T.pts === 1 ? [pt] : T.pts === -1 ? [pt] : [pt, { ...pt }]);
+      if (T.pts === 1) { drCommit(d); DR.sel = d.id; drSetTool(null); return; }
+      DR.draft = d; DR.drag = { mode: 'create', x0: L.x, y0: L.y, moved: false };
+      drKick(); return;
+    }
+    const hit = drHit(c, L.x, L.y, L.W, L.H);
+    if (!hit) { if (DR.sel) { DR.sel = null; drKick(); } return; }
+    swallow(e);
+    DR.sel = hit.d.id;
+    if (hit.d.locked) { drKick(); return; }
+    DR.drag = { mode: hit.h >= 0 ? 'handle' : 'move', h: hit.h, start: drPt(c, L.x, L.y), orig: JSON.parse(JSON.stringify(hit.d.pts)), moved: false, x0: L.x, y0: L.y };
+    drKick();
+  }
+  function drMove(e) {
+    if (!drOn()) return;
+    const c = drCtx();
+    if (DR.drag) {
+      swallow(e);
+      const host = drHost(); if (!host || !c) return;
+      const r = host.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+      if (Math.hypot(x - DR.drag.x0, y - DR.drag.y0) > 3) DR.drag.moved = true;
+      const pt = drPt(c, x, y);
+      if (DR.drag.mode === 'create') {
+        const d = DR.draft; if (!d) return;
+        if (d.type === 'hl') d.pts.push(pt); else d.pts[1] = pt;
+        drKick(); return;
+      }
+      const d = DR.items[DR.sel]; if (!d) return;
+      if (DR.drag.mode === 'move') {
+        const dt = pt.t - DR.drag.start.t, dp = pt.p - DR.drag.start.p;
+        d.pts = DR.drag.orig.map(q => ({ t: q.t + dt, p: q.p + dp }));
+      } else drHandle(d, DR.drag.h, pt, DR.drag.orig);
+      drKick(); return;
+    }
+    if (DR.draft && DR.draft.placing && c) { const L = drLocal(e); if (L) { DR.draft.pts[1] = drPt(c, L.x, L.y); drKick(); } return; }
+    // hover: TradingView shows handles and a pointer over a drawing
+    const L = drLocal(e);
+    const hit = L && c && !DR.tool ? drHit(c, L.x, L.y, L.W, L.H) : null;
+    const id = hit ? hit.d.id : null;
+    if (L) L.host.style.cursor = DR.tool ? 'crosshair' : hit ? (hit.h >= 0 ? 'pointer' : 'move') : '';
+    if (id !== DR.hover) { DR.hover = id; drKick(); }
+  }
+  function drUp(e) {
+    if (!DR.drag) return;
+    swallow(e);
+    const drag = DR.drag; DR.drag = null;
+    if (drag.mode === 'create') {
+      const d = DR.draft; if (!d) return;
+      if (!drag.moved && d.type !== 'hl') { d.placing = true; drKick(); return; }   // click-click: wait for the 2nd click
+      drFinishDraft(); return;
+    }
+    const d = DR.items[DR.sel];
+    if (d && drag.moved) drCommit(d); else drKick();
+  }
+  function drFinishDraft() {
+    const d = DR.draft; DR.draft = null;
+    if (!d) return;
+    delete d.placing;
+    if (d.type === 'curve' && d.pts.length === 2) {
+      const c = drCtx();
+      if (c) { const a = drXY(c, d.pts[0]), b = drXY(c, d.pts[1]); d.pts.push(drPt(c, (a[0] + b[0]) / 2, Math.min(a[1], b[1]) - Math.max(30, Math.abs(b[0] - a[0]) / 4))); }
+    }
+    drCommit(d); DR.sel = d.id; drSetTool(null);
+  }
+  function drHandle(d, h, pt, orig) {
+    if (d.type === 'rect') {
+      // corners 0-3, edge midpoints 4-7 (TradingView's 8 handles)
+      const a = { ...orig[0] }, b = { ...orig[1] };
+      const left = a.t <= b.t ? a : b, right = a.t <= b.t ? b : a, top = a.p >= b.p ? a : b, bot = a.p >= b.p ? b : a;
+      const setL = () => { left.t = pt.t; }, setR = () => { right.t = pt.t; }, setT = () => { top.p = pt.p; }, setB = () => { bot.p = pt.p; };
+      ({ 0: () => { setL(); setT(); }, 1: () => { setR(); setT(); }, 2: () => { setR(); setB(); }, 3: () => { setL(); setB(); }, 4: setT, 5: setR, 6: setB, 7: setL })[h]();
+      d.pts = [a, b];
+    } else if (d.type === 'vline') d.pts = [{ t: pt.t, p: d.pts[0].p }];
+    else { d.pts = orig.map(q => ({ ...q })); d.pts[h] = pt; }
+  }
+  function drKey(e) {
+    if (!drOn()) return;
+    const tag = (e.target && e.target.tagName) || '';
+    if (/INPUT|TEXTAREA|SELECT/.test(tag) || (e.target && e.target.isContentEditable)) return;
+    if (e.key === 'Escape' && (DR.tool || DR.draft || DR.sel)) { swallow(e); DR.draft = null; DR.sel = null; drSetTool(null); return; }
+    if ((e.key === 'Delete' || e.key === 'Backspace') && DR.sel && !DR.drag) { swallow(e); drDelete(DR.sel); return; }
+    // TradingView's tool hotkeys start Wick's version
+    if (S.draw.useTv && e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && TV_TOOL_KEYS[e.key.toLowerCase()]) { swallow(e); drSetTool(TV_TOOL_KEYS[e.key.toLowerCase()]); return; }
+    if (S.draw.useTv && e.altKey && e.shiftKey && !e.ctrlKey && e.key.toLowerCase() === 'r') { swallow(e); drSetTool('rect'); }
+  }
+  // TradingView's own buttons for these tools start Wick's version (so they don't use TradingView's drawing slots)
+  function drTvButton(e) {
+    if (!drOn() || !S.draw.useTv) return;
+    const el = e.target && e.target.closest && e.target.closest('[data-name], [aria-label], [data-tooltip], button');
+    if (!el || el.closest('#tvwp-host, #tvwp-draw-ui')) return;
+    const names = [el.getAttribute('data-tooltip'), el.getAttribute('aria-label'), el.getAttribute('title'), el.getAttribute('data-name')].filter(Boolean);
+    for (const [type, re] of TV_TOOL_MATCH) if (names.some(n => re.test(n.trim()))) {
+      swallow(e);
+      if (e.type === 'click') drSetTool(DR.tool === type ? null : type);
+      return;
+    }
+  }
+  function drMarkTvButtons() {
+    for (const el of document.querySelectorAll('[data-tvwp-tool]')) { el.style.removeProperty('box-shadow'); el.removeAttribute('data-tvwp-tool'); }
+    if (!DR.tool || !S.draw.useTv) return;
+    for (const el of document.querySelectorAll('[data-name], [aria-label], [data-tooltip]')) {
+      if (el.closest('#tvwp-host, #tvwp-draw-ui')) continue;
+      const names = [el.getAttribute('data-tooltip'), el.getAttribute('aria-label'), el.getAttribute('data-name')].filter(Boolean);
+      const m = TV_TOOL_MATCH.find(([type]) => type === DR.tool);
+      if (m && names.some(n => m[1].test(n.trim()))) { el.setAttribute('data-tvwp-tool', '1'); el.style.setProperty('box-shadow', 'inset 0 0 0 2px #2962FF', 'important'); }
+    }
+  }
+  window.addEventListener('pointerdown', e => { drTvButton(e); if (!e.defaultPrevented) drDown(e); }, true);
+  window.addEventListener('mousedown', e => { if (DR.drag || (DR.tool && drLocal(e))) swallow(e); else drTvButton(e); }, true);
+  window.addEventListener('click', drTvButton, true);
+  window.addEventListener('pointermove', drMove, true);
+  window.addEventListener('pointerup', drUp, true);
+  window.addEventListener('keydown', drKey, true);
+
+  /* ---- Wick's drawing toolbar + TradingView-style floating style bar ---- */
+  const DRAW_ICONS = {
+    hray: '<path d="M5 12h15"/><circle cx="5" cy="12" r="2"/>',
+    vline: '<path d="M12 3v18"/>',
+    cross: '<path d="M12 3v18M3 12h18"/>',
+    trend: '<path d="M5 19L19 5"/><circle cx="5" cy="19" r="1.8"/><circle cx="19" cy="5" r="1.8"/>',
+    rect: '<rect x="4" y="6" width="16" height="12" rx="1"/>',
+    curve: '<path d="M4 18C8 4 16 4 20 18"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="18" r="1.6"/>',
+    hl: '<path d="M5 19l4-1 10-10-3-3L6 15z"/><path d="M14 6l3 3"/>'
+  };
+  const SVG = inner => `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${inner}</svg>`;
+  function drBuildUi() {
+    if (DR.ui || !document.body) return;
+    const hostEl = document.createElement('div'); hostEl.id = 'tvwp-draw-ui';
+    Object.assign(hostEl.style, { position: 'fixed', left: '0', top: '0', width: '0', height: '0', zIndex: '2147483000' });
+    const sr = hostEl.attachShadow({ mode: 'open' });
+    sr.innerHTML = `<style>
+      .bar, .sty { position: fixed; display: flex; align-items: center; gap: 2px; padding: 4px; background: #1e222d; border: 1px solid #363a45; border-radius: 6px; box-shadow: 0 2px 12px rgba(0,0,0,.4); font: 12px -apple-system, BlinkMacSystemFont, 'Trebuchet MS', Roboto, Ubuntu, sans-serif; color: #d1d4dc; }
+      .bar[hidden], .sty[hidden] { display: none; }
+      .bar .grip { width: 10px; height: 26px; cursor: grab; display: grid; place-items: center; color: #6a6d78; font-size: 10px; letter-spacing: -1px; }
+      button { all: unset; box-sizing: border-box; height: 28px; min-width: 28px; padding: 0 5px; display: grid; place-items: center; border-radius: 4px; cursor: pointer; color: #d1d4dc; }
+      button:hover { background: #2a2e39; }
+      button.on { background: #2962FF; color: #fff; }
+      .lbl { font-size: 10px; color: #8a8f9c; padding: 0 4px 0 2px; }
+      .sw { width: 16px; height: 16px; border-radius: 3px; border: 1px solid rgba(255,255,255,.25); }
+      .sep { width: 1px; height: 20px; background: #363a45; margin: 0 3px; }
+      input[type=color] { width: 26px; height: 24px; padding: 0; border: none; background: none; cursor: pointer; }
+      input[type=text] { width: 120px; height: 24px; background: #131722; border: 1px solid #363a45; border-radius: 4px; color: #d1d4dc; padding: 0 6px; font: inherit; }
+      select { height: 26px; background: #131722; color: #d1d4dc; border: 1px solid #363a45; border-radius: 4px; font: inherit; }
+    </style>
+    <div class="bar" id="bar"><span class="grip" title="Drag">⋮⋮</span>${Object.keys(DRAW_TOOLS).map(t => `<button data-t="${t}" title="${DRAW_TOOLS[t].name} (Wick, unlimited)">${SVG(DRAW_ICONS[t])}</button>`).join('')}</div>
+    <div class="sty" id="sty" hidden>
+      <input type="color" id="sCol" title="Color">
+      <span class="fillw"><input type="color" id="sFill" title="Fill color"></span>
+      <select id="sW" title="Width"><option value="1">1px</option><option value="2">2px</option><option value="3">3px</option><option value="4">4px</option><option value="10">10px</option><option value="20">20px</option><option value="30">30px</option></select>
+      <select id="sDash" title="Style"><option value="solid">——</option><option value="dashed">- - -</option><option value="dotted">· · ·</option></select>
+      <select id="sA" title="Fill opacity"><option value="0">0%</option><option value="0.1">10%</option><option value="0.2">20%</option><option value="0.3">30%</option><option value="0.5">50%</option><option value="0.8">80%</option></select>
+      <button id="sMid" title="Middle line">½</button><button id="sExtL" title="Extend left">⇤</button><button id="sExtR" title="Extend right">⇥</button>
+      <input type="text" id="sTxt" placeholder="Text" title="Label">
+      <span class="sep"></span>
+      <button id="sLock" title="Lock">🔒</button><button id="sDup" title="Clone">⧉</button><button id="sDel" title="Remove (Del)">🗑</button>
+    </div>`;
+    document.body.appendChild(hostEl);
+    const $s = q => sr.querySelector(q);
+    DR.ui = { hostEl, sr, $: $s };
+    sr.querySelectorAll('#bar button[data-t]').forEach(b => b.onclick = () => drSetTool(DR.tool === b.dataset.t ? null : b.dataset.t));
+    // drag the toolbar
+    $s('.grip').addEventListener('pointerdown', e => {
+      e.preventDefault();
+      const bar = $s('#bar'), r = bar.getBoundingClientRect(), ox = e.clientX - r.left, oy = e.clientY - r.top;
+      const mv = ev => { bar.style.left = Math.max(0, ev.clientX - ox) + 'px'; bar.style.top = Math.max(0, ev.clientY - oy) + 'px'; };
+      const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); S.draw.barPos = [parseInt(bar.style.left), parseInt(bar.style.top)]; save(null); };
+      window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+    });
+    const edit = fn => () => { const d = DR.items[DR.sel]; if (!d) return; fn(d); drRemember(d); drCommit(d); drBarSync(); };
+    $s('#sCol').oninput = edit(d => { d.color = $s('#sCol').value; if (d.type === 'rect' && !d.fillSet) d.fill = d.color; });
+    $s('#sFill').oninput = edit(d => { d.fill = $s('#sFill').value; d.fillSet = true; });
+    $s('#sW').onchange = edit(d => { d.width = +$s('#sW').value; });
+    $s('#sDash').onchange = edit(d => { d.dash = $s('#sDash').value; });
+    $s('#sA').onchange = edit(d => { if (d.type === 'hl') d.alpha = +$s('#sA').value; else d.fillA = +$s('#sA').value; });
+    $s('#sMid').onclick = edit(d => { d.mid = !d.mid; });
+    $s('#sExtL').onclick = edit(d => { d.extL = !d.extL; });
+    $s('#sExtR').onclick = edit(d => { d.extR = !d.extR; });
+    $s('#sTxt').oninput = () => { const d = DR.items[DR.sel]; if (!d) return; d.text = $s('#sTxt').value; drCommit(d); };
+    $s('#sLock').onclick = () => { const d = DR.items[DR.sel]; if (!d) return; d.locked = !d.locked; drCommit(d); drBarSync(); };
+    $s('#sDup').onclick = () => { const d = DR.items[DR.sel]; if (!d) return; const c2 = JSON.parse(JSON.stringify(d)); c2.id = drNewId(); c2.z = Date.now(); c2.locked = false; const c = drCtx(); if (c) c2.pts = c2.pts.map(q => ({ t: q.t + c.step * 3, p: q.p })); drCommit(c2); DR.sel = c2.id; drKick(); };
+    $s('#sDel').onclick = () => { if (DR.sel) drDelete(DR.sel); };
+  }
+  function drToolbarSync() {
+    if (!DR.ui) drBuildUi();
+    if (!DR.ui) return;
+    const bar = DR.ui.$('#bar');
+    bar.hidden = !(drOn() && S.draw.bar && !WICK_HOME && drHost());
+    if (!bar.style.left) { const p = S.draw.barPos; bar.style.left = (p ? p[0] : 60) + 'px'; bar.style.top = (p ? p[1] : 120) + 'px'; }
+    bar.querySelectorAll('button[data-t]').forEach(b => b.classList.toggle('on', b.dataset.t === DR.tool));
+  }
+  let drStyKey = '';
+  function drBarSync() {
+    if (!DR.ui) return;
+    const sty = DR.ui.$('#sty'), d = DR.items[DR.sel];
+    if (!d || !drOn() || DR.drag) { sty.hidden = true; drStyKey = ''; return; }
+    const c = drCtx(), host = drHost(); if (!c || !host) { sty.hidden = true; return; }
+    const r = host.getBoundingClientRect(), G = drGeom(c, d, r.width, r.height);
+    const ys = G.handles.map(h => h[1]).concat(G.P.map(p => p[1])), xs = G.handles.map(h => h[0]).concat(G.P.map(p => p[0]));
+    const top = Math.max(r.top + 4, Math.min(...ys) + r.top - 50), left = Math.min(r.right - 460, Math.max(r.left + 4, (xs.length ? Math.min(...xs) : 0) + r.left));
+    sty.style.top = top + 'px'; sty.style.left = left + 'px';
+    const key = d.id + d.upd;
+    sty.hidden = false;
+    if (key === drStyKey) return;
+    drStyKey = key;
+    const $s = DR.ui.$;
+    $s('#sCol').value = /^#[0-9a-f]{6}$/i.test(d.color) ? d.color : '#2962ff';
+    $s('.fillw').hidden = d.type !== 'rect'; $s('#sFill').value = /^#[0-9a-f]{6}$/i.test(d.fill || '') ? d.fill : $s('#sCol').value;
+    $s('#sW').value = String(d.width); $s('#sDash').hidden = d.type === 'hl'; $s('#sDash').value = d.dash || 'solid';
+    $s('#sA').hidden = !(d.type === 'rect' || d.type === 'hl'); $s('#sA').value = String(d.type === 'hl' ? (d.alpha ?? .25) : (d.fillA ?? 0));
+    $s('#sMid').hidden = d.type !== 'rect'; $s('#sMid').classList.toggle('on', !!d.mid);
+    $s('#sExtL').hidden = $s('#sExtR').hidden = !(d.type === 'rect' || d.type === 'trend');
+    $s('#sExtL').classList.toggle('on', !!d.extL); $s('#sExtR').classList.toggle('on', !!d.extR);
+    $s('#sTxt').hidden = d.type === 'hl' || d.type === 'curve'; if (DR.ui.sr.activeElement !== $s('#sTxt')) $s('#sTxt').value = d.text || '';
+    $s('#sLock').classList.toggle('on', !!d.locked);
+  }
+  function drStart() {
+    if (!document.body) { document.addEventListener('DOMContentLoaded', drStart, { once: true }); return; }
+    drToolbarSync(); drKick();
+  }
+  setInterval(() => {
+    drToolbarSync();
+    if (!drOn()) { if (DR.canvas) { DR.canvas.remove(); DR.canvas = null; } if (DR.tool) drSetTool(null); if (DR.sel) { DR.sel = null; drBarSync(); } return; }
+    if (drVisible().length && !DR.loop) drKick();
+  }, 1500);
+  setTimeout(drStart, 800);
+
+  /* ---- shared with the Wick app (and other tabs) ---- */
+  function drApplyRemote(recs, ids) {
+    let n = 0;
+    for (const r of recs || []) { const cur = DR.items[r.id]; if (DR.tomb[r.id] || (cur && (cur.upd || 0) >= (r.upd || 0))) continue; DR.items[r.id] = r; n++; }
+    for (const id of ids || []) { if (DR.items[id]) { delete DR.items[id]; n++; } DR.tomb[id] = DR.tomb[id] || Date.now(); if (DR.sel === id) DR.sel = null; }
+    if (n) { drSave(); drKick(); }
+  }
+
+  /* =========================================================
    * Win / lose labels on take-profit and stop orders.
    * Some brokers (e.g. Tradovate) turn brackets into plain limit/stop orders,
    * so TradingView stops showing what you'd make or lose. This draws it.
@@ -3857,6 +4363,7 @@
     news: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h13v14a2 2 0 002 2H6a2 2 0 01-2-2V5z"/><path d="M17 9h3v10a2 2 0 01-2 2"/><path d="M8 9h5M8 13h5M8 17h3"/></svg>',
     journal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4h11a3 3 0 013 3v13H8a3 3 0 01-3-3V4z"/><path d="M5 17a3 3 0 013-3h11"/><path d="M9 8h6"/></svg>',
     app: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="14" rx="2.5"/><path d="M8 21h8M12 18v3"/><path d="M8 11l2.5 2.5L16 8"/></svg>',
+    draw: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20L20 4"/><circle cx="4" cy="20" r="2"/><circle cx="20" cy="4" r="2"/><path d="M4 11h7"/></svg>',
     home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7"/><path d="M5 10v10h14V10"/><path d="M10 20v-6h4v6"/></svg>',
     extras: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 00.3 1.8l.1.1a2 2 0 11-2.8 2.8l-.1-.1a1.7 1.7 0 00-1.8-.3 1.7 1.7 0 00-1 1.5V21a2 2 0 11-4 0v-.1a1.7 1.7 0 00-1.1-1.5 1.7 1.7 0 00-1.8.3l-.1.1a2 2 0 11-2.8-2.8l.1-.1a1.7 1.7 0 00.3-1.8 1.7 1.7 0 00-1.5-1H3a2 2 0 110-4h.1a1.7 1.7 0 001.5-1.1 1.7 1.7 0 00-.3-1.8l-.1-.1a2 2 0 112.8-2.8l.1.1a1.7 1.7 0 001.8.3H9a1.7 1.7 0 001-1.5V3a2 2 0 114 0v.1a1.7 1.7 0 001 1.5 1.7 1.7 0 001.8-.3l.1-.1a2 2 0 112.8 2.8l-.1.1a1.7 1.7 0 00-.3 1.8V9a1.7 1.7 0 001.5 1H21a2 2 0 110 4h-.1a1.7 1.7 0 00-1.5 1z"/></svg>'
   };
@@ -3874,6 +4381,7 @@
     prop: ['Prop tracker', 'Your funded-account rules, tracked live.'],
     news: ['News', 'High-impact US economic events, with warnings before they hit.'],
     extras: ['Settings', 'Ads, appearance, shortcuts and info.'],
+    draw: ['Drawings', 'Unlimited drawings on any plan, drawn by Wick.'],
     app: ['Wick app', 'One journal, settings and lockout for Chrome and the TradingView app.']
   };
   // A setting row: title, a one-line summary, the control, and optional details behind an (i).
@@ -3897,7 +4405,7 @@
       <div class="conn"><span class="dot" id="connDot"></span><div><b id="connName">TradingView</b><small id="connText">Checking…</small></div></div>
       <nav class="tabs">
         <div class="ng" data-grp="charts"><button class="grp" type="button">Charts<i>›</i></button><div class="ng-b">
-          ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}</div></div>
+          ${NAV('wall', 'Wallpaper')}${NAV('candles', 'Candles')}${NAV('ind', 'Indicators')}${NAV('draw', 'Drawings')}</div></div>
         <div class="ng" data-grp="trading"><button class="grp" type="button">Trading<i>›</i></button><div class="ng-b">
           ${NAV('risk', 'Discipline')}${NAV('prop', 'Prop tracker')}${NAV('size', 'Position size')}${NAV('trading', 'Brackets')}${NAV('sounds', 'Sounds')}${NAV('news', 'News')}${NAV('stream', 'Streamer')}</div></div>
         <div class="ng" data-grp="journal"><button class="grp" type="button">Journal<i>›</i></button><div class="ng-b">
@@ -4139,6 +4647,21 @@
       <div class="hint">Covers the account panel, money columns in your history tables, and amounts on the chart. Prices and symbols stay visible.</div>
     </section>
 
+    <section data-tab="draw">
+      <div class="card pg">
+        <div class="pg-h">Wick drawings</div>
+        ${item('Wick drawings', 'Show and draw Wick drawings.', '<input type="checkbox" id="dOn">')}
+        <div class="hint" style="padding:2px 14px 10px">TradingView's free plan caps drawings per chart. Wick draws these itself, on its own layer over the chart, so they don't count toward that cap: draw as many as you like. They're pinned to price and time, look like TradingView's, and are shared between Chrome and the TradingView app.</div>
+        ${item("Use TradingView's buttons", "TradingView's Horizontal Ray, Vertical Line, Cross Line, Trend Line, Rectangle, Curve and Highlighter buttons (and their hotkeys) draw Wick's unlimited version.", '<input type="checkbox" id="dUseTv">', 'Turn off to get TradingView\'s own versions of these tools back (they count toward its cap).')}
+        ${item('Show the Wick drawing toolbar', 'A small bar on the chart with the same tools. Drag it by its handle.', '<input type="checkbox" id="dBar">')}
+        <div class="item"><div class="txt"><b>How it works</b><small>Pick a tool, then click (or drag) on the chart. Click a drawing to select it: drag it or its handles, change color, width, style, fill, text, middle line and extend in the bar above it. Del removes it, Esc cancels.</small></div></div>
+      </div>
+      <div class="card pg">
+        <div class="pg-h">Your drawings</div>
+        <div class="item"><div class="txt"><b id="dCount">—</b><small id="dCountSub"></small></div><button class="btn" id="dClearSym">Remove all on this symbol</button></div>
+      </div>
+    </section>
+
     <section data-tab="app">
       <div class="card pg">
         <div class="pg-h">Connection</div>
@@ -4353,7 +4876,7 @@
     root.addEventListener('input', () => requestAnimationFrame(syncDeps));
     setInterval(() => { if (panel.classList.contains('open')) syncDeps(); }, 600);
     // Each page's main on/off switch sits in the title bar, like a window toolbar.
-    const MASTER = { wall: ['wEnabled', 'Show'], candles: ['cEnabled', 'On'], journal: ['rOn', 'Recording'], sounds: ['sEnabled', 'On'], stream: ['xStream', 'On'], risk: ['kOn', 'Lockout'], prop: ['pOn', 'Tracking'], news: ['nOn', 'On'] };
+    const MASTER = { wall: ['wEnabled', 'Show'], candles: ['cEnabled', 'On'], journal: ['rOn', 'Recording'], sounds: ['sEnabled', 'On'], stream: ['xStream', 'On'], risk: ['kOn', 'Lockout'], prop: ['pOn', 'Tracking'], news: ['nOn', 'On'], draw: ['dOn', 'On'] };
     const masterHome = {};
     function placeMaster(t) {
       const slot = $('#hdrCtl');
@@ -4389,6 +4912,7 @@
       placeMaster(t);
       if (t === 'home') renderHome();
       if (t === 'app') renderAppPage();
+      if (t === 'draw') renderDrawPage();
       if (t === 'wall' && typeof renderWallUI === 'function') renderWallUI();
       $('.content').scrollTop = 0;
       syncDeps();
@@ -5762,6 +6286,24 @@
       if (st.dataDir) $('#aData').textContent = 'Trades, videos and settings live on this PC: ' + st.dataDir;
     }
     let lastLay = '';
+    function renderDrawPage() {
+      $('#dOn').checked = !!S.draw.on; $('#dUseTv').checked = !!S.draw.useTv; $('#dBar').checked = !!S.draw.bar;
+      const all = Object.values(DR.items), sym = drSym(), here = all.filter(d => d.sym === sym).length;
+      const syms = new Set(all.map(d => d.sym)).size;
+      $('#dCount').textContent = `${all.length} drawing${all.length === 1 ? '' : 's'}`;
+      $('#dCountSub').textContent = WICK_HOME ? `Across ${syms} symbol${syms === 1 ? '' : 's'}.` : `${here} on ${sym || 'this chart'} · ${syms} symbol${syms === 1 ? '' : 's'} in all`;
+      $('#dClearSym').hidden = WICK_HOME || !here;
+    }
+    $('#dOn').onchange = e => { S.draw.on = e.target.checked; save('draw'); drToolbarSync(); drKick(); };
+    $('#dUseTv').onchange = e => { S.draw.useTv = e.target.checked; save('draw'); drMarkTvButtons(); };
+    $('#dBar').onchange = e => { S.draw.bar = e.target.checked; save('draw'); drToolbarSync(); };
+    $('#dClearSym').onclick = () => {
+      const b = $('#dClearSym');
+      if (b.dataset.sure !== '1') { b.dataset.sure = '1'; b.textContent = 'Click again to remove'; setTimeout(() => { b.dataset.sure = ''; b.textContent = 'Remove all on this symbol'; }, 3000); return; }
+      b.dataset.sure = ''; b.textContent = 'Remove all on this symbol';
+      for (const d of drVisible()) drDelete(d.id);
+      renderDrawPage();
+    };
     buildUI.onAppStatus = () => {
       if (panel.classList.contains('open') && S.ui.tab === 'app') renderAppPage();
       renderStatus();
@@ -5855,6 +6397,8 @@
       if (t === 'sounds') applyMute();
       if (t === 'soundlist') bufferCache.clear();
       if (t === 'ind') startInd();
+      if (t === 'drawings') { drLoad(); drKick(); }
+      if (t === 'draw') { drToolbarSync(); drKick(); }
       buildUI.refresh && buildUI.refresh();
   }
   if (bc) bc.onmessage = e => applyPart(e.data && e.data.type);
@@ -5884,6 +6428,7 @@
         settings: WICK_HOME ? null : shareable(S), settingsAt: WICK_HOME ? 0 : +localStorage.getItem('tvwp_settings_at') || 0, risk: lockInfo() });
       tradeSync();
       bridgeSend({ t: 'wsync' });
+      { const have = {}; for (const d of Object.values(DR.items)) have[d.id] = d.upd || 0; bridgeSend({ t: 'dsync', have, tomb: Object.keys(DR.tomb) }); }
       buildUI.refresh && buildUI.refresh();
     };
     ws.onmessage = e => { bridge.lastMsg = Date.now(); if (typeof e.data !== 'string') return; let m; try { m = JSON.parse(e.data); } catch (err) { return; } onBridge(m).catch(err => console.warn('[Wick] app link', err)); };
@@ -5989,7 +6534,7 @@
     const was = JSON.stringify(cur);
     S = readSettings();
     if (JSON.stringify(S) === was) return;
-    for (const t of ['wall', 'candles', 'extras', 'alloff', 'sounds', 'ind', 'risk', 'journal']) { try { applyPart(t); } catch (e) {} }
+    for (const t of ['wall', 'candles', 'extras', 'alloff', 'sounds', 'ind', 'risk', 'journal', 'draw']) { try { applyPart(t); } catch (e) {} }
   }
   async function tradeSync() {
     const all = (await DB.tradesAll()) || [];
@@ -6045,6 +6590,13 @@
       if ((m.tomb || []).length) applyPart('wall');
       if (buildUI.onWalls) buildUI.onWalls();
     }
+    else if (m.t === 'dsync') {
+      drApplyRemote(m.recs, m.tomb);
+      const want = (m.want || []).map(id => DR.items[id]).filter(Boolean);
+      if (want.length) bridgeSend({ t: 'dput', recs: want });
+    }
+    else if (m.t === 'dput') drApplyRemote(m.recs, null);
+    else if (m.t === 'ddel') drApplyRemote(null, m.ids);
     else if (m.t === 'wnew') { if (m.wall) { bridge.walls.add(m.wall.id); wallFetch(m.wall); } }
     else if (m.t === 'wdel') {
       for (const id of m.ids || []) { bridge.walls.delete(id); try { await DB.del(id, true); } catch (e) {} }

@@ -94,6 +94,7 @@ function startServer({ store, script, homeHtml, hooks, log }) {
   wss.on('connection', attach);
 
   function handle(ws, m) {
+    if (process.env.WICK_DEBUG && m.t !== 'geo') log('msg ' + m.t + ' from ' + (ws.kind || '?'));
     switch (m.t) {
       case 'hello': {
         // The app's own window is the only one that may run app commands.
@@ -172,6 +173,24 @@ function startServer({ store, script, homeHtml, hooks, log }) {
       case 'dock':
         if (m.open && hooks.show) hooks.show();
         break;
+      case 'dsync': {
+        const before = new Set(Object.keys(store.drawTomb));
+        const d = store.diffDrawings(m.have, m.tomb);
+        send(ws, { t: 'dsync', recs: d.recs, want: d.want, tomb: d.tomb });
+        const newly = Object.keys(store.drawTomb).filter(id => !before.has(id));
+        if (newly.length) others(ws, { t: 'ddel', ids: newly });
+        break;
+      }
+      case 'dput': {
+        const changed = store.putDrawings(m.recs);
+        if (changed.length) others(ws, { t: 'dput', recs: changed });
+        break;
+      }
+      case 'ddel': {
+        const ids = store.delDrawings(m.ids);
+        if (ids.length) others(ws, { t: 'ddel', ids });
+        break;
+      }
       case 'wsync':
         send(ws, { t: 'wsync', list: store.wallList(), tomb: Object.keys(store.wallTomb) });
         break;

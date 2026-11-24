@@ -18,6 +18,9 @@ class Store {
     this.risk = this.read('lockout.json', null);
     this.prefs = this.read('app.json', { tvOnStart: false, tvWatch: true, login: true });
     this.timers = {};
+    // Wick drawings: id -> drawing, plus deleted ids
+    this.drawings = this.read('drawings.json', {});
+    this.drawTomb = this.read('drawings-deleted.json', {});
     // the shared wallpaper library: id -> { meta (thumbnail, name, size...), file, mime }
     this.walls = this.read('wallpapers.json', {});
     this.wallTomb = this.read('wallpapers-deleted.json', {});
@@ -45,7 +48,8 @@ class Store {
     for (const k of Object.keys(this.timers)) clearTimeout(this.timers[k]);
     this.write('settings.json', this.settings, true); this.write('trades.json', this.trades, true);
     this.write('deleted.json', this.tomb, true); this.write('app.json', this.prefs, true);
-    this.write('wallpapers.json', this.walls, true); this.write('wallpapers-deleted.json', this.wallTomb, true);
+    this.write('wallpapers.json', this.walls, true);
+    this.write('drawings.json', this.drawings, true); this.write('drawings-deleted.json', this.drawTomb, true); this.write('wallpapers-deleted.json', this.wallTomb, true);
     if (this.risk) this.write('lockout.json', this.risk, true);
   }
 
@@ -108,6 +112,38 @@ class Store {
     if (JSON.stringify(next) === JSON.stringify(cur)) return false;
     this.risk = next; this.write('lockout.json', next);
     return true;
+  }
+
+  /* drawings: newest edit wins; a deletion sticks */
+  putDrawings(recs) {
+    const changed = [];
+    for (const r of recs || []) {
+      if (!r || typeof r.id !== 'string' || this.drawTomb[r.id]) continue;
+      const cur = this.drawings[r.id];
+      if (cur && (cur.upd || 0) >= (r.upd || 0)) continue;
+      this.drawings[r.id] = r; changed.push(r);
+    }
+    if (changed.length) this.write('drawings.json', this.drawings);
+    return changed;
+  }
+  delDrawings(ids) {
+    const out = [];
+    for (const id of ids || []) { if (typeof id !== 'string') continue; this.drawTomb[id] = Date.now(); delete this.drawings[id]; out.push(id); }
+    if (out.length) { this.write('drawings.json', this.drawings); this.write('drawings-deleted.json', this.drawTomb); }
+    return out;
+  }
+  diffDrawings(have, tomb) {
+    have = have && typeof have === 'object' ? have : {};
+    for (const id of tomb || []) if (typeof id === 'string' && !this.drawTomb[id]) { this.drawTomb[id] = Date.now(); delete this.drawings[id]; }
+    const recs = [], want = [], gone = [];
+    for (const [id, r] of Object.entries(this.drawings)) if (!(id in have) || (have[id] || 0) < (r.upd || 0)) recs.push(r);
+    for (const [id, upd] of Object.entries(have)) {
+      if (this.drawTomb[id]) { gone.push(id); continue; }
+      const r = this.drawings[id];
+      if (!r || (r.upd || 0) < (upd || 0)) want.push(id);
+    }
+    this.write('drawings.json', this.drawings); this.write('drawings-deleted.json', this.drawTomb);
+    return { recs, want, tomb: gone };
   }
 
   /* wallpapers */
