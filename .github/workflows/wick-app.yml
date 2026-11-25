@@ -45,3 +45,4 @@ jobs:
             app/dist/latest.yml
           fail_on_unmatched_files: true
           make_latest: true
+          overwrite_files: false
