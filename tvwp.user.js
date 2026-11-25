@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Wick
 // @namespace    tvwp
-// @version      3.28.0
+// @version      3.29.0
 // @description  Wick for TradingView: wallpapers, candle colors, order sounds, trade journal with chart video, daily limits and lockout. Runs only on your device.
 // @match        https://*.tradingview.com/*
 // @run-at       document-start
@@ -14,7 +14,7 @@
 (() => {
   'use strict';
   if (window.__tvwpLoaded) return;
-  const VERSION = '3.28.0';
+  const VERSION = '3.29.0';
   window.__tvwpLoaded = VERSION;
 
   // TradingView treats typed keys as chart shortcuts (a number opens its timeframe box), which
@@ -2063,22 +2063,47 @@
     trend: { name: 'Trend Line', pts: 2, color: '#2962FF', width: 2 },
     rect:  { name: 'Rectangle', pts: 2, color: '#9C27B0', width: 1, fill: '#9C27B0', fillA: 0.2 },
     curve: { name: 'Curve', pts: 3, color: '#2962FF', width: 2 },
-    hl:    { name: 'Highlighter', pts: -1, color: '#F23645', width: 20, alpha: 0.25 }
+    hl:    { name: 'Highlighter', pts: -1, color: '#F23645', width: 20, alpha: 0.25 },
+    long:  { name: 'Long Position', pts: 1, color: '#787B86', width: 1 },
+    short: { name: 'Short Position', pts: 1, color: '#787B86', width: 1 },
+    prange: { name: 'Price Range', pts: 2, color: '#2962FF', width: 1, fill: '#2962FF', fillA: 0.2 },
+    fib:   { name: 'Fib Retracement', pts: 2, color: '#787B86', width: 1 },
+    fibext: { name: 'Trend-Based Fib Extension', pts: 3, clicks: 3, color: '#787B86', width: 1 }
   };
+  // TradingView's Fib levels and colors (the ones switched on by default first)
+  const FIB_LEVELS = [[0, '#787B86', 1], [0.236, '#F23645', 1], [0.382, '#FF9800', 1], [0.5, '#4CAF50', 1], [0.618, '#089981', 1], [0.786, '#00BCD4', 1], [1, '#787B86', 1],
+    [1.618, '#2962FF', 1], [2.618, '#F23645', 1], [3.618, '#9C27B0', 1], [4.236, '#E91E63', 1], [1.272, '#FF9800', 0], [1.414, '#F23645', 0], [2, '#089981', 0],
+    [2.272, '#FF9800', 0], [2.414, '#4CAF50', 0], [3, '#00BCD4', 0], [3.272, '#787B86', 0], [3.414, '#2962FF', 0], [4, '#F23645', 0], [4.272, '#9C27B0', 0],
+    [4.414, '#E91E63', 0], [4.618, '#FF9800', 0], [4.764, '#089981', 0]].map(([v, c, on]) => ({ v, c, on: !!on }));
+  const IS_POS = t => t === 'long' || t === 'short', IS_FIB = t => t === 'fib' || t === 'fibext';
+  // each tool's TradingView default style
+  function drDefaults(type) {
+    const T = DRAW_TOOLS[type], s = { color: T.color, width: T.width, dash: 'solid', lineA: 1 };
+    if (type === 'rect') Object.assign(s, { fill: T.fill, fillA: T.fillA, bg: true, border: true, mid: false, midDash: 'dashed', extL: false, extR: false, textV: 'inside', textH: 'left' });
+    if (type === 'trend') Object.assign(s, { stats: 'hidden', statsPos: 'right', textV: 'top', textH: 'right', fontSize: 12, extL: false, extR: false });
+    if (type === 'hl') s.alpha = T.alpha;
+    if (IS_POS(type)) Object.assign(s, { stopColor: '#F23645', stopA: 0.2, targetColor: '#089981', targetA: 0.2, textColor: '#FFFFFF', textA: 1, fontSize: 12, compact: false, priceLabels: true, statsAlways: false, acct: 50000, lot: 1, risk: 1, riskUnit: '%' });
+    if (type === 'prange') Object.assign(s, { fill: T.fill, fillA: T.fillA, bg: true, labelBg: true, labelColor: '#2962FF', labelA: 1, textColor: '#FFFFFF', textA: 1, fontSize: 12 });
+    if (IS_FIB(type)) Object.assign(s, { levels: FIB_LEVELS.map(x => ({ ...x })), trend: true, trendColor: '#787B86', trendA: 1, trendDash: 'dashed', trendWidth: 1, extL: false, extR: false, bg: true, fillA: 0.15, reverse: false, showPrices: true, showLevels: 'values', labelsH: 'left', labelsV: 'middle', fontSize: 12, oneColor: false });
+    return s;
+  }
   // How TradingView names these tools on its buttons (labels / tooltips / internal names)
   const TV_TOOL_MATCH = [
     ['hray', /^(horizontal ray|LineToolHorzRay)$/i], ['vline', /^(vertical line|LineToolVertLine)$/i],
     ['cross', /^(cross line|LineToolCrossLine)$/i], ['trend', /^(trend line|LineToolTrendLine)$/i],
     ['rect', /^(rectangle|LineToolRectangle)$/i], ['curve', /^(curve|LineToolBezierQuadro)$/i],
-    ['hl', /^(highlighter|LineToolHighlighter)$/i]
+    ['hl', /^(highlighter|LineToolHighlighter)$/i],
+    ['long', /^(long position|LineToolRiskRewardLong)$/i], ['short', /^(short position|LineToolRiskRewardShort)$/i],
+    ['prange', /^(price range|LineToolPriceRange)$/i], ['fib', /^(fib retracement|LineToolFibRetracement)$/i],
+    ['fibext', /^(trend-based fib extension|LineToolTrendBasedFibExtension)$/i]
   ];
   // TradingView's hotkeys for these tools
-  const TV_TOOL_KEYS = { j: 'hray', v: 'vline', c: 'cross', t: 'trend' };
+  const TV_TOOL_KEYS = { j: 'hray', v: 'vline', c: 'cross', t: 'trend', f: 'fib' };
   const DASHES = { solid: [], dashed: [6, 5], dotted: [2, 3] };
 
   const DR = {
     items: {}, tomb: {}, sel: null, hover: null, tool: null, draft: null, drag: null, canvas: null, sig: '', loop: false,
-    bars: null, barsSig: '', step: 60, ver: 0, ui: null
+    bars: null, barsSig: '', step: 60, ver: 0, ui: null, spec: {}
   };
   function drLoad() {
     try { const j = JSON.parse(localStorage.getItem('tvwp_drawings') || '{}'); DR.items = j.items || {}; DR.tomb = j.tomb || {}; } catch (e) {}
@@ -2177,6 +2202,36 @@
       const pts = []; for (let s = 0; s <= 40; s++) pts.push(bez(P[0], ctl, P[1], s / 40));
       g.poly = pts; g.handles = [P[0], P[1], ctl];
     } else if (d.type === 'hl' && P.length) { g.poly = P; g.handles = []; }
+    else if (IS_POS(d.type) && P[2]) {
+      const xa = P[0][0], xb = P[1][0], yE = P[0][1], yT = P[1][1], yS = P[2][1];
+      const L = Math.min(xa, xb), R = Math.max(xa, xb);
+      g.pos = { L, R, yE, yT, yS };
+      g.area = [L, Math.min(yE, yT, yS), R, Math.max(yE, yT, yS)];
+      g.segs.push([[L, yE], [R, yE]]);
+      g.handles = [[xa, yE], [xa, yT], [xa, yS], [xb, yE]];
+    } else if (d.type === 'prange' && P[1]) {
+      const L = Math.min(P[0][0], P[1][0]), R = Math.max(P[0][0], P[1][0]), xm = (L + R) / 2;
+      g.pr = { L, R, xm, ya: P[0][1], yb: P[1][1] };
+      g.area = [L, Math.min(P[0][1], P[1][1]), R, Math.max(P[0][1], P[1][1])];
+      g.segs.push([[L, P[0][1]], [R, P[0][1]]], [[L, P[1][1]], [R, P[1][1]]], [[xm, P[0][1]], [xm, P[1][1]]]);
+      g.handles = [P[0], P[1]];
+    } else if (IS_FIB(d.type) && P[1]) {
+      const ext = d.type === 'fibext';
+      g.trend = ext && P[2] ? [P[0], P[1], P[2]] : [P[0], P[1]];
+      if (d.trend !== false) for (let i = 1; i < g.trend.length; i++) g.segs.push([g.trend[i - 1], g.trend[i]]);
+      g.handles = P.slice(0, ext ? 3 : 2);
+      if (!ext || P[2]) {
+        const pA = d.pts[0].p, pB = d.pts[1].p, pC = ext ? d.pts[2].p : 0;
+        const price = v => ext ? pC + (pB - pA) * v : d.reverse ? pA + (pB - pA) * v : pB + (pA - pB) * v;
+        let x0 = ext ? Math.min(P[1][0], P[2][0]) : Math.min(P[0][0], P[1][0]), x1 = ext ? Math.max(P[1][0], P[2][0]) : Math.max(P[0][0], P[1][0]);
+        if (x1 - x0 < 40) x1 = x0 + 60;
+        const L = d.extL ? -10 : x0, R = d.extR ? W + 10 : x1;
+        const levels = (d.levels || []).filter(l => l.on && isFinite(+l.v)).map(l => { const p = price(+l.v); return { v: +l.v, c: d.oneColor ? d.color : l.c, p, y: drPY(c, p) }; }).sort((a, b) => a.v - b.v);
+        g.fib = { L, R, levels };
+        for (const l of levels) g.segs.push([[L, l.y], [R, l.y]]);
+        if (levels.length && d.bg) g.area = [L, Math.min(...levels.map(l => l.y)), R, Math.max(...levels.map(l => l.y))];
+      }
+    }
     return g;
   }
   // Per-timeframe visibility, like TradingView's Visibility tab
@@ -2212,12 +2267,143 @@
     g.fillStyle = color; g.fillRect(bx, by, w, h);
     g.fillStyle = '#ffffff'; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(text, bx + w / 2, by + h / 2);
   }
+  // tick size and $ per tick of the chart's symbol (broker first, then Wick's futures table)
+  function drSpec() {
+    const sym = String(chartSymbol() || ''), root = symRoot(sym);
+    if (DR.spec[sym]) return DR.spec[sym];
+    DR.spec[sym] = FUTURES[root] ? { tick: FUTURES[root][0], value: FUTURES[root][1], fut: true, from: 'table' } : { tick: 0.01, value: 0.01, fut: false, from: 'default' };
+    tickSpec(sym).then(t => { if (t && t.tick && t.value && t.from === 'broker') { DR.spec[sym] = { tick: t.tick, value: t.value, fut: !!FUTURES[t.root] || DR.spec[sym].fut, from: 'broker' }; DR.ver++; drKick(); } }).catch(() => {});
+    return DR.spec[sym];
+  }
+  const drRound = (p, tick) => tick ? +(Math.round(p / tick) * tick).toFixed(10) : p;
+  const drMoney = v => (+v || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  // Long / Short Position numbers, the way TradingView works them out
+  function drPosCalc(c, d) {
+    const sp = drSpec(), pv = sp.value / sp.tick * (+d.lot || 1), dir = d.type === 'long' ? 1 : -1;
+    const e = d.pts[0].p, tp = d.pts[1].p, sl = d.pts[2].p, tpD = Math.abs(tp - e), slD = Math.abs(e - sl);
+    const riskAmt = d.riskUnit === '%' ? (+d.acct || 0) * (+d.risk || 0) / 100 : (+d.risk || 0);
+    let qty = slD && pv ? riskAmt / (slD * pv) : 0;
+    qty = sp.fut ? Math.floor(qty + 1e-9) : Math.floor(qty * 1000) / 1000;
+    const k = { sp, pv, dir, e, tp, sl, tpD, slD, qty, rr: slD ? tpD / slD : 0, tpAmt: tpD * pv * qty, slAmt: slD * pv * qty, ticksT: Math.round(tpD / sp.tick), ticksS: Math.round(slD / sp.tick), res: '', tIn: null, tOut: null, pOut: null, pnl: 0 };
+    // what price did after the entry: open / closed P&L
+    const B = c.d, t0 = Math.min(d.pts[0].t, d.pts[1].t), t1 = Math.max(d.pts[0].t, d.pts[1].t);
+    for (let i = 0; i < B.t.length; i++) {
+      const bt = B.t[i]; if (bt < t0) continue; if (bt > t1) break;
+      const hi = B.h[i], lo = B.l[i];
+      if (k.tIn == null) { if (lo <= e && hi >= e) k.tIn = bt; else continue; }
+      const hitS = dir > 0 ? lo <= sl : hi >= sl, hitT = dir > 0 ? hi >= tp : lo <= tp;
+      if (hitS) { k.tOut = bt; k.pOut = sl; k.res = 'stop'; break; }
+      if (hitT) { k.tOut = bt; k.pOut = tp; k.res = 'target'; break; }
+      k.tOut = bt; k.pOut = B.c[i];
+    }
+    if (k.tIn != null) { k.res = k.res || 'open'; k.pnl = (k.pOut - e) * dir * pv * qty; }
+    return k;
+  }
+  DR.calc = d => { const c = drCtx(); return c ? drPosCalc(c, d) : null; };   // read by the automated tests
+  function drLabel(g, lines, cx, y, bg, fg, fs, where) {
+    g.font = `${fs}px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, sans-serif`;
+    const lh = fs + 5, w = Math.max(...lines.map(t => g.measureText(t).width)) + 14, h = lines.length * lh + 6;
+    const top = where === 'above' ? y - h - 4 : where === 'below' ? y + 4 : y - h / 2, left = cx - w / 2;
+    if (bg) { g.fillStyle = bg; g.beginPath(); if (g.roundRect) g.roundRect(left, top, w, h, 3); else g.rect(left, top, w, h); g.fill(); }
+    g.fillStyle = fg; g.textAlign = 'center'; g.textBaseline = 'middle';
+    lines.forEach((t, i) => g.fillText(t, cx, top + 3 + lh * i + lh / 2));
+  }
+  function drPaint2(g, c, d, W, H, state, G, lineCol, w) {
+    if (G.pos) {
+      const { L, R, yE, yT, yS } = G.pos, k = drPosCalc(c, d);
+      g.fillStyle = hexRgba(d.targetColor || '#089981', d.targetA ?? .2); g.fillRect(L, Math.min(yE, yT), R - L, Math.abs(yT - yE));
+      g.fillStyle = hexRgba(d.stopColor || '#F23645', d.stopA ?? .2); g.fillRect(L, Math.min(yE, yS), R - L, Math.abs(yS - yE));
+      if (k.tIn != null) {   // the part price already travelled, like TradingView
+        const xi = drIdxToX(c, drTimeToIdx(c, k.tIn)), xo = drIdxToX(c, drTimeToIdx(c, k.tOut)), yo = drPY(c, k.pOut), win = (k.pOut - k.e) * k.dir >= 0;
+        g.fillStyle = hexRgba(win ? (d.targetColor || '#089981') : (d.stopColor || '#F23645'), Math.min(1, (win ? d.targetA ?? .2 : d.stopA ?? .2) + .2));
+        g.fillRect(Math.min(xi, xo), Math.min(yE, yo), Math.abs(xo - xi), Math.abs(yo - yE));
+        g.strokeStyle = lineCol; g.lineWidth = 1; g.setLineDash([4, 4]); g.beginPath(); g.moveTo(xi, yE); g.lineTo(xo, yo); g.stroke(); g.setLineDash([]);
+      }
+      g.strokeStyle = lineCol; g.lineWidth = w; g.beginPath(); g.moveTo(L, yE); g.lineTo(R, yE); g.stroke();
+      if (state || d.statsAlways) {
+        const fs = +d.fontSize || 12, cx = (L + R) / 2, fg = hexRgba(d.textColor || '#FFFFFF', d.textA ?? 1);
+        const pct = v => k.e ? (v / k.e * 100).toFixed(2) : '0.00';
+        const tl = d.compact ? `${drFmt(k.tpD)} (${pct(k.tpD)}%) ${k.ticksT}, ${drMoney(k.tpAmt)}` : `Target: ${drFmt(k.tpD)} (${pct(k.tpD)}%) ${k.ticksT}, Amount: ${drMoney(k.tpAmt)}`;
+        const sl = d.compact ? `${drFmt(k.slD)} (${pct(k.slD)}%) ${k.ticksS}, ${drMoney(k.slAmt)}` : `Stop: ${drFmt(k.slD)} (${pct(k.slD)}%) ${k.ticksS}, Amount: ${drMoney(k.slAmt)}`;
+        const q = k.sp.fut ? String(k.qty) : drFmt(k.qty);
+        const pl = k.res === 'open' ? `Open P&L: ${drMoney(k.pnl)}, ` : k.res ? `Closed P&L: ${drMoney(k.pnl)}, ` : '';
+        const mid = d.compact ? [`${pl}${q}`, drFmt(+k.rr.toFixed(2))] : [`${pl}Qty: ${q}`, `Risk/Reward Ratio: ${drFmt(+k.rr.toFixed(2))}`];
+        const midBg = k.res && k.pnl > 0 ? hexRgba(d.targetColor || '#089981', 1) : k.res && k.pnl < 0 ? hexRgba(d.stopColor || '#F23645', 1) : '#787B86';
+        drLabel(g, [tl], cx, yT, hexRgba(d.targetColor || '#089981', 1), fg, fs, yT < yE ? 'above' : 'below');
+        drLabel(g, [sl], cx, yS, hexRgba(d.stopColor || '#F23645', 1), fg, fs, yS < yE ? 'above' : 'below');
+        drLabel(g, mid, cx, yE, midBg, fg, fs, 'center');
+      }
+      if (state && d.priceLabels !== false) {
+        axisTag(g, drFmt(k.e), W - 2, yE, hexRgba(d.color, 1));
+        axisTag(g, drFmt(k.tp), W - 2, yT, hexRgba(d.targetColor || '#089981', 1));
+        axisTag(g, drFmt(k.sl), W - 2, yS, hexRgba(d.stopColor || '#F23645', 1));
+      }
+      return true;
+    }
+    if (G.pr) {
+      const { L, R, xm, ya, yb } = G.pr;
+      if (d.bg !== false && (d.fillA ?? .2) > 0) { g.fillStyle = hexRgba(d.fill || d.color, d.fillA ?? .2); g.fillRect(L, Math.min(ya, yb), R - L, Math.abs(yb - ya)); }
+      g.strokeStyle = lineCol; g.lineWidth = w; g.setLineDash(DASHES[d.dash] || []);
+      g.beginPath(); g.moveTo(L, ya); g.lineTo(R, ya); g.moveTo(L, yb); g.lineTo(R, yb); g.stroke(); g.setLineDash([]);
+      g.beginPath(); g.moveTo(xm, ya); g.lineTo(xm, yb); g.stroke();
+      if (Math.abs(yb - ya) > 4) arrowHead(g, [xm, ya], [xm, yb], 1);
+      const sp = drSpec(), pa = d.pts[0].p, dp = d.pts[1].p - pa, pct = pa ? dp / pa * 100 : 0;
+      const txt = `${drFmt(dp)} (${pct.toFixed(2)}%) ${Math.round(dp / sp.tick)}`;
+      drLabel(g, [txt], xm, yb, d.labelBg !== false ? hexRgba(d.labelColor || '#2962FF', d.labelA ?? 1) : '', hexRgba(d.textColor || '#FFFFFF', d.textA ?? 1), +d.fontSize || 12, yb < ya ? 'above' : 'below');
+      return true;
+    }
+    if (IS_FIB(d.type)) {
+      const F = G.fib;
+      if (F) {
+        if (d.bg && (d.fillA ?? .15) > 0) for (let i = 1; i < F.levels.length; i++) {
+          const a = F.levels[i - 1], b = F.levels[i];
+          g.fillStyle = hexRgba(b.c, d.fillA ?? .15); g.fillRect(F.L, Math.min(a.y, b.y), F.R - F.L, Math.abs(b.y - a.y));
+        }
+        g.lineWidth = w; g.setLineDash(DASHES[d.dash] || []);
+        for (const l of F.levels) { g.strokeStyle = hexRgba(l.c, d.lineA ?? 1); g.beginPath(); g.moveTo(F.L, l.y); g.lineTo(F.R, l.y); g.stroke(); }
+        g.setLineDash([]);
+        const fs = +d.fontSize || 12;
+        g.font = `${fs}px -apple-system, BlinkMacSystemFont, "Trebuchet MS", Roboto, sans-serif`; g.textBaseline = 'middle';
+        for (const l of F.levels) {
+          const lv = d.showLevels === 'percent' ? `${+(l.v * 100).toFixed(1)}%` : d.showLevels === 'none' ? '' : String(l.v);
+          const txt = lv + (d.showPrices !== false ? `(${drFmt(l.p)})` : '');
+          if (!txt) continue;
+          const H2 = d.labelsH || 'left', V2 = d.labelsV || 'middle';
+          let x, al;
+          if (H2 === 'left') { if (d.extL) { x = 4; al = 'left'; } else { x = F.L - 4; al = 'right'; } }
+          else if (H2 === 'right') { if (d.extR) { x = W - 4; al = 'right'; } else { x = F.R + 4; al = 'left'; } }
+          else { x = (F.L + F.R) / 2; al = 'center'; }
+          g.textAlign = al; g.fillStyle = hexRgba(l.c, 1);
+          g.fillText(txt, x, V2 === 'top' ? l.y - fs * .75 : V2 === 'bottom' ? l.y + fs * .75 : l.y);
+        }
+      }
+      if (d.trend !== false && G.trend) {
+        g.strokeStyle = hexRgba(d.trendColor || '#787B86', d.trendA ?? 1); g.lineWidth = +d.trendWidth || 1; g.setLineDash(DASHES[d.trendDash || 'dashed'] || []);
+        g.beginPath(); G.trend.forEach((p, i) => i ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1])); g.stroke(); g.setLineDash([]);
+      }
+      return true;
+    }
+    return false;
+  }
+  function drDrawHandles(g, d, G, state) {
+    if (state !== 'sel' && state !== 'hover') return;
+    for (const h of G.handles) {
+      g.beginPath(); g.arc(h[0], h[1], state === 'sel' ? 5.5 : 4.5, 0, Math.PI * 2);
+      g.fillStyle = state === 'sel' ? '#ffffff' : 'rgba(255,255,255,.85)'; g.fill();
+      g.lineWidth = 1.5; g.strokeStyle = '#2962FF'; g.stroke();
+    }
+    if (d.type === 'curve' && state === 'sel' && G.handles[2]) {
+      g.setLineDash([3, 3]); g.lineWidth = 1; g.strokeStyle = 'rgba(41,98,255,.55)';
+      g.beginPath(); g.moveTo(G.handles[0][0], G.handles[0][1]); g.lineTo(G.handles[2][0], G.handles[2][1]); g.lineTo(G.handles[1][0], G.handles[1][1]); g.stroke();
+    }
+  }
   function drPaint(g, c, d, W, H, state) {
     const G = drGeom(c, d, W, H);
     const lineCol = d.type === 'hl' ? hexRgba(d.color, d.alpha ?? 0.25) : hexRgba(d.color, d.lineA ?? 1);
     const w = +d.width || 1;
     g.save();
     g.lineCap = d.type === 'hl' ? 'round' : 'butt'; g.lineJoin = 'round';
+    if (drPaint2(g, c, d, W, H, state, G, lineCol, w)) { drDrawHandles(g, d, G, state); g.restore(); return G; }
     if (d.type === 'rect' && G.box && d.bg !== false && (d.fillA ?? 0) > 0) {
       g.fillStyle = hexRgba(d.fill || d.color, d.fillA);
       g.fillRect(G.box[0], G.box[1], G.box[2] - G.box[0], G.box[3] - G.box[1]);
@@ -2295,17 +2481,7 @@
       rows.forEach((r, i) => g.fillText(r, bx + 8, by + 5 + i * 17));
     }
     // selected / hovered: TradingView's round handles
-    if (state === 'sel' || state === 'hover') {
-      for (const h of G.handles) {
-        g.beginPath(); g.arc(h[0], h[1], state === 'sel' ? 5.5 : 4.5, 0, Math.PI * 2);
-        g.fillStyle = state === 'sel' ? '#ffffff' : 'rgba(255,255,255,.85)'; g.fill();
-        g.lineWidth = 1.5; g.strokeStyle = '#2962FF'; g.stroke();
-      }
-      if (d.type === 'curve' && state === 'sel' && G.handles[2]) {
-        g.setLineDash([3, 3]); g.lineWidth = 1; g.strokeStyle = 'rgba(41,98,255,.55)';
-        g.beginPath(); g.moveTo(G.handles[0][0], G.handles[0][1]); g.lineTo(G.handles[2][0], G.handles[2][1]); g.lineTo(G.handles[1][0], G.handles[1][1]); g.stroke();
-      }
-    }
+    drDrawHandles(g, d, G, state);
     g.restore();
     return G;
   }
@@ -2326,6 +2502,7 @@
       if (G.segs.some(([a, b]) => segDist(p, a, b) <= tol)) return { d, h: -1 };
       if (G.poly) for (let i = 1; i < G.poly.length; i++) if (segDist(p, G.poly[i - 1], G.poly[i]) <= tol) return { d, h: -1 };
       if (G.box && (d.fillA ?? 0) > 0 && x >= G.box[0] && x <= G.box[2] && y >= G.box[1] && y <= G.box[3]) return { d, h: -1 };
+      if (G.area && x >= G.area[0] && x <= G.area[2] && y >= G.area[1] && y <= G.area[3]) return { d, h: -1 };
     }
     return null;
   }
@@ -2364,12 +2541,8 @@
   const drNewId = () => 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   function drNew(type, pts) {
     const T = DRAW_TOOLS[type], last = (S.draw.last && S.draw.last[type]) || {};
-    const d = { id: drNewId(), sym: drSym(), type, pts, color: T.color, width: T.width, dash: 'solid', z: Date.now(), upd: Date.now() };
-    if (type === 'rect') { d.fill = T.fill; d.fillA = T.fillA; d.bg = true; d.border = true; d.mid = false; d.midDash = 'dashed'; d.extL = false; d.extR = false; d.textV = 'inside'; d.textH = 'left'; }
-    if (type === 'trend') { d.stats = 'hidden'; d.statsPos = 'right'; d.textV = 'top'; d.textH = 'right'; d.fontSize = 12; }
-    if (type === 'trend') { d.extL = false; d.extR = false; }
-    if (type === 'hl') d.alpha = T.alpha;
-    Object.assign(d, last);   // your last style for this tool, like TradingView remembers
+    const d = { id: drNewId(), sym: drSym(), type, pts, z: Date.now(), upd: Date.now(), ...drDefaults(type) };
+    Object.assign(d, JSON.parse(JSON.stringify(last)));   // your last style for this tool, like TradingView remembers
     return d;
   }
   function drCommit(d) { d.upd = Date.now(); DR.items[d.id] = d; delete DR.tomb[d.id]; drSave([d]); drKick(); }
@@ -2377,6 +2550,16 @@
   function drRemember(d) {
     S.draw.last = S.draw.last || {}; S.draw.last[d.type] = pickStyle(d);
     save(null);
+  }
+  // a new Long / Short Position: one click, TradingView-sized box with the target twice the stop
+  function drPosPts(c, x, y, type) {
+    const sp = drSpec(), up = type === 'long' ? -1 : 1, e = drPt(c, x, y);
+    e.p = drRound(e.p, sp.tick);
+    let tgt = drRound(drYP(c, y + up * 80), sp.tick), stp = drRound(drYP(c, y - up * 40), sp.tick);
+    if (tgt === e.p) tgt = e.p - up * sp.tick * 2;
+    if (stp === e.p) stp = e.p + up * sp.tick;
+    const t1 = drIdxToTime(c, drXToIdx(c, x) + Math.max(20, 120 / (c.ts.barSpacing() || 1)));
+    return [e, { t: t1, p: tgt }, { t: t1, p: stp }];
   }
   function drSetTool(type) {
     DR.tool = type && DRAW_TOOLS[type] ? type : null; DR.draft = null;
@@ -2401,10 +2584,12 @@
     if (DR.tool) {
       swallow(e);
       const pt = drPt(c, L.x, L.y), T = DRAW_TOOLS[DR.tool];
-      if (DR.draft && DR.draft.placing) {             // second click of click-click drawing
+      if (DR.draft && DR.draft.placing) {             // next click of click-click drawing
+        if (DRAW_TOOLS[DR.draft.type].clicks === 3 && DR.draft.pts.length < 3) { DR.draft.pts.push({ ...pt }); drKick(); return; }
         DR.draft.placing = false; drFinishDraft(); return;
       }
       const d = drNew(DR.tool, T.pts === 1 ? [pt] : T.pts === -1 ? [pt] : [pt, { ...pt }]);
+      if (IS_POS(DR.tool)) d.pts = drPosPts(c, L.x, L.y, DR.tool);
       if (T.pts === 1) { drCommit(d); DR.sel = d.id; drSetTool(null); return; }
       DR.draft = d; DR.drag = { mode: 'create', x0: L.x, y0: L.y, moved: false };
       drKick(); return;
@@ -2438,7 +2623,7 @@
       } else drHandle(d, DR.drag.h, pt, DR.drag.orig);
       drKick(); return;
     }
-    if (DR.draft && DR.draft.placing && c) { const L = drLocal(e); if (L) { DR.draft.pts[1] = drPt(c, L.x, L.y); drKick(); } return; }
+    if (DR.draft && DR.draft.placing && c) { const L = drLocal(e); if (L) { DR.draft.pts[DR.draft.pts.length - 1] = drPt(c, L.x, L.y); drKick(); } return; }
     // hover: TradingView shows handles and a pointer over a drawing
     const L = drLocal(e);
     const hit = L && c && !DR.tool ? drHit(c, L.x, L.y, L.W, L.H) : null;
@@ -2453,6 +2638,7 @@
     if (drag.mode === 'create') {
       const d = DR.draft; if (!d) return;
       if (!drag.moved && d.type !== 'hl') { d.placing = true; drKick(); return; }   // click-click: wait for the 2nd click
+      if (DRAW_TOOLS[d.type].clicks === 3 && d.pts.length < 3) { d.pts.push({ ...d.pts[1] }); d.placing = true; drKick(); return; }   // 3rd point next
       drFinishDraft(); return;
     }
     const d = DR.items[DR.sel];
@@ -2476,6 +2662,14 @@
       const setL = () => { left.t = pt.t; }, setR = () => { right.t = pt.t; }, setT = () => { top.p = pt.p; }, setB = () => { bot.p = pt.p; };
       ({ 0: () => { setL(); setT(); }, 1: () => { setR(); setT(); }, 2: () => { setR(); setB(); }, 3: () => { setL(); setB(); }, 4: setT, 5: setR, 6: setB, 7: setL })[h]();
       d.pts = [a, b];
+    } else if (IS_POS(d.type)) {
+      // entry (moves start + entry price), target, stop, right edge — like TradingView
+      const tk = drSpec().tick, q = orig.map(x => ({ ...x }));
+      if (h === 0) q[0] = { t: pt.t, p: drRound(pt.p, tk) };
+      else if (h === 1) q[1].p = drRound(pt.p, tk);
+      else if (h === 2) q[2].p = drRound(pt.p, tk);
+      else if (h === 3) { q[1].t = pt.t; q[2].t = pt.t; }
+      d.pts = q;
     } else if (d.type === 'vline') d.pts = [{ t: pt.t, p: d.pts[0].p }];
     else { d.pts = orig.map(q => ({ ...q })); d.pts[h] = pt; }
   }
@@ -2521,7 +2715,7 @@
     if (!drOn() || DR.tool) return;
     const L = drLocal(e), c = drCtx(); if (!L || !c) return;
     const hit = drHit(c, L.x, L.y, L.W, L.H); if (!hit) return;
-    swallow(e); DR.sel = hit.d.id; drKick(); drBarSync(true); drSettings('style');
+    swallow(e); DR.sel = hit.d.id; drKick(); drBarSync(true); drSettings();
   }, true);
 
   /* ---- Wick's drawing toolbar, and TradingView's floating toolbar + Settings dialog for the selected drawing ---- */
@@ -2532,7 +2726,12 @@
     trend: '<path d="M5 19L19 5"/><circle cx="5" cy="19" r="1.8"/><circle cx="19" cy="5" r="1.8"/>',
     rect: '<rect x="4" y="6" width="16" height="12" rx="1"/>',
     curve: '<path d="M4 18C8 4 16 4 20 18"/><circle cx="4" cy="18" r="1.6"/><circle cx="20" cy="18" r="1.6"/>',
-    hl: '<path d="M5 19l4-1 10-10-3-3L6 15z"/><path d="M14 6l3 3"/>'
+    hl: '<path d="M5 19l4-1 10-10-3-3L6 15z"/><path d="M14 6l3 3"/>',
+    long: '<rect x="5" y="4" width="14" height="8"/><rect x="5" y="12" width="14" height="5" stroke-dasharray="2 2"/><path d="M3 12h18"/>',
+    short: '<rect x="5" y="7" width="14" height="5" stroke-dasharray="2 2"/><rect x="5" y="12" width="14" height="8"/><path d="M3 12h18"/>',
+    prange: '<path d="M6 4h12M6 20h12M12 5v14M9 16l3 3 3-3"/>',
+    fib: '<path d="M4 5h16M4 9h16M4 12h16M4 15.5h16M4 19h16"/><path d="M5 19L19 5" stroke-dasharray="2 2"/>',
+    fibext: '<path d="M3 19l5-10 4 6" stroke-dasharray="2 2"/><path d="M12 5h9M12 9h9M12 13h9M12 17h9"/>'
   };
   const UI_ICONS = {
     tpl: '<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/><path d="M17 4v6M14 7h6"/>',
@@ -2549,9 +2748,15 @@
   const PAL_GRAY = ['#FFFFFF', '#D1D4DC', '#B2B5BE', '#9598A1', '#787B86', '#5D606B', '#434651', '#2A2E39', '#131722', '#000000'];
   const mixHex = (hex, to, k) => { const a = parseInt(hex.slice(1), 16), b = parseInt(to.slice(1), 16); const ch = s => Math.round(((a >> s) & 255) * (1 - k) + ((b >> s) & 255) * k); return '#' + [16, 8, 0].map(s => ch(s).toString(16).padStart(2, '0')).join('').toUpperCase(); };
   const PALETTE = [PAL_GRAY, PAL_BASE.map(h => mixHex(h, '#FFFFFF', .8)), PAL_BASE.map(h => mixHex(h, '#FFFFFF', .6)), PAL_BASE.map(h => mixHex(h, '#FFFFFF', .4)), PAL_BASE.map(h => mixHex(h, '#FFFFFF', .2)), PAL_BASE, PAL_BASE.map(h => mixHex(h, '#000000', .25)), PAL_BASE.map(h => mixHex(h, '#000000', .5))];
-  const TOOL_TITLE = { hray: 'Horizontal Ray', vline: 'Vertical Line', cross: 'Cross Line', trend: 'Trendline', rect: 'Rectangle', curve: 'Curve', hl: 'Highlighter' };
+  const TOOL_TITLE = { hray: 'Horizontal Ray', vline: 'Vertical Line', cross: 'Cross Line', trend: 'Trendline', rect: 'Rectangle', curve: 'Curve', hl: 'Highlighter', long: 'Long Position', short: 'Short Position', prange: 'Price Range', fib: 'Fib Retracement', fibext: 'Trend-Based Fib Extension' };
   // the style fields of each tool (used by templates, "remember my last style" and Cancel)
-  const STYLE_KEYS = ['color', 'lineA', 'width', 'dash', 'fill', 'fillA', 'bg', 'border', 'mid', 'midColor', 'midA', 'midDash', 'midWidth', 'extL', 'extR', 'alpha', 'textColor', 'textA', 'fontSize', 'bold', 'italic', 'textH', 'textV', 'leftEnd', 'rightEnd', 'midPoint', 'priceLabels', 'priceLabel', 'timeLabel', 'stats', 'statsPos', 'statsAlways', 'vis'];
+  const STYLE_KEYS = ['color', 'lineA', 'width', 'dash', 'fill', 'fillA', 'bg', 'border', 'mid', 'midColor', 'midA', 'midDash', 'midWidth', 'extL', 'extR', 'alpha', 'textColor', 'textA', 'fontSize', 'bold', 'italic', 'textH', 'textV', 'leftEnd', 'rightEnd', 'midPoint', 'priceLabels', 'priceLabel', 'timeLabel', 'stats', 'statsPos', 'statsAlways', 'vis',
+    'stopColor', 'stopA', 'targetColor', 'targetA', 'compact', 'acct', 'lot', 'risk', 'riskUnit', 'labelBg', 'labelColor', 'labelA',
+    'levels', 'trend', 'trendColor', 'trendA', 'trendDash', 'trendWidth', 'reverse', 'showPrices', 'showLevels', 'labelsH', 'labelsV', 'oneColor'];
+  // TradingView's Settings tabs for each tool
+  const DR_TABS = t => IS_POS(t) ? [['inputs', 'Inputs'], ['style', 'Style'], ['vis', 'Visibility']]
+    : (IS_FIB(t) || t === 'prange') ? [['style', 'Style'], ['coords', 'Coordinates'], ['vis', 'Visibility']]
+    : [['style', 'Style'], ['text', 'Text'], ['coords', 'Coordinates'], ['vis', 'Visibility']];
   const pickStyle = d => { const o = {}; for (const k of STYLE_KEYS) if (d[k] !== undefined) o[k] = JSON.parse(JSON.stringify(d[k])); return o; };
 
   function drBuildUi() {
@@ -2613,6 +2818,10 @@
       .vis { display: grid; grid-template-columns: 22px 80px 58px 10px 58px; gap: 8px; align-items: center; min-height: 40px; }
       .vis input[type=number] { width: 58px; padding: 0 6px; }
       .ep { display: inline-flex; border: 1px solid #4a4a4a; border-radius: 6px; }
+      .fibgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 16px; margin: 8px 0 6px; }
+      .lv { display: flex; align-items: center; gap: 6px; }
+      .lv input[type=text] { width: 76px; height: 32px; }
+      .lv .sw { height: 32px; padding: 0 5px; }
     </style>
     <div class="bar" id="bar"><span class="grip" title="Drag">${SVG('<circle cx="9" cy="7" r="1"/><circle cx="15" cy="7" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="17" r="1"/><circle cx="15" cy="17" r="1"/>', 14)}</span>${Object.keys(DRAW_TOOLS).map(t => `<button data-t="${t}" title="${DRAW_TOOLS[t].name} (Wick, unlimited)">${SVG(DRAW_ICONS[t])}</button>`).join('')}</div>
     <div class="ftb" id="ftb" hidden>
@@ -2646,12 +2855,12 @@
     dragBy($s('#fGrip'), $s('#ftb'), () => { DR.ftbMoved = [parseInt($s('#ftb').style.left), parseInt($s('#ftb').style.top)]; });
     const sel = () => DR.items[DR.sel];
     const edit = fn => { const d = sel(); if (!d) return; fn(d); drRemember(d); drCommit(d); drBarSync(true); };
-    $s('#fLine').onclick = e => drColorPop(e.currentTarget, () => [sel().color, sel().type === 'hl' ? (sel().alpha ?? .25) : (sel().lineA ?? 1)], (c, a) => edit(d => { d.color = c; if (d.type === 'hl') d.alpha = a; else d.lineA = a; }));
+    $s('#fLine').onclick = e => drColorPop(e.currentTarget, () => [sel().color, sel().type === 'hl' ? (sel().alpha ?? .25) : (sel().lineA ?? 1)], (c, a) => edit(d => { d.color = c; if (d.type === 'hl') d.alpha = a; else d.lineA = a; if (IS_FIB(d.type)) d.oneColor = true; }));
     $s('#fFill').onclick = e => drColorPop(e.currentTarget, () => [sel().fill || sel().color, sel().fillA ?? .2], (c, a) => edit(d => { d.fill = c; d.fillA = a; d.bg = true; }));
-    $s('#fText').onclick = e => drColorPop(e.currentTarget, () => [sel().textColor || sel().color, sel().textA ?? 1], (c, a) => edit(d => { d.textColor = c; d.textA = a; if (!d.text) { drSettings('text'); } }));
+    $s('#fText').onclick = e => drColorPop(e.currentTarget, () => [sel().textColor || sel().color, sel().textA ?? 1], (c, a) => edit(d => { d.textColor = c; d.textA = a; if (!d.text && DR_TABS(d.type).some(t => t[0] === 'text')) { drSettings('text'); } }));
     $s('#fW').onclick = e => drMenu(e.currentTarget, [1, 2, 3, 4].map(w => [`<span style="display:inline-block;width:30px;border-top:${w}px solid #dbdbdb;margin-right:10px;vertical-align:middle"></span>${w}px`, () => edit(d => { d.width = w; })]));
     $s('#fDash').onclick = e => drMenu(e.currentTarget, [['solid', 'Line'], ['dashed', 'Dashed line'], ['dotted', 'Dotted line']].map(([v, n]) => [`<span style="display:inline-block;width:30px;border-top:2px ${v} #dbdbdb;margin-right:10px;vertical-align:middle"></span>${n}`, () => edit(d => { d.dash = v; })]));
-    $s('#fSet').onclick = () => drSettings('style');
+    $s('#fSet').onclick = () => drSettings();
     $s('#fLock').onclick = () => edit(d => { d.locked = !d.locked; });
     $s('#fDel').onclick = () => { if (DR.sel) drDelete(DR.sel); };
     $s('#fTpl').onclick = e => drTemplateMenu(e.currentTarget, sel(), st => edit(d => Object.assign(d, st)));
@@ -2704,7 +2913,7 @@
         const go = () => { const n = inp.value.trim(); if (!n) return; S.draw.templates = S.draw.templates || {}; const arr = (S.draw.templates[d.type] = (S.draw.templates[d.type] || []).filter(t => t.name !== n)); arr.push({ name: n, style: pickStyle(d) }); save('draw'); pop.hidden = true; };
         pop.querySelector('#tSave').onclick = go; inp.onkeydown = e => { e.stopPropagation(); if (e.key === 'Enter') go(); };
       }],
-      ['Apply default drawing template', () => { const T = DRAW_TOOLS[d.type]; const base = { color: T.color, width: T.width, dash: 'solid', lineA: 1 }; if (d.type === 'rect') Object.assign(base, { fill: T.fill, fillA: T.fillA, bg: true, mid: false, extL: false, extR: false }); if (d.type === 'hl') base.alpha = T.alpha; applyStyle(base); }]
+      ['Apply default drawing template', () => applyStyle(drDefaults(d.type))]
     ];
     if (list.length) items.push('-');
     for (const t of list) items.push([t.name, () => applyStyle(JSON.parse(JSON.stringify(t.style)))]);
@@ -2717,14 +2926,39 @@
     const d0 = DR.items[DR.sel]; if (!d0 || !DR.ui) return;
     const orig = JSON.parse(JSON.stringify(d0));      // Cancel puts this back
     const dlg = DR.ui.$('#dlg'), $d = q => dlg.querySelector(q);
-    let cur = tab || 'style';
-    const d = DR.items[DR.sel];
+    const d = DR.items[DR.sel], TABS = DR_TABS(d.type);
+    let cur = TABS.some(t => t[0] === tab) ? tab : TABS[0][0];
     const live = () => { d.upd = Date.now(); DR.items[d.id] = d; drKick(); };
     const sw = (key, aKey, defA = 1) => `<span class="sw" data-c="${key}" data-a="${aKey}" data-da="${defA}"><i><b style="background:${hexRgba(d[key] || d.color, d[aKey] ?? defA)}"></b></i></span>`;
     const lineSw = () => `<span class="sw" data-c="color" data-a="${d.type === 'hl' ? 'alpha' : 'lineA'}" data-da="${d.type === 'hl' ? .25 : 1}"><i><b style="background:${hexRgba(d.color, d.type === 'hl' ? (d.alpha ?? .25) : (d.lineA ?? 1))}"></b></i>${d.type === 'hl' ? '' : `<span class="ln" style="border-top-width:${Math.min(4, d.width || 1)}px;border-top-style:${d.dash || 'solid'}"></span>`}</span>`;
     const ext = () => `<select id="xExt"><option value="none">Don't extend</option><option value="left">Extend left</option><option value="right">Extend right</option><option value="both">Extend both</option></select>`;
+    const fsSel = () => `<select id="xFs" style="min-width:90px">${[10, 11, 12, 14, 16, 20, 24, 28, 32, 40].map(f => `<option value="${f}">${f}</option>`).join('')}</select>`;
     const styleTab = () => {
       const t = d.type;
+      if (IS_POS(t)) return `
+        <div class="row"><span class="lb">Lines</span>${lineSw()}</div>
+        <div class="row"><span class="lb">Stop color</span>${sw('stopColor', 'stopA', .2)}</div>
+        <div class="row"><span class="lb">Target color</span>${sw('targetColor', 'targetA', .2)}</div>
+        <div class="row"><span class="lb">Text</span>${sw('textColor', 'textA', 1)}${fsSel()}</div>
+        <div class="row"><label style="width:auto"><input type="checkbox" id="xCompact" ${d.compact ? 'checked' : ''}> Compact stats mode</label></div>
+        <div class="row"><label style="width:auto"><input type="checkbox" id="xPL" ${d.priceLabels !== false ? 'checked' : ''}> Show price labels</label></div>
+        <div class="row"><label style="width:auto"><input type="checkbox" id="xSA" ${d.statsAlways ? 'checked' : ''}> Always show stats</label></div>`;
+      if (t === 'prange') return `
+        <div class="row"><span class="lb">Line</span>${lineSw()}</div>
+        <div class="row"><label><input type="checkbox" id="xBg" ${d.bg !== false ? 'checked' : ''}> Background</label>${sw('fill', 'fillA', .2)}</div>
+        <div class="row"><label><input type="checkbox" id="xLB" ${d.labelBg !== false ? 'checked' : ''}> Label background</label>${sw('labelColor', 'labelA', 1)}</div>
+        <div class="row"><span class="lb">Text</span>${sw('textColor', 'textA', 1)}${fsSel()}</div>`;
+      if (IS_FIB(t)) return `
+        <div class="row"><label><input type="checkbox" id="xTrend" ${d.trend !== false ? 'checked' : ''}> Trend line</label><span class="sw" data-c="trendColor" data-a="trendA" data-da="1"><i><b style="background:${hexRgba(d.trendColor || '#787B86', d.trendA ?? 1)}"></b></i><span class="ln" style="border-top-width:${Math.min(4, d.trendWidth || 1)}px;border-top-style:${d.trendDash || 'dashed'}"></span></span></div>
+        <div class="row"><label><input type="checkbox" id="xOne" ${d.oneColor ? 'checked' : ''}> Levels line</label>${lineSw()}<span style="font-size:12px;color:#8c8c8c">ticked = one color</span></div>
+        <div class="row"><span class="lb">Extend lines</span>${ext()}</div>
+        <div class="fibgrid">${(d.levels || []).map((l, i) => `<div class="lv"><input type="checkbox" data-lon="${i}" ${l.on ? 'checked' : ''}><input type="text" data-lval="${i}" value="${l.v}"><span class="sw" data-lc="${i}"><i><b style="background:${l.c}"></b></i></span></div>`).join('')}</div>
+        <div class="row"><label><input type="checkbox" id="xBg" ${d.bg ? 'checked' : ''}> Background</label><input type="range" id="xBgA" min="0" max="100" value="${Math.round((d.fillA ?? .15) * 100)}" style="flex:1;accent-color:#2962FF"><span id="xBgAv" style="width:36px">${Math.round((d.fillA ?? .15) * 100)}%</span></div>
+        ${t === 'fib' ? `<div class="row"><label style="width:auto"><input type="checkbox" id="xRev" ${d.reverse ? 'checked' : ''}> Reverse</label></div>` : ''}
+        <div class="row"><label style="width:auto"><input type="checkbox" id="xPrices" ${d.showPrices !== false ? 'checked' : ''}> Prices</label></div>
+        <div class="row"><label><input type="checkbox" id="xLevels" ${d.showLevels !== 'none' ? 'checked' : ''}> Levels</label><select id="xLvMode"><option value="values">Values</option><option value="percent">Percents</option></select></div>
+        <div class="row"><span class="lb">Labels</span><select id="xLH" style="min-width:90px"><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select><select id="xLV" style="min-width:90px"><option value="top">Top</option><option value="middle">Middle</option><option value="bottom">Bottom</option></select></div>
+        <div class="row"><span class="lb">Font size</span>${fsSel()}</div>`;
       if (t === 'rect') return `
         <div class="row"><span class="lb">Extend</span>${ext()}</div>
         <div class="row"><label><input type="checkbox" id="xBorder" ${d.border !== false ? 'checked' : ''}> Border</label>${lineSw()}</div>
@@ -2755,36 +2989,72 @@
       const dt = new Date(q.t * 1000), loc = new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
       return `<div class="coord"><span>#${i + 1}</span><input type="text" data-cp="${i}" value="${drFmt(q.p).replace(/,/g, '')}" title="Price"><input type="datetime-local" data-ct="${i}" value="${loc}" title="Time" style="color-scheme:dark;background:#1f1f1f;color:#dbdbdb;border:1px solid #4a4a4a;border-radius:6px;height:36px;padding:0 6px"></div>`;
     }).join('') || '<div class="row" style="color:#8c8c8c">Move the highlighter on the chart.</div>';
+    const spec = drSpec();
+    const inputsTab = () => `
+      <div class="row"><span class="lb">Account size</span><input type="number" id="xAcct" step="any" value="${d.acct ?? 50000}" style="width:150px"></div>
+      <div class="row"><span class="lb">Lot size</span><input type="number" id="xLot" step="any" value="${d.lot ?? 1}" style="width:150px"></div>
+      <div class="row"><span class="lb">Risk</span><input type="number" id="xRisk" step="any" value="${d.risk ?? 1}" style="width:110px"><select id="xRU" style="min-width:80px"><option value="%">%</option><option value="$">USD</option></select></div>
+      <div class="row"><span class="lb">Entry price</span><input type="text" id="xEP" style="width:150px"></div>
+      <div class="row"><span class="lb">Profit level</span><input type="number" id="xTT" step="1" title="Ticks" style="width:90px"><span style="color:#8c8c8c">Price</span><input type="text" id="xTP" style="width:110px"></div>
+      <div class="row"><span class="lb">Stop level</span><input type="number" id="xST" step="1" title="Ticks" style="width:90px"><span style="color:#8c8c8c">Price</span><input type="text" id="xSP" style="width:110px"></div>
+      <div class="row" style="color:#8c8c8c;font-size:12px;min-height:28px">Tick ${spec.tick} · $${drFmt(spec.value)} per tick${spec.from === 'default' ? ' (symbol not known — set Lot size to scale)' : ''}</div>`;
     const visTab = () => VIS_GROUPS.map(([k, n, lo, hi]) => { const v = (d.vis && d.vis[k]) || {}; return `<div class="vis"><input type="checkbox" data-vk="${k}" ${v.on !== false ? 'checked' : ''}><span>${n}</span><input type="number" data-vlo="${k}" min="${lo}" max="${hi}" value="${v.lo || lo}"><span>–</span><input type="number" data-vhi="${k}" min="${lo}" max="${hi}" value="${v.hi || hi}"></div>`; }).join('');
     const render = () => {
       dlg.innerHTML = `<div class="dh" id="dHead"><span>${TOOL_TITLE[d.type]}</span>${SVG(UI_ICONS.edit, 16)}<span class="sp"></span><button id="dX" title="Close">${SVG(UI_ICONS.close)}</button></div>
-        <div class="tabs">${[['style', 'Style'], ['text', 'Text'], ['coords', 'Coordinates'], ['vis', 'Visibility']].map(([k, n]) => `<button data-tab="${k}" class="${cur === k ? 'on' : ''}">${n}</button>`).join('')}</div>
-        <div class="db">${cur === 'style' ? styleTab() : cur === 'text' ? textTab() : cur === 'coords' ? coordTab() : visTab()}</div>
+        <div class="tabs">${TABS.map(([k, n]) => `<button data-tab="${k}" class="${cur === k ? 'on' : ''}">${n}</button>`).join('')}</div>
+        <div class="db">${cur === 'inputs' ? inputsTab() : cur === 'style' ? styleTab() : cur === 'text' ? textTab() : cur === 'coords' ? coordTab() : visTab()}</div>
         <div class="df"><button class="btn2" id="dTpl">Template ▾</button><span class="sp"></span><button class="btn2" id="dCancel">Cancel</button><button class="btn2 pri" id="dOk">Ok</button></div>`;
-      dlg.hidden = false;
+      dlg.hidden = false; dlg.style.width = IS_FIB(d.type) ? '460px' : '';
       dlg.querySelectorAll('.tabs button').forEach(b => b.onclick = () => { cur = b.dataset.tab; render(); });
       // keys typed in the dialog belong to the dialog, not to TradingView
       dlg.onkeydown = e => { e.stopPropagation(); if (e.key === 'Escape') cancel(); };
       dlg.onkeyup = e => e.stopPropagation();
       const extSel = $d('#xExt'); if (extSel) { extSel.value = d.extL && d.extR ? 'both' : d.extL ? 'left' : d.extR ? 'right' : 'none'; extSel.onchange = () => { d.extL = /left|both/.test(extSel.value); d.extR = /right|both/.test(extSel.value); live(); }; }
       const chk = (id, key) => { const el = $d(id); if (el) el.onchange = () => { d[key] = el.checked; live(); }; };
+      chk('#xCompact', 'compact'); chk('#xLB', 'labelBg'); chk('#xTrend', 'trend'); chk('#xOne', 'oneColor'); chk('#xRev', 'reverse'); chk('#xPrices', 'showPrices');
       chk('#xBorder', 'border'); chk('#xMid', 'mid'); chk('#xBg', 'bg'); chk('#xMP', 'midPoint'); chk('#xPL', 'priceLabels'); chk('#xSA', 'statsAlways'); chk('#xPrice', 'priceLabel'); chk('#xTime', 'timeLabel');
       const selp = (id, key, def) => { const el = $d(id); if (el) { el.value = String(d[key] ?? def); el.onchange = () => { d[key] = isNaN(+el.value) || el.value === '' ? el.value : +el.value; live(); }; } };
       selp('#xStats', 'stats', 'hidden'); selp('#xStatsPos', 'statsPos', 'right'); selp('#xHW', 'width', 20); selp('#xFs', 'fontSize', 14);
+      selp('#xLH', 'labelsH', 'left'); selp('#xLV', 'labelsV', 'middle');
+      const lvm = $d('#xLvMode'), lvc = $d('#xLevels');
+      if (lvm) { lvm.value = d.showLevels === 'percent' ? 'percent' : 'values'; const up = () => { d.showLevels = lvc.checked ? lvm.value : 'none'; live(); }; lvm.onchange = up; lvc.onchange = up; }
+      const bga = $d('#xBgA'); if (bga) bga.oninput = () => { d.fillA = +bga.value / 100; $d('#xBgAv').textContent = bga.value + '%'; live(); };
+      dlg.querySelectorAll('[data-lon]').forEach(cb => cb.onchange = () => { d.levels[+cb.dataset.lon].on = cb.checked; live(); });
+      dlg.querySelectorAll('[data-lval]').forEach(inp => inp.onchange = () => { const v = parseFloat(inp.value); if (isFinite(v)) { d.levels[+inp.dataset.lval].v = v; live(); } });
+      dlg.querySelectorAll('[data-lc]').forEach(s => s.onclick = () => { const i = +s.dataset.lc; drColorPop(s, () => [d.levels[i].c, 1], c => { d.levels[i].c = c; live(); s.querySelector('b').style.background = c; }); });
+      // Inputs (Long / Short Position): moving the entry keeps the target and stop the same number of ticks away, like TradingView
+      if ($d('#xAcct')) {
+        const tk = spec.tick, dir = d.type === 'long' ? 1 : -1, P = v => parseFloat(String(v).replace(/,/g, ''));
+        const fill = () => {
+          $d('#xEP').value = d.pts[0].p; $d('#xTP').value = d.pts[1].p; $d('#xSP').value = d.pts[2].p;
+          $d('#xTT').value = Math.round((d.pts[1].p - d.pts[0].p) * dir / tk); $d('#xST').value = Math.round((d.pts[0].p - d.pts[2].p) * dir / tk);
+        };
+        fill();
+        $d('#xRU').value = d.riskUnit === '$' ? '$' : '%';
+        $d('#xAcct').onchange = () => { d.acct = +$d('#xAcct').value || 0; live(); };
+        $d('#xLot').onchange = () => { d.lot = +$d('#xLot').value || 1; live(); };
+        $d('#xRisk').onchange = () => { d.risk = +$d('#xRisk').value || 0; live(); };
+        $d('#xRU').onchange = () => { d.riskUnit = $d('#xRU').value; live(); };
+        $d('#xEP').onchange = () => { const v = P($d('#xEP').value); if (!isFinite(v)) return fill(); const tt = +$d('#xTT').value, st = +$d('#xST').value; d.pts[0].p = v; d.pts[1].p = drRound(v + dir * tt * tk, tk); d.pts[2].p = drRound(v - dir * st * tk, tk); fill(); live(); };
+        $d('#xTT').onchange = () => { d.pts[1].p = drRound(d.pts[0].p + dir * (+$d('#xTT').value || 0) * tk, tk); fill(); live(); };
+        $d('#xST').onchange = () => { d.pts[2].p = drRound(d.pts[0].p - dir * (+$d('#xST').value || 0) * tk, tk); fill(); live(); };
+        $d('#xTP').onchange = () => { const v = P($d('#xTP').value); if (isFinite(v)) d.pts[1].p = v; fill(); live(); };
+        $d('#xSP').onchange = () => { const v = P($d('#xSP').value); if (isFinite(v)) d.pts[2].p = v; fill(); live(); };
+      }
       selp('#xTV', 'textV', d.type === 'rect' ? 'inside' : 'top'); selp('#xTH', 'textH', d.type === 'rect' ? 'left' : 'right');
       const le = $d('#xLE'); if (le) le.onclick = () => { d.leftEnd = d.leftEnd === 'arrow' ? 'normal' : 'arrow'; live(); render(); };
       const re = $d('#xRE'); if (re) re.onclick = () => { d.rightEnd = d.rightEnd === 'arrow' ? 'normal' : 'arrow'; live(); render(); };
       const bB = $d('#xB'); if (bB) bB.onclick = () => { d.bold = !d.bold; live(); render(); };
       const bI = $d('#xI'); if (bI) bI.onclick = () => { d.italic = !d.italic; live(); render(); };
       const ta = $d('#xTxt'); if (ta) { ta.value = d.text || ''; ta.oninput = () => { d.text = ta.value; live(); }; setTimeout(() => ta.focus(), 0); }
-      dlg.querySelectorAll('.sw').forEach(s => s.onclick = () => {
+      dlg.querySelectorAll('.sw[data-c]').forEach(s => s.onclick = () => {
         const ck = s.dataset.c, ak = s.dataset.a, da = +s.dataset.da;
-        const withLine = ck === 'color' || ck === 'midColor';
+        const withLine = ck === 'color' || ck === 'midColor' || ck === 'trendColor';
         drColorPop(s, () => [d[ck] || d.color, d[ak] ?? da], (c, a) => { d[ck] = c; d[ak] = a; if (ck === 'fill') d.bg = true; live(); s.querySelector('b').style.background = hexRgba(c, a); });
         if (withLine && d.type !== 'hl') {
           // width + style under the palette, like TradingView's line popup
-          const pop = DR.ui.$('#pop'), wk = ck === 'midColor' ? 'midWidth' : 'width', dk = ck === 'midColor' ? 'midDash' : 'dash';
-          pop.insertAdjacentHTML('beforeend', `<div class="pal-row"><span style="font-size:12px;color:#a3a3a3;width:56px">Thickness</span>${[1, 2, 3, 4].map(w => `<button data-w="${w}" class="${(d[wk] || 1) === w ? 'on' : ''}" style="height:26px;min-width:40px"><span style="width:22px;border-top:${w}px solid currentColor"></span></button>`).join('')}</div><div class="pal-row"><span style="font-size:12px;color:#a3a3a3;width:56px">Line style</span>${['solid', 'dashed', 'dotted'].map(v => `<button data-ds="${v}" class="${(d[dk] || (ck === 'midColor' ? 'dashed' : 'solid')) === v ? 'on' : ''}" style="height:26px;min-width:40px"><span style="width:22px;border-top:2px ${v} currentColor"></span></button>`).join('')}</div>`);
+          const pop = DR.ui.$('#pop'), wk = ({ midColor: 'midWidth', trendColor: 'trendWidth' })[ck] || 'width', dk = ({ midColor: 'midDash', trendColor: 'trendDash' })[ck] || 'dash';
+          pop.insertAdjacentHTML('beforeend', `<div class="pal-row"><span style="font-size:12px;color:#a3a3a3;width:56px">Thickness</span>${[1, 2, 3, 4].map(w => `<button data-w="${w}" class="${(d[wk] || 1) === w ? 'on' : ''}" style="height:26px;min-width:40px"><span style="width:22px;border-top:${w}px solid currentColor"></span></button>`).join('')}</div><div class="pal-row"><span style="font-size:12px;color:#a3a3a3;width:56px">Line style</span>${['solid', 'dashed', 'dotted'].map(v => `<button data-ds="${v}" class="${(d[dk] || (ck !== 'color' ? 'dashed' : 'solid')) === v ? 'on' : ''}" style="height:26px;min-width:40px"><span style="width:22px;border-top:2px ${v} currentColor"></span></button>`).join('')}</div>`);
           pop.querySelectorAll('[data-w]').forEach(b => b.onclick = () => { d[wk] = +b.dataset.w; live(); pop.querySelectorAll('[data-w]').forEach(x => x.classList.toggle('on', x === b)); render(); DR.ui.$('#pop').hidden = false; });
           pop.querySelectorAll('[data-ds]').forEach(b => b.onclick = () => { d[dk] = b.dataset.ds; live(); pop.querySelectorAll('[data-ds]').forEach(x => x.classList.toggle('on', x === b)); render(); DR.ui.$('#pop').hidden = false; });
         }
@@ -2840,8 +3110,8 @@
     const $s = DR.ui.$;
     const isHl = d.type === 'hl';
     $s('#fLineBar').style.background = hexRgba(d.color, isHl ? (d.alpha ?? .25) : (d.lineA ?? 1));
-    $s('#fFill').hidden = !(d.type === 'rect' || d.type === 'curve'); $s('#fFillBar').style.background = hexRgba(d.fill || d.color, d.fillA ?? .2);
-    $s('#fText').hidden = isHl; $s('#fTextBar').style.background = hexRgba(d.textColor || d.color, d.textA ?? 1);
+    $s('#fFill').hidden = !(d.type === 'rect' || d.type === 'curve' || d.type === 'prange'); $s('#fFillBar').style.background = hexRgba(d.fill || d.color, d.fillA ?? .2);
+    $s('#fText').hidden = isHl || IS_FIB(d.type); $s('#fTextBar').style.background = hexRgba(d.textColor || d.color, d.textA ?? 1);
     $s('#fW').hidden = isHl; $s('#fWTxt').textContent = `— ${d.width || 1}px`;
     $s('#fDash').hidden = isHl; $s('#fDashTxt').innerHTML = `<span style="display:inline-block;width:22px;border-top:2px ${d.dash || 'solid'} currentColor;vertical-align:middle"></span>`;
     $s('#fLock').innerHTML = SVG(d.locked ? UI_ICONS.lock : UI_ICONS.unlock); $s('#fLock').title = d.locked ? 'Unlock' : 'Lock';
@@ -6616,7 +6886,7 @@
       $('#dCountSub').textContent = WICK_HOME ? `Across ${syms} symbol${syms === 1 ? '' : 's'}.` : `${here} on ${sym || 'this chart'} · ${syms} symbol${syms === 1 ? '' : 's'} in all`;
       $('#dClearSym').hidden = WICK_HOME || !here;
       if (WICK_HOME) $('#dFound').textContent = 'Shown in TradingView (Chrome or the TradingView app).';
-      else { const f = drDetectTv(); $('#dFound').textContent = Object.keys(DRAW_TOOLS).map(t => `${DRAW_TOOLS[t].name} ${f[t] ? '✓' : '✗'}`).join(' · ') + (Object.keys(f).length < 7 ? ' — tools with ✗ aren\'t on your toolbars right now (or have a different name); use Wick\'s toolbar for those.' : ''); }
+      else { const f = drDetectTv(); $('#dFound').textContent = Object.keys(DRAW_TOOLS).map(t => `${DRAW_TOOLS[t].name} ${f[t] ? '✓' : '✗'}`).join(' · ') + (Object.keys(f).length < Object.keys(DRAW_TOOLS).length ? ' — tools with ✗ aren\'t on your toolbars right now (or have a different name); use Wick\'s toolbar for those.' : ''); }
     }
     $('#dOn').onchange = e => { S.draw.on = e.target.checked; save('draw'); drToolbarSync(); drKick(); };
     $('#dUseTv').onchange = e => { S.draw.useTv = e.target.checked; save('draw'); drMarkTvButtons(); };

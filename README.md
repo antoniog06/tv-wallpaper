@@ -30,15 +30,18 @@ The app updates itself (it checks GitHub Releases), and the Wick script inside T
 
 ## Drawings (unlimited)
 
-TradingView's free plan caps how many drawings a chart can have. Wick draws its own versions of these tools on its own layer over the chart, so they don't count toward that cap: **Horizontal Ray, Vertical Line, Cross Line, Trend Line, Rectangle, Curve, Highlighter**. They look like TradingView's (same default colors and handles), stay pinned to price and time when you scroll, zoom or change timeframe, and are kept per symbol and shared between Chrome and the TradingView app through the Wick app.
+TradingView's free plan caps how many drawings a chart can have. Wick draws its own versions of these tools on its own layer over the chart, so they don't count toward that cap: **Horizontal Ray, Vertical Line, Cross Line, Trend Line, Rectangle, Curve, Highlighter, Long Position, Short Position, Price Range, Fib Retracement, Trend-Based Fib Extension**. They look like TradingView's (same default colors and handles), stay pinned to price and time when you scroll, zoom or change timeframe, and are kept per symbol and shared between Chrome and the TradingView app through the Wick app.
 
-- TradingView's own buttons for these tools (and Alt+J / Alt+V / Alt+C / Alt+T / Alt+Shift+R) start Wick's version. Turn this off in **Drawings** to get TradingView's versions back.
+- TradingView's own buttons for these tools (and Alt+J / Alt+V / Alt+C / Alt+T / Alt+F / Alt+Shift+R) start Wick's version. Turn this off in **Drawings** to get TradingView's versions back.
 - Or use the small Wick drawing toolbar on the chart (drag it by its handle; hide it in Drawings).
 - Click a drawing to select it, and you get TradingView's floating toolbar: template, line color, background, text color (TradingView's palette with opacity), width, line style, settings, lock, remove, and More (clone, bring to front, send to back, hide). **Del** removes, **Esc** cancels.
 - Double-click a drawing (or the settings button) for TradingView's Settings dialog: **Style** (extend, border, middle line, background; trend line ends, middle point, price labels and stats), **Text** (color, size, bold, italic, alignment), **Coordinates** and **Visibility** (which timeframes it shows on). Cancel puts everything back.
 - Templates are Wick's own (save, apply, apply default); your TradingView drawing templates aren't touched.
 - The Drawings page shows which of TradingView's buttons Wick found on your toolbars.
-- Coming next: Long/Short Position, Price Range, Fib Retracement, Fib Extension; then Gann Box and Fixed Range Volume Profile.
+- **Long / Short Position**: one click places it. Drag the entry, target, stop or right edge. Shows Target / Stop (points, %, ticks, amount), Qty, Risk/Reward and open or closed P&L once price trades through it. **Inputs** tab: account size, lot size, risk (% or USD), entry price, profit and stop level in ticks or price. Tick size and $ per tick come from your broker, or Wick's futures table (NQ, MNQ, ES, MGC…).
+- **Price Range**: change in points, % and ticks.
+- **Fib Retracement** and **Trend-Based Fib Extension** (3 clicks): TradingView's 24 levels and colors, trend line, extend, background, reverse, prices / levels / percents and label position.
+- Coming next: Gann Box and Fixed Range Volume Profile.
 
 ## TradingView desktop app without the Wick app (PowerShell launcher)
 
