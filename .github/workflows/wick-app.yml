@@ -32,7 +32,7 @@ jobs:
       - name: Files
         run: Get-ChildItem dist -File | Format-Table Name, Length
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.2.2
         with:
           tag_name: v${{ steps.v.outputs.version }}
           name: Wick ${{ steps.v.outputs.version }}
