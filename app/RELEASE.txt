@@ -1,0 +1,1 @@
+Wick 1.3.0 — drawings round 2 (Long/Short Position, Price Range, Fib Retracement, Trend-Based Fib Extension).
