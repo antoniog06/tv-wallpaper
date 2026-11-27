@@ -41,6 +41,9 @@ TradingView's free plan caps how many drawings a chart can have. Wick draws its 
 - **Long / Short Position**: one click places it. Drag the entry, target, stop or right edge. Shows Target / Stop (points, %, ticks, amount), Qty, Risk/Reward and open or closed P&L once price trades through it. **Inputs** tab: account size, lot size, risk (% or USD), entry price, profit and stop level in ticks or price. Tick size and $ per tick come from your broker, or Wick's futures table (NQ, MNQ, ES, MGC…).
 - **Price Range**: change in points, % and ticks.
 - **Fib Retracement** and **Trend-Based Fib Extension** (3 clicks): TradingView's 24 levels and colors, trend line, extend, background, reverse, prices / levels / percents and label position.
+- **Your drawings** (top of the Drawings page): how many Wick drawings you have on each symbol and what they are, with Open, Hide and Remove per symbol, plus Hide all / Remove all. It also shows how many of TradingView's own drawings are on the chart (those count toward its cap).
+- Wick's drawing toolbar has TradingView's **eye** (hide all Wick drawings) and **trash** (remove on this symbol / everywhere) at the end.
+- Colors: TradingView's palette, your **custom colors** (the **+** opens the hex / color square picker; Add saves it to the row) and opacity.
 - Coming next: Gann Box and Fixed Range Volume Profile.
 
 ## TradingView desktop app without the Wick app (PowerShell launcher)
